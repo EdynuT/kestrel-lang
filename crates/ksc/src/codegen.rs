@@ -415,6 +415,12 @@ impl<'a> ProcGen<'a> {
                 }
                 self.emit(Op::Call { f: *pid as u32, argc: args.len() as u8 });
             }
+            HExprKind::Builtin(Builtin::Print, pieces) => {
+                for p in pieces {
+                    self.expr(p)?;
+                    self.emit(Op::Print);
+                }
+            }
             HExprKind::Builtin(b, args) => {
                 for a in args {
                     self.expr(a)?;

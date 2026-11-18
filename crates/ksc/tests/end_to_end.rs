@@ -28,6 +28,11 @@ fn main_out(body: &str) -> String {
 }
 
 #[test]
+fn print_concatenation() {
+    assert_eq!(main_out(r#"name: text = "Kestrel"; print("Hello, " + name + "!" + "\n");"#), "Hello, Kestrel!\n");
+}
+
+#[test]
 fn spec_example() {
     let src = r#"
 proc sum(v: lent [int], k: int) -> int {

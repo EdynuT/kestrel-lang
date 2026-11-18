@@ -60,7 +60,7 @@ valor = (mantissa / 3²⁰) × 3^expoente
 - É um literal imutável guardado no pool de strings do `.ksb`, como o `const char*` do C. É copiável e **não precisa de `burn`**.
 - `s[i]` devolve o `tryte` da posição `i`. **O índice começa em 0**, como em C (exceção à indexação simétrica dos buffers). Índice fora de `0 .. len(s)-1` dispara **Trap**.
 - `len(s)` devolve o tamanho como `int`.
-- `print(s)` imprime o texto.
+- `print(s)` imprime o texto. Dentro do `print`, `+` junta textos: `print("Olá, " + nome + "\n")`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo**. Fora do `print`, `+` com texto também é erro (o texto não pode ser criado em tempo de execução).
 - Cada caractere precisa existir na tabela §4. Um caractere fora dela, como `@` ou `ç`, é **erro de compilação**.
 - Para montar texto em tempo de execução, use um `own [tryte]`, como um array de `char` em C.
 

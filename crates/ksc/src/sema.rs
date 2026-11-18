@@ -448,7 +448,7 @@ impl Checker {
             (x, y) if x == y => x,
             (x, y) => {
                 return Err(err(format!("cannot mix {x} and {y}"), ha.span.to(hb.span))
-                    .with_note("convert one side with `as real` or `as int`"));
+                    .with_note("convert one side with `(real) x` or `(int) x`"));
             }
         };
         Ok((ha, hb, ty))
@@ -585,7 +585,13 @@ impl Checker {
                 (ha, hb, ty)
             }
             _ => {
-                let (ha, hb, ty) = self.numeric_pair(a, b, want)?;
+                let (ha, hb, ty) = self.numeric_pair(a, b, want).map_err(|d| {
+                    if op == BinOp::Add && d.message.ends_with("found text") {
+                        d.with_note("text can be joined with `+` only inside `print`")
+                    } else {
+                        d
+                    }
+                })?;
                 if op == BinOp::Mod && ty == Type::Scalar(Scalar::Real) {
                     return Err(err("`%` works on integers, not reals", span));
                 }
@@ -593,6 +599,27 @@ impl Checker {
             }
         };
         Ok(hx(HExprKind::Binary(op, Box::new(ha), Box::new(hb)), ty, span))
+    }
+
+    /// Flattens `print("a" + x + "b")` into its text pieces; every piece must be text.
+    fn text_pieces(&mut self, e: &Expr, out: &mut Vec<HExpr>) -> R<()> {
+        let ExprKind::Binary(BinOp::Add, a, b) = &e.kind else {
+            out.push(self.expect(e, Type::Text)?);
+            return Ok(());
+        };
+        for side in [a, b] {
+            if matches!(side.kind, ExprKind::Binary(BinOp::Add, ..)) {
+                self.text_pieces(side, out)?;
+                continue;
+            }
+            let h = self.expr(side, Some(Type::Text))?;
+            if h.ty != Type::Text {
+                return Err(err(format!("`+` joins text with text only, found {}", h.ty), h.span)
+                    .with_note("print numbers with `show(x)`"));
+            }
+            out.push(h);
+        }
+        Ok(())
     }
 
     fn call(&mut self, name: &ast::Ident, args: &[Expr], span: Span) -> R<HExpr> {
@@ -609,8 +636,9 @@ impl Checker {
         match name.name.as_str() {
             "print" => {
                 arity(1)?;
-                let a = self.expect(&args[0], text)?;
-                return Ok(builtin(Builtin::Print, vec![a], Type::Void));
+                let mut pieces = Vec::new();
+                self.text_pieces(&args[0], &mut pieces)?;
+                return Ok(builtin(Builtin::Print, pieces, Type::Void));
             }
             "show" => {
                 arity(1)?;
@@ -810,6 +838,14 @@ proc main() -> int {
         assert!(err_in("x := print(\"a\");").contains("has no value"));
         assert!(err_in("emit(1000);").contains("does not fit in a tryte"));
         ok("emit('A'); show(1.5); show(\"hi\"); x := input(); dump(\"here\");");
+    }
+
+    #[test]
+    fn text_concat() {
+        ok("name: text = \"Ana\"; print(\"hi \" + name + \"!\\n\");");
+        assert!(err_in("x := 5; print(\"x = \" + x);").contains("joins text with text only, found int"));
+        assert!(err_in("t := \"a\" + \"b\";").contains("only inside `print`"));
+        assert!(err_in("print(\"a\" + 1.5);").contains("found real"));
     }
 
     #[test]

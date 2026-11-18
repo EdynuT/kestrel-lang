@@ -1,0 +1,506 @@
+//! Lexer: turns `.ks` source text into tokens (SPEC §2, §11).
+//!
+//! Instruction mnemonics (`add`, `mov`, ...) and built-ins (`print`, `show`,
+//! ...) are plain identifiers; the parser recognizes them by context, so they
+//! stay usable as variable names.
+
+use std::fmt;
+
+use kestrel_core::bet::{parse_hepta, parse_trits, LiteralError};
+use kestrel_core::charset::char_to_tryte;
+use kestrel_core::word::WORD_MAX;
+use kestrel_core::{Real, Word};
+
+use crate::diag::{Diagnostic, Span};
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Tok {
+    /// Integer literal: decimal, `0t...` or `0v...` (may be NaT).
+    Num(Word),
+    RealLit(Real),
+    /// Character literal, already converted to its tryte value.
+    Char(i64),
+    Str(String),
+    Ident(String),
+    /// Register `@R-4` .. `@R+4`, stored as -4..=4.
+    Reg(i8),
+
+    // Keywords
+    Proc,
+    Yield,
+    Const,
+    Claim,
+    Burn,
+    Give,
+    Lend,
+    Own,
+    Lent,
+    Tri,
+    Walk,
+    In,
+    Span,
+    On,
+    NaT,
+    Break,
+    Continue,
+    As,
+    Trit,
+    Tryte,
+    Word,
+    Real,
+    Text,
+
+    // Operators and punctuation
+    Plus,
+    Minus,
+    Star,
+    StarStar,
+    Slash,
+    Percent,
+    Shl,
+    Shr,
+    Spaceship,
+    AndAnd,
+    OrOr,
+    Tilde,
+    Eq,
+    ColonEq,
+    Colon,
+    Comma,
+    Semi,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    DotDot,
+    FatArrow,
+    Arrow,
+    Eof,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Token {
+    pub tok: Tok,
+    pub span: Span,
+}
+
+const KEYWORDS: &[(&str, Tok)] = &[
+    ("proc", Tok::Proc),
+    ("yield", Tok::Yield),
+    ("const", Tok::Const),
+    ("claim", Tok::Claim),
+    ("burn", Tok::Burn),
+    ("give", Tok::Give),
+    ("lend", Tok::Lend),
+    ("own", Tok::Own),
+    ("lent", Tok::Lent),
+    ("tri", Tok::Tri),
+    ("walk", Tok::Walk),
+    ("in", Tok::In),
+    ("span", Tok::Span),
+    ("on", Tok::On),
+    ("NaT", Tok::NaT),
+    ("break", Tok::Break),
+    ("continue", Tok::Continue),
+    ("as", Tok::As),
+    ("trit", Tok::Trit),
+    ("tryte", Tok::Tryte),
+    ("word", Tok::Word),
+    ("real", Tok::Real),
+    ("text", Tok::Text),
+];
+
+/// Operators, longest first so that `<=>` wins over `<<`.
+const OPERATORS: &[(&str, Tok)] = &[
+    ("<=>", Tok::Spaceship),
+    ("**", Tok::StarStar),
+    ("<<", Tok::Shl),
+    (">>", Tok::Shr),
+    ("&&", Tok::AndAnd),
+    ("||", Tok::OrOr),
+    (":=", Tok::ColonEq),
+    ("..", Tok::DotDot),
+    ("=>", Tok::FatArrow),
+    ("->", Tok::Arrow),
+    ("+", Tok::Plus),
+    ("-", Tok::Minus),
+    ("*", Tok::Star),
+    ("/", Tok::Slash),
+    ("%", Tok::Percent),
+    ("~", Tok::Tilde),
+    ("=", Tok::Eq),
+    (":", Tok::Colon),
+    (",", Tok::Comma),
+    (";", Tok::Semi),
+    ("(", Tok::LParen),
+    (")", Tok::RParen),
+    ("{", Tok::LBrace),
+    ("}", Tok::RBrace),
+    ("[", Tok::LBracket),
+    ("]", Tok::RBracket),
+];
+
+impl fmt::Display for Tok {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Tok::Num(w) => write!(f, "number `{w}`"),
+            Tok::RealLit(r) => write!(f, "real `{r}`"),
+            Tok::Char(_) => f.write_str("character literal"),
+            Tok::Str(_) => f.write_str("string literal"),
+            Tok::Ident(name) => write!(f, "`{name}`"),
+            Tok::Reg(r) => write!(f, "register `@{}`", reg_name(*r)),
+            Tok::Eof => f.write_str("end of file"),
+            other => {
+                let text = KEYWORDS
+                    .iter()
+                    .chain(OPERATORS)
+                    .find(|(_, t)| t == other)
+                    .map_or("?", |(s, _)| s);
+                write!(f, "`{text}`")
+            }
+        }
+    }
+}
+
+/// `R-4` .. `R0` .. `R+4`.
+pub fn reg_name(r: i8) -> String {
+    match r {
+        0 => "R0".to_string(),
+        r if r > 0 => format!("R+{r}"),
+        r => format!("R{r}"),
+    }
+}
+
+pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
+    let mut lx = Lexer { src, pos: 0, tokens: Vec::new() };
+    lx.run()?;
+    Ok(lx.tokens)
+}
+
+struct Lexer<'a> {
+    src: &'a str,
+    pos: usize,
+    tokens: Vec<Token>,
+}
+
+impl Lexer<'_> {
+    fn peek(&self) -> Option<char> {
+        self.src[self.pos..].chars().next()
+    }
+
+    fn peek_at(&self, n: usize) -> Option<char> {
+        self.src[self.pos..].chars().nth(n)
+    }
+
+    fn bump(&mut self) -> Option<char> {
+        let c = self.peek()?;
+        self.pos += c.len_utf8();
+        Some(c)
+    }
+
+    fn take_while(&mut self, f: impl Fn(char) -> bool) -> String {
+        let start = self.pos;
+        while self.peek().is_some_and(&f) {
+            self.bump();
+        }
+        self.src[start..self.pos].to_string()
+    }
+
+    fn push(&mut self, tok: Tok, start: usize) {
+        self.tokens.push(Token { tok, span: Span::new(start, self.pos) });
+    }
+
+    fn err(&self, msg: impl Into<String>, start: usize) -> Diagnostic {
+        Diagnostic::new(msg, Span::new(start, self.pos.max(start + 1)))
+    }
+
+    fn run(&mut self) -> Result<(), Diagnostic> {
+        while let Some(c) = self.peek() {
+            let start = self.pos;
+            match c {
+                _ if c.is_whitespace() => {
+                    self.bump();
+                }
+                '/' if self.peek_at(1) == Some('/') => {
+                    self.take_while(|c| c != '\n');
+                }
+                '0'..='9' => self.number()?,
+                'A'..='Z' | 'a'..='z' | '_' => {
+                    let word = self.take_while(|c| c.is_ascii_alphanumeric() || c == '_');
+                    let tok = KEYWORDS
+                        .iter()
+                        .find(|(k, _)| *k == word.as_str())
+                        .map_or_else(|| Tok::Ident(word.clone()), |(_, t)| t.clone());
+                    self.push(tok, start);
+                }
+                '@' => self.register()?,
+                '\'' => self.char_lit()?,
+                '"' => self.string_lit()?,
+                _ => {
+                    let rest = &self.src[self.pos..];
+                    let Some((text, tok)) = OPERATORS.iter().find(|(op, _)| rest.starts_with(op)) else {
+                        self.bump();
+                        let d = self.err(format!("unexpected character `{c}`"), start);
+                        return Err(match c {
+                            '!' => d.with_note("ownership uses `give x` and `burn x`; negation is `~x` or `-x`"),
+                            '<' | '>' => d.with_note("comparisons use the three-way operator `a <=> b`"),
+                            _ => d,
+                        });
+                    };
+                    self.pos += text.len();
+                    self.push(tok.clone(), start);
+                }
+            }
+        }
+        self.push(Tok::Eof, self.pos);
+        Ok(())
+    }
+
+    fn number(&mut self) -> Result<(), Diagnostic> {
+        let start = self.pos;
+        let prefix = (self.peek(), self.peek_at(1));
+        let tok = if prefix == (Some('0'), Some('t')) {
+            self.pos += 2;
+            let body = self.take_while(|c| matches!(c, '+' | '-' | '0' | '?'));
+            Tok::Num(parse_trits(&body).map_err(|e| self.literal_err(e, "0t", start))?)
+        } else if prefix == (Some('0'), Some('v')) {
+            self.pos += 2;
+            let body = self.take_while(|c| c.is_ascii_alphanumeric() || c == '?');
+            Tok::Num(parse_hepta(&body).map_err(|e| self.literal_err(e, "0v", start))?)
+        } else {
+            let int = self.take_while(|c| c.is_ascii_digit());
+            // `1.5` is a real, but `1..5` is a range.
+            if self.peek() == Some('.') && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
+                self.bump();
+                let frac = self.take_while(|c| c.is_ascii_digit());
+                let r = Real::from_decimal(&int, &frac)
+                    .ok_or_else(|| self.err("real literal has too many digits", start))?;
+                if r.is_nat() {
+                    return Err(self.err("real literal is too large (limit about 10^174)", start));
+                }
+                Tok::RealLit(r)
+            } else {
+                let v: i128 = int.parse().unwrap_or(i128::MAX);
+                if v > i128::from(WORD_MAX) {
+                    return Err(self
+                        .err("integer literal does not fit in a word", start)
+                        .with_note(format!("a word holds -{WORD_MAX} ..= {WORD_MAX}")));
+                }
+                Tok::Num(Word::new(v as i64))
+            }
+        };
+        if self.peek().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+            self.take_while(|c| c.is_ascii_alphanumeric() || c == '_');
+            return Err(self.err("invalid character right after a number", start));
+        }
+        self.push(tok, start);
+        Ok(())
+    }
+
+    fn literal_err(&self, e: LiteralError, prefix: &str, start: usize) -> Diagnostic {
+        let msg = match e {
+            LiteralError::Empty => format!("`{prefix}` literal has no digits"),
+            LiteralError::TooLong { max, got } => format!("`{prefix}` literal has {got} digits (at most {max})"),
+            LiteralError::BadDigit(c) => format!("`{c}` is not a valid digit in a `{prefix}` literal"),
+        };
+        let note = if prefix == "0t" { "trits are `-`, `0`, `+` and `?`" } else { "digits are `0`, `A`-`M`, `a`-`m` and `?`" };
+        self.err(msg, start).with_note(note)
+    }
+
+    fn register(&mut self) -> Result<(), Diagnostic> {
+        let start = self.pos;
+        self.bump(); // '@'
+        let name = self.take_while(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-');
+        let reg = match name.as_str() {
+            "R0" => Some(0),
+            _ => name
+                .strip_prefix('R')
+                .and_then(|r| r.parse::<i8>().ok().filter(|_| r.starts_with(['+', '-'])))
+                .filter(|r| (-4..=4).contains(r) && *r != 0),
+        };
+        match reg {
+            Some(r) => {
+                self.push(Tok::Reg(r), start);
+                Ok(())
+            }
+            None => Err(self
+                .err(format!("`@{name}` is not a register"), start)
+                .with_note("registers are @R-4, @R-3, @R-2, @R-1, @R0, @R+1, @R+2, @R+3, @R+4")),
+        }
+    }
+
+    /// One character of a char or string literal, with `\n` and `\t` escapes.
+    fn literal_char(&mut self, quote: char, start: usize) -> Result<Option<char>, Diagnostic> {
+        let c_start = self.pos;
+        let c = match self.bump() {
+            None | Some('\n') => {
+                let kind = if quote == '"' { "string" } else { "character" };
+                return Err(self.err(format!("unterminated {kind} literal"), start));
+            }
+            Some(c) if c == quote => return Ok(None),
+            Some('\\') => match self.bump() {
+                Some('n') => '\n',
+                Some('t') => '\t',
+                other => {
+                    let shown = other.map_or(String::new(), |c| c.to_string());
+                    return Err(self.err(format!("unknown escape `\\{shown}`"), c_start).with_note("escapes are `\\n` and `\\t`"));
+                }
+            },
+            Some(c) => c,
+        };
+        if char_to_tryte(c).is_none() {
+            return Err(self
+                .err(format!("character {c:?} is not in the Kestrel character table"), c_start)
+                .with_note("allowed: letters, digits, space, \\n, \\t and . , : ; ! ? - + / _ = ( ) [ ]"));
+        }
+        Ok(Some(c))
+    }
+
+    fn char_lit(&mut self) -> Result<(), Diagnostic> {
+        let start = self.pos;
+        self.bump(); // opening quote
+        let Some(c) = self.literal_char('\'', start)? else {
+            return Err(self.err("empty character literal", start));
+        };
+        if self.bump() != Some('\'') {
+            return Err(self.err("character literal must hold exactly one character", start));
+        }
+        self.push(Tok::Char(char_to_tryte(c).expect("checked by literal_char")), start);
+        Ok(())
+    }
+
+    fn string_lit(&mut self) -> Result<(), Diagnostic> {
+        let start = self.pos;
+        self.bump(); // opening quote
+        let mut s = String::new();
+        while let Some(c) = self.literal_char('"', start)? {
+            s.push(c);
+        }
+        self.push(Tok::Str(s), start);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn toks(src: &str) -> Vec<Tok> {
+        lex(src).unwrap().into_iter().map(|t| t.tok).collect()
+    }
+
+    fn err(src: &str) -> String {
+        lex(src).unwrap_err().message
+    }
+
+    fn n(v: i64) -> Tok {
+        Tok::Num(Word::new(v))
+    }
+
+    fn id(s: &str) -> Tok {
+        Tok::Ident(s.into())
+    }
+
+    #[test]
+    fn declaration_with_register() {
+        assert_eq!(
+            toks("acc: word @R0 = 0; // comment"),
+            vec![id("acc"), Tok::Colon, Tok::Word, Tok::Reg(0), Tok::Eq, n(0), Tok::Semi, Tok::Eof]
+        );
+        assert_eq!(toks("@R-4 @R+4 @R+1"), vec![Tok::Reg(-4), Tok::Reg(4), Tok::Reg(1), Tok::Eof]);
+    }
+
+    #[test]
+    fn instruction_and_tri() {
+        assert_eq!(
+            toks("add acc, v[i];"),
+            vec![id("add"), id("acc"), Tok::Comma, id("v"), Tok::LBracket, id("i"), Tok::RBracket, Tok::Semi, Tok::Eof]
+        );
+        assert_eq!(
+            toks("tri s <=> 10 { - => x, 0 => y, + => z, }")[..8],
+            [Tok::Tri, id("s"), Tok::Spaceship, n(10), Tok::LBrace, Tok::Minus, Tok::FatArrow, id("x")]
+        );
+    }
+
+    #[test]
+    fn numbers() {
+        assert_eq!(toks("0t+0- 0vAm 42"), vec![n(8), n(14), n(42), Tok::Eof]);
+        assert_eq!(toks("0t+?"), vec![Tok::Num(Word::NAT), Tok::Eof]);
+        assert_eq!(toks("1..5"), vec![n(1), Tok::DotDot, n(5), Tok::Eof]);
+        assert_eq!(toks("1.5"), vec![Tok::RealLit(Real::from_decimal("1", "5").unwrap()), Tok::Eof]);
+        assert_eq!(toks("3812798742493"), vec![n(WORD_MAX), Tok::Eof]);
+        assert_eq!(toks("2 ** 3"), vec![n(2), Tok::StarStar, n(3), Tok::Eof]);
+        assert_eq!(toks("proc f() -> word"), vec![Tok::Proc, id("f"), Tok::LParen, Tok::RParen, Tok::Arrow, Tok::Word, Tok::Eof]);
+    }
+
+    #[test]
+    fn text_and_chars() {
+        assert_eq!(toks(r#"print("Hi\n");"#)[2], Tok::Str("Hi\n".into()));
+        assert_eq!(toks("'A' 'a' ' ' '\\n'"), vec![Tok::Char(1), Tok::Char(-1), Tok::Char(0), Tok::Char(-27), Tok::Eof]);
+    }
+
+    #[test]
+    fn errors() {
+        assert!(err("3812798742494").contains("does not fit in a word"));
+        assert!(err("0t+x").contains("right after a number"));
+        assert!(err("0vN").contains("`N` is not a valid digit"));
+        assert!(err("0t").contains("no digits"));
+        assert!(err("12abc").contains("right after a number"));
+        assert!(err("@R5").contains("not a register"));
+        assert!(err("@R1").contains("not a register"));
+        assert!(err(r#""user@mail""#).contains("'@' is not in the Kestrel character table"));
+        assert!(err(r#""ção""#).contains("'ç'"));
+        assert!(err(r#""open"#).contains("unterminated string"));
+        assert!(err("'ab'").contains("exactly one character"));
+        assert!(err(r#""\q""#).contains("unknown escape"));
+        let d = lex("x != y").unwrap_err();
+        assert_eq!(d.message, "unexpected character `!`");
+        assert!(d.note.unwrap().contains("give"));
+        assert!(lex("a < b").unwrap_err().note.unwrap().contains("<=>"));
+    }
+
+    #[test]
+    fn spans_cover_tokens() {
+        let t = lex("x := 0t+0-;").unwrap();
+        assert_eq!(t[0].span, Span::new(0, 1));
+        assert_eq!(t[1].span, Span::new(2, 4));
+        assert_eq!(t[2].span, Span::new(5, 10));
+    }
+
+    #[test]
+    fn spec_example_lexes() {
+        let src = r#"
+proc sum(v: lent [word], k: word) -> word {
+    acc: word @R0 = 0;
+    walk i in span k {
+        add acc, v[i];             // acc = acc + v[i]
+    }
+    yield acc;
+}
+
+proc main() -> word {
+    b: own [word] = claim 5;       // indices -2..+2
+    walk i in span 2 {
+        b[i] = i * i;
+    }
+
+    s: word @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
+    shl3 s, 1;                     // s = s * 3
+
+    tri cmp3 s, 10 {
+        - => print("less"),
+        0 => print("equal"),
+        + => print("greater"),
+    }
+    burn b;
+    yield 0;
+}
+"#;
+        let t = toks(src);
+        assert_eq!(t.last(), Some(&Tok::Eof));
+        assert!(t.contains(&Tok::Reg(1)));
+        assert_eq!(t.iter().filter(|t| **t == Tok::Burn).count(), 2);
+    }
+}

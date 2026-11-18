@@ -2,6 +2,7 @@
 //! the BET-VM instruction set and the `.ksb` bytecode format.
 
 pub mod bet;
+pub mod charset;
 pub mod isa;
 pub mod ksb;
 pub mod real;

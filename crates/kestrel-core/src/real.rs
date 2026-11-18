@@ -281,22 +281,22 @@ impl fmt::Display for Real {
     /// (0.5, for example, is not exact in ternary and is stored as 0.50000000014).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.is_nat() {
-            return f.write_str("NaT");
+            return f.pad("NaT");
         }
         let x = self.to_f64();
         if x == 0.0 {
-            return f.write_str("0.0");
+            return f.pad("0.0");
         }
         let mag = x.abs().log10().floor() as i32;
         if (-4..9).contains(&mag) {
             let s = format!("{:.*}", (8 - mag).max(0) as usize, x);
             let s = s.trim_end_matches('0');
-            if s.ends_with('.') { write!(f, "{s}0") } else { f.write_str(s) }
+            if s.ends_with('.') { f.pad(&format!("{s}0")) } else { f.pad(s) }
         } else {
             let s = format!("{x:.8e}");
             let (mant, exp) = s.split_once('e').expect("scientific format");
             let mant = mant.trim_end_matches('0').trim_end_matches('.');
-            write!(f, "{mant}e{exp}")
+            f.pad(&format!("{mant}e{exp}"))
         }
     }
 }

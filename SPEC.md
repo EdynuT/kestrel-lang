@@ -285,7 +285,7 @@ s: word = sum(lend b, 2) on NaT { burn b; yield -1; };
 |---|---|
 | `print(s)` | Imprime um `text` |
 | `len(s)` | Tamanho de um `text` |
-| `show(x)` | Imprime um valor em decimal, `0t` e `0v` |
+| `show(x)` | Imprime um valor em decimal, sem quebra de linha. As formas `0t` e `0v` aparecem no `dump` |
 | `emit(c)` | Imprime um `tryte` como caractere (tabela §4) |
 | `input()` | Lê um `word` (decimal, `0t` ou `0v`). Entrada inválida vira NaT |
 | `dump("label")` | Mostra os registradores e o heap |

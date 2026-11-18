@@ -190,8 +190,8 @@ impl fmt::Debug for Word {
 impl fmt::Display for Word {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.get() {
-            Some(v) => write!(f, "{v}"),
-            None => f.write_str("NaT"),
+            Some(v) => f.pad(&v.to_string()),
+            None => f.pad("NaT"),
         }
     }
 }

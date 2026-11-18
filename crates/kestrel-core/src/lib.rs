@@ -2,10 +2,12 @@
 //! the BET-VM instruction set and the `.ksb` bytecode format.
 
 pub mod bet;
+pub mod isa;
 pub mod real;
 pub mod word;
 
 pub use bet::Word27;
+pub use isa::Op;
 pub use real::Real;
 pub use word::Word;
 

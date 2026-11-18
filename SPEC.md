@@ -301,7 +301,7 @@ s: word = sum(lend b, 2) on NaT { burn b; yield -1; };
 
 | Categoria | Opcodes |
 |---|---|
-| Pilha e locais | `PUSHC k`, `LOAD s`, `STORE s`, `MOVE s`, `POP` |
+| Pilha e locais | `PUSHC k` (word), `PUSHR k` (real), `LOAD s`, `STORE s`, `MOVE s`, `POP` |
 | ALU (inteira) | `ADD`, `SUB`, `MUL`, `DIV`, `MOD`, `POW`, `NEG`, `SHL3`, `SHR3`, `CMP3`, `KAND`, `KOR` |
 | ALU (real) | `FADD`, `FSUB`, `FMUL`, `FDIV`, `FPOW`, `FNEG`, `FCMP3` |
 | Texto | `PUSHS k`, `TLEN`, `TIDX` |
@@ -309,6 +309,8 @@ s: word = sum(lend b, 2) on NaT { burn b; yield -1; };
 | Memória | `ALLOC`, `LDIDX`, `STIDX`, `PURGE s` |
 | Fluxo | `JMP a`, `JNAT a`, `BR3 a- a0 a+`, `CALL f n`, `RET` |
 | E/S | `INPUT`, `EMIT`, `PRINT`, `SHOW`, `DUMP str` |
+
+**Codificação:** cada instrução tem 1 byte de opcode seguido de operandos de tamanho fixo, em little-endian. Os tipos são `k`, `f` e `a` (`u32`), `s` (`u16`) e `n` (`u8`). As faixas são: pilha `0x0_`, ALU inteira `0x1_`, ALU real `0x2_`, texto e conversão `0x3_`, memória `0x4_`, fluxo `0x5_` e E/S `0x6_`. A tabela completa está em `crates/kestrel-core/src/isa.rs`.
 
 ## 10. Formato `.ksb`
 

@@ -355,7 +355,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
     fn pop_word(&mut self) -> Result<Word, String> {
         match self.pop()? {
             Value::Word(w) => Ok(w),
-            other => Err(format!("expected a word, found {other:?}")),
+            other => Err(format!("expected an int, found {other:?}")),
         }
     }
 

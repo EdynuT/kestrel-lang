@@ -46,7 +46,7 @@ pub struct Ident {
 pub enum Scalar {
     Trit,
     Tryte,
-    Word,
+    Int,
     Real,
 }
 
@@ -54,7 +54,7 @@ pub enum Scalar {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Elem {
     Tryte,
-    Word,
+    Int,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,12 +73,12 @@ impl Scalar {
         self != Scalar::Real
     }
 
-    /// Integer width rank: trit < tryte < word.
+    /// Integer width rank: trit < tryte < int.
     pub fn rank(self) -> u8 {
         match self {
             Scalar::Trit => 0,
             Scalar::Tryte => 1,
-            Scalar::Word | Scalar::Real => 2,
+            Scalar::Int | Scalar::Real => 2,
         }
     }
 }
@@ -87,7 +87,7 @@ impl Elem {
     pub fn scalar(self) -> Scalar {
         match self {
             Elem::Tryte => Scalar::Tryte,
-            Elem::Word => Scalar::Word,
+            Elem::Int => Scalar::Int,
         }
     }
 }
@@ -107,7 +107,7 @@ impl std::fmt::Display for Scalar {
         f.write_str(match self {
             Scalar::Trit => "trit",
             Scalar::Tryte => "tryte",
-            Scalar::Word => "word",
+            Scalar::Int => "int",
             Scalar::Real => "real",
         })
     }
@@ -247,7 +247,7 @@ pub enum ExprKind {
     Var(String),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
-    As(Box<Expr>, Scalar),
+    Cast(Box<Expr>, Scalar),
     Index(Box<Expr>, Box<Expr>),
     Call { name: Ident, args: Vec<Expr> },
     Claim(Box<Expr>),

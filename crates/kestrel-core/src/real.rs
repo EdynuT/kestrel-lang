@@ -104,7 +104,7 @@ impl Real {
         }
     }
 
-    /// `r as word`: truncates toward zero. Out of range is NaT.
+    /// `r as int`: truncates toward zero. Out of range is NaT.
     pub fn to_word(self) -> Word {
         if self.is_nat() {
             return Word::NAT;

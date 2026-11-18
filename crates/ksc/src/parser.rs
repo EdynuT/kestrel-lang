@@ -1,7 +1,7 @@
 //! Recursive-descent parser: tokens -> [`Program`] (SPEC §11).
 //!
 //! Expression precedence, lowest to highest:
-//! `||`, `&&`, `<=>`, `+ -`, `* / %`, `<< >>`, unary `~ -`, `as`, `**`
+//! `||`, `&&`, `<=>`, `+ -`, `* / %`, `<< >>`, unary `~ -` and casts `(T) x`, `**`
 //! (right-associative, so `-2 ** 2 == -(2 ** 2)`), indexing, primary.
 
 use kestrel_core::Word;
@@ -131,7 +131,7 @@ impl Parser {
         let s = match self.peek() {
             Tok::Trit => Scalar::Trit,
             Tok::Tryte => Scalar::Tryte,
-            Tok::Word => Scalar::Word,
+            Tok::Int => Scalar::Int,
             Tok::Real => Scalar::Real,
             _ => return None,
         };
@@ -154,11 +154,11 @@ impl Parser {
                 self.expect(Tok::LBracket)?;
                 let elem = match self.peek() {
                     Tok::Tryte => Elem::Tryte,
-                    Tok::Word => Elem::Word,
+                    Tok::Int => Elem::Int,
                     _ => {
                         return Err(self
-                            .unexpected("`tryte` or `word`")
-                            .with_note("buffers hold trytes or words"));
+                            .unexpected("`tryte` or `int`")
+                            .with_note("buffers hold trytes or ints"));
                     }
                 };
                 self.bump();
@@ -463,15 +463,19 @@ impl Parser {
             self.bump();
             return self.unary();
         }
-        let mut e = self.power()?;
-        while self.eat(&Tok::As) {
-            let Some(s) = self.scalar() else {
-                return Err(self.unexpected("a scalar type after `as`"));
-            };
-            let span = e.span.to(self.tokens[self.pos - 1].span);
-            e = Expr { kind: ExprKind::As(Box::new(e), s), span };
+        // C-style cast `(T) x`: type names are keywords, so `(` + scalar + `)` is never a grouping.
+        if self.peek() == &Tok::LParen
+            && matches!(self.peek_at(1), Tok::Trit | Tok::Tryte | Tok::Int | Tok::Real)
+            && self.peek_at(2) == &Tok::RParen
+        {
+            self.bump();
+            let s = self.scalar().expect("checked above");
+            self.bump();
+            let inner = self.unary()?;
+            let span = start.to(inner.span);
+            return Ok(Expr { kind: ExprKind::Cast(Box::new(inner), s), span });
         }
-        Ok(e)
+        self.power()
     }
 
     fn power(&mut self) -> PResult<Expr> {
@@ -590,7 +594,7 @@ mod tests {
             ExprKind::Unary(UnOp::Neg, a) => format!("(neg {})", sx(a)),
             ExprKind::Unary(UnOp::Tilde, a) => format!("(~ {})", sx(a)),
             ExprKind::Binary(op, a, b) => format!("({} {} {})", op.symbol(), sx(a), sx(b)),
-            ExprKind::As(a, s) => format!("(as {} {s:?})", sx(a)),
+            ExprKind::Cast(a, s) => format!("(cast {s:?} {})", sx(a)),
             ExprKind::Index(a, i) => format!("{}[{}]", sx(a), sx(i)),
             ExprKind::Call { name, args } => {
                 format!("{}({})", name.name, args.iter().map(sx).collect::<Vec<_>>().join(", "))
@@ -616,8 +620,9 @@ mod tests {
         assert_eq!(ex("2 ** 3 ** 2"), "(** 2 (** 3 2))");
         assert_eq!(ex("a <=> b && c || d"), "(|| (&& (<=> a b) c) d)");
         assert_eq!(ex("x << 2 * 3"), "(* (<< x 2) 3)");
-        assert_eq!(ex("a + b as tryte"), "(+ a (as b Tryte))");
-        assert_eq!(ex("-x as trit"), "(neg (as x Trit))");
+        assert_eq!(ex("(real) a / (real) b"), "(/ (cast Real a) (cast Real b))");
+        assert_eq!(ex("(trit) -x"), "(cast Trit (neg x))");
+        assert_eq!(ex("(int)(a + b) * 2"), "(* (cast Int (+ a b)) 2)");
         assert_eq!(ex("~v[i - 1] % 3"), "(% (~ v[(- i 1)]) 3)");
         assert_eq!(ex("f(lend b, give c, 'A', \"hi\")"), "f((lend b), (give c), '1, \"hi\")");
         assert_eq!(ex("(1 + 2) * 3"), "(* (+ 1 2) 3)");
@@ -636,9 +641,9 @@ mod tests {
 
     #[test]
     fn declarations() {
-        let stmts = body("acc: word @R+1 = 0; y := claim 2 * k + 1; s: word = f() on NaT { yield; };");
+        let stmts = body("acc: int @R+1 = 0; y := claim 2 * k + 1; s: int = f() on NaT { yield; };");
         let StmtKind::Let { name, ty, reg, .. } = &stmts[0] else { panic!() };
-        assert_eq!((name.name.as_str(), ty.unwrap().ty, reg.unwrap().0), ("acc", Type::Scalar(Scalar::Word), 1));
+        assert_eq!((name.name.as_str(), ty.unwrap().ty, reg.unwrap().0), ("acc", Type::Scalar(Scalar::Int), 1));
         let StmtKind::Let { ty: None, value, .. } = &stmts[1] else { panic!() };
         assert_eq!(sx(value), "(claim (+ (* 2 k) 1))");
         let StmtKind::Let { on_nat: Some(b), .. } = &stmts[2] else { panic!() };
@@ -677,11 +682,11 @@ mod tests {
 
     #[test]
     fn items() {
-        let p = program("const LIMIT: word = 0vMM;\nproc sum(v: lent [word], k: word) -> word { yield k; }");
+        let p = program("const LIMIT: int = 0vMM;\nproc sum(v: lent [int], k: int) -> int { yield k; }");
         assert!(matches!(&p.items[0], Item::Const(c) if c.name.name == "LIMIT"));
         let Item::Proc(f) = &p.items[1] else { panic!() };
-        assert_eq!(f.params[0].ty.ty, Type::Lent(Elem::Word));
-        assert_eq!(f.ret.unwrap().ty, Type::Scalar(Scalar::Word));
+        assert_eq!(f.params[0].ty.ty, Type::Lent(Elem::Int));
+        assert_eq!(f.ret.unwrap().ty, Type::Scalar(Scalar::Int));
     }
 
     #[test]
@@ -695,7 +700,7 @@ mod tests {
         assert!(parse_err("proc main() { mov x, 1, 2; }").message.contains("`mov` takes 2 operands, found 3"));
         assert!(parse_err("proc main() { neg x, 1; }").message.contains("`neg` takes 1 operand, found 2"));
         assert!(parse_err("proc main() { x + 1 = 3; }").message.contains("cannot assign"));
-        assert!(parse_err("proc main() { b: own [real] = claim 3; }").note.unwrap().contains("trytes or words"));
+        assert!(parse_err("proc main() { b: own [real] = claim 3; }").note.unwrap().contains("trytes or ints"));
         assert!(parse_err("proc main() { x := a <=> b <=> c; }").message.contains("cannot be chained"));
         assert!(parse_err("x := 1;").message.contains("expected `proc` or `const`"));
         assert!(parse_err("proc main() { x := ; }").message.contains("expected an expression, found `;`"));
@@ -704,20 +709,20 @@ mod tests {
     #[test]
     fn spec_example_parses() {
         let src = r#"
-proc sum(v: lent [word], k: word) -> word {
-    acc: word @R0 = 0;
+proc sum(v: lent [int], k: int) -> int {
+    acc: int @R0 = 0;
     walk i in span k {
         add acc, v[i];
     }
     yield acc;
 }
 
-proc main() -> word {
-    b: own [word] = claim 5;
+proc main() -> int {
+    b: own [int] = claim 5;
     walk i in span 2 {
         b[i] = i * i;
     }
-    s: word @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s: int @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
     shl3 s, 1;
     tri cmp3 s, 10 {
         - => print("less"),

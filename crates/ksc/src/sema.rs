@@ -31,8 +31,8 @@ pub fn check(program: &Program) -> R<Hir> {
     if !main.params.is_empty() {
         return Err(Diagnostic::new("`main` cannot take parameters", main.span));
     }
-    if !matches!(main.ret, Type::Void | Type::Scalar(Scalar::Word)) {
-        return Err(Diagnostic::new(format!("`main` must yield a word or nothing, not {}", main.ret), main.span));
+    if !matches!(main.ret, Type::Void | Type::Scalar(Scalar::Int)) {
+        return Err(Diagnostic::new(format!("`main` must yield an int or nothing, not {}", main.ret), main.span));
     }
     let mut procs = Vec::new();
     for item in &program.items {
@@ -311,7 +311,7 @@ impl Checker {
                 HStmtKind::Tri { head: h, arms: Box::new(arms) }
             }
             StmtKind::Walk { var, range, body } => {
-                let word = Type::Scalar(Scalar::Word);
+                let word = Type::Scalar(Scalar::Int);
                 let (span_tmp, start, end) = match range {
                     Range::Between(a, b) => (None, self.expect(a, word)?, self.expect(b, word)?),
                     Range::Span(k) => {
@@ -346,7 +346,7 @@ impl Checker {
                 }
                 if let Type::Own(_) = h.ty {
                     return Err(err("the buffer returned by this call would be lost", e.span)
-                        .with_note("store it, e.g. `b: own [word] = f(...);`, then burn it"));
+                        .with_note("store it, e.g. `b: own [int] = f(...);`, then burn it"));
                 }
                 HStmtKind::Expr(h)
             }
@@ -407,7 +407,7 @@ impl Checker {
     }
 
     fn index(&mut self, idx: &Expr) -> R<HExpr> {
-        let h = self.expr(idx, Some(Type::Scalar(Scalar::Word)))?;
+        let h = self.expr(idx, Some(Type::Scalar(Scalar::Int)))?;
         if !h.ty.is_int() {
             return Err(err(format!("an index must be an integer, found {}", h.ty), idx.span));
         }
@@ -448,7 +448,7 @@ impl Checker {
             (x, y) if x == y => x,
             (x, y) => {
                 return Err(err(format!("cannot mix {x} and {y}"), ha.span.to(hb.span))
-                    .with_note("convert one side with `as real` or `as word`"));
+                    .with_note("convert one side with `as real` or `as int`"));
             }
         };
         Ok((ha, hb, ty))
@@ -463,7 +463,7 @@ impl Checker {
                     Some(Type::Scalar(Scalar::Real)) => {
                         return Err(err("integer literal where a real is expected", span).with_note("write it with a point, e.g. `5.0`"));
                     }
-                    _ => Scalar::Word,
+                    _ => Scalar::Int,
                 };
                 let max = match s {
                     Scalar::Trit => TRIT_MAX,
@@ -481,7 +481,7 @@ impl Checker {
             ExprKind::NaT => match want {
                 Some(Type::Scalar(Scalar::Real)) => hx(HExprKind::Real(kestrel_core::Real::NAT), Type::Scalar(Scalar::Real), span),
                 Some(t @ Type::Scalar(_)) => hx(HExprKind::Word(kestrel_core::Word::NAT), t, span),
-                _ => hx(HExprKind::Word(kestrel_core::Word::NAT), Type::Scalar(Scalar::Word), span),
+                _ => hx(HExprKind::Word(kestrel_core::Word::NAT), Type::Scalar(Scalar::Int), span),
             },
             ExprKind::Var(name) => {
                 if let Some(id) = self.lookup(name) {
@@ -508,10 +508,10 @@ impl Checker {
                 }
             }
             ExprKind::Binary(op, a, b) => self.binary(*op, a, b, want, span)?,
-            ExprKind::As(inner, s) => {
+            ExprKind::Cast(inner, s) => {
                 let h = self.expr(inner, None)?;
                 if !h.ty.is_numeric() {
-                    return Err(err(format!("cannot convert {} with `as`", h.ty), inner.span));
+                    return Err(err(format!("cannot cast {}", h.ty), inner.span));
                 }
                 let to = Type::Scalar(*s);
                 if h.ty == to { h } else { hx(HExprKind::Convert(Box::new(h)), to, span) }
@@ -540,7 +540,7 @@ impl Checker {
                 }
                 _ => {
                     return Err(err("`claim` needs to know the buffer type", span)
-                        .with_note("declare it, e.g. `b: own [word] = claim 5;`"));
+                        .with_note("declare it, e.g. `b: own [int] = claim 5;`"));
                 }
             },
             ExprKind::Give(name) => {
@@ -577,7 +577,7 @@ impl Checker {
                 if ha.ty == Type::Scalar(Scalar::Real) && op != BinOp::Pow {
                     return Err(err(format!("`{}` works on integers, not reals", op.symbol()), span));
                 }
-                let hb = self.expr(b, Some(Type::Scalar(Scalar::Word)))?;
+                let hb = self.expr(b, Some(Type::Scalar(Scalar::Int)))?;
                 if !hb.ty.is_int() {
                     return Err(err(format!("the right side of `{}` must be an integer, found {}", op.symbol(), hb.ty), hb.span));
                 }
@@ -627,12 +627,12 @@ impl Checker {
             }
             "input" => {
                 arity(0)?;
-                return Ok(builtin(Builtin::Input, vec![], Type::Scalar(Scalar::Word)));
+                return Ok(builtin(Builtin::Input, vec![], Type::Scalar(Scalar::Int)));
             }
             "len" => {
                 arity(1)?;
                 let a = self.expect(&args[0], text)?;
-                return Ok(builtin(Builtin::Len, vec![a], Type::Scalar(Scalar::Word)));
+                return Ok(builtin(Builtin::Len, vec![a], Type::Scalar(Scalar::Int)));
             }
             "dump" => return Err(err("`dump(...)` is a statement, not a value", span)),
             _ => {}
@@ -702,20 +702,20 @@ mod tests {
     }
 
     const SPEC_EXAMPLE: &str = r#"
-proc sum(v: lent [word], k: word) -> word {
-    acc: word @R0 = 0;
+proc sum(v: lent [int], k: int) -> int {
+    acc: int @R0 = 0;
     walk i in span k {
         add acc, v[i];
     }
     yield acc;
 }
 
-proc main() -> word {
-    b: own [word] = claim 5;
+proc main() -> int {
+    b: own [int] = claim 5;
     walk i in span 2 {
         b[i] = i * i;
     }
-    s: word @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s: int @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
     shl3 s, 1;
     tri cmp3 s, 10 {
         - => print("less"),
@@ -743,7 +743,7 @@ proc main() -> word {
 
     #[test]
     fn literal_types() {
-        ok("t: tryte = 364; u: trit = -; w: word = t; r: real = 2.5; c: tryte = 'A';");
+        ok("t: tryte = 364; u: trit = -; w: int = t; r: real = 2.5; c: tryte = 'A';");
         assert_eq!(err_in("t: tryte = 400;"), "`400` does not fit in a tryte (-364..=364)");
         assert_eq!(err_in("t: trit = 2;"), "`2` does not fit in a trit (-1..=1)");
         assert!(err_in("r: real = 5;").contains("write it with a point"));
@@ -751,9 +751,9 @@ proc main() -> word {
 
     #[test]
     fn mixing_and_narrowing() {
-        assert!(err_in("x := 1; r := 2.0; y := x + r;").contains("cannot mix word and real"));
-        assert!(err_in("w: word = 5; t: tryte = w;").contains("narrow explicitly with `as tryte`"));
-        ok("w: word = 5; t: tryte = w as tryte; r := w as real; back := r as word;");
+        assert!(err_in("x := 1; r := 2.0; y := x + r;").contains("cannot mix int and real"));
+        assert!(err_in("w: int = 5; t: tryte = w;").contains("narrow explicitly with `as tryte`"));
+        ok("w: int = 5; t: tryte = (tryte) w; r := (real) w; back := (int) r;");
         assert!(err_in("r := 2.0 % 1.0;").contains("`%` works on integers"));
         assert!(err_in("r := 2.0 << 1;").contains("`<<` works on integers"));
         ok("r := 2.0 ** 3; t: tryte = 3; u := t * 2;");
@@ -761,7 +761,7 @@ proc main() -> word {
 
     #[test]
     fn logic_and_tri() {
-        assert!(err_in("x := 1; y := x && x;").contains("`&&` works on trits, found word"));
+        assert!(err_in("x := 1; y := x && x;").contains("`&&` works on trits, found int"));
         ok("a: trit = +; b: trit = 0; c := a && b || -;");
         assert!(err_in("x := 5; tri x { - => yield, 0 => yield, + => yield, }").contains("`tri` needs a trit"));
         ok("x := 5; tri x <=> 0 { - => yield, 0 => yield, + => yield, }");
@@ -776,36 +776,36 @@ proc main() -> word {
         let HStmtKind::Assign { local, .. } = &hir.procs[0].body.stmts[3].kind else { panic!() };
         assert_eq!(*local, 0);
         assert!(err_in("walk i in 0..3 { i = 1; }").contains("read-only"));
-        assert!(err_of("const L: word = 3; proc main() { L = 4; }").contains("cannot assign to const"));
+        assert!(err_of("const L: int = 3; proc main() { L = 4; }").contains("cannot assign to const"));
         assert!(err_in("break;").contains("outside of a `walk`"));
     }
 
     #[test]
     fn registers() {
-        assert!(err_in("a: word @R0 = 1; b: word @R0 = 2;").contains("@R0 is already pinned"));
-        assert!(err_in("b: own [word] @R+1 = claim 3; burn b;").contains("only numbers"));
+        assert!(err_in("a: int @R0 = 1; b: int @R0 = 2;").contains("@R0 is already pinned"));
+        assert!(err_in("b: own [int] @R+1 = claim 3; burn b;").contains("only numbers"));
     }
 
     #[test]
     fn buffers() {
         assert!(err_in("b := claim 5;").contains("needs to know the buffer type"));
-        assert!(err_in("b: own [word] = claim 5; c := b;").contains("cannot be used as a value"));
+        assert!(err_in("b: own [int] = claim 5; c := b;").contains("cannot be used as a value"));
         assert!(err_in("x := 1; burn x;").contains("only an own buffer can be burned"));
-        assert!(err_of("proc f(v: lent [word]) { burn v; } proc main() {}").contains("cannot burn a lent buffer"));
-        assert!(err_of("proc f(v: lent [word]) { v = v; } proc main() {}").contains("cannot replace a lent buffer"));
-        assert!(err_in("b: own [word] = claim 3; x := lend b;").contains("only allowed as a call argument"));
-        assert!(err_in("x: lent [word] = 1;").contains("cannot hold a lent buffer"));
+        assert!(err_of("proc f(v: lent [int]) { burn v; } proc main() {}").contains("cannot burn a lent buffer"));
+        assert!(err_of("proc f(v: lent [int]) { v = v; } proc main() {}").contains("cannot replace a lent buffer"));
+        assert!(err_in("b: own [int] = claim 3; x := lend b;").contains("only allowed as a call argument"));
+        assert!(err_in("x: lent [int] = 1;").contains("cannot hold a lent buffer"));
         assert!(err_in("s := \"hi\"; s[0] = 'A';").contains("text is read-only"));
         ok("s := \"hi\"; c := s[1]; n := len(s); b: own [tryte] = claim 3; b[0] = c; burn b;");
     }
 
     #[test]
     fn calls() {
-        let defs = "proc take(b: own [word]) { burn b; } proc peek(v: lent [word]) -> word { yield v[0]; }";
-        assert!(err_of(&format!("{defs} proc main() {{ b: own [word] = claim 3; take(b); }}")).contains("pass it with `give b`"));
-        assert!(err_of(&format!("{defs} proc main() {{ b: own [word] = claim 3; x := peek(b); }}")).contains("pass it with `lend b`"));
+        let defs = "proc take(b: own [int]) { burn b; } proc peek(v: lent [int]) -> int { yield v[0]; }";
+        assert!(err_of(&format!("{defs} proc main() {{ b: own [int] = claim 3; take(b); }}")).contains("pass it with `give b`"));
+        assert!(err_of(&format!("{defs} proc main() {{ b: own [int] = claim 3; x := peek(b); }}")).contains("pass it with `lend b`"));
         assert!(err_of(&format!("{defs} proc main() {{ x := peek(); }}")).contains("takes 1 argument, found 0"));
-        assert!(err_of("proc mk() -> own [word] { b: own [word] = claim 1; yield b; } proc main() { mk(); }").contains("would be lost"));
+        assert!(err_of("proc mk() -> own [int] { b: own [int] = claim 1; yield b; } proc main() { mk(); }").contains("would be lost"));
         assert!(err_in("x := 1; x + 1;").contains("does nothing"));
         assert!(err_in("x := print(\"a\");").contains("has no value"));
         assert!(err_in("emit(1000);").contains("does not fit in a tryte"));
@@ -815,13 +815,13 @@ proc main() -> word {
     #[test]
     fn structure() {
         assert!(err_of("proc f() {}").contains("no `proc main`"));
-        assert!(err_of("proc main(x: word) {}").contains("cannot take parameters"));
+        assert!(err_of("proc main(x: int) {}").contains("cannot take parameters"));
         assert!(err_of("proc f() {} proc f() {} proc main() {}").contains("defined twice"));
         assert!(err_of("proc print() {} proc main() {}").contains("built-in"));
-        assert!(err_of("proc f() -> word { x := 1; } proc main() {}").contains("must end with `yield`"));
+        assert!(err_of("proc f() -> int { x := 1; } proc main() {}").contains("must end with `yield`"));
         assert!(err_in("yield; x := 1;").contains("unreachable code"));
         assert!(err_in("x := input() on NaT { print(\"bad\"); };").contains("must end with `yield`"));
-        assert!(err_of("proc f() -> lent [word] { } proc main() {}").contains("cannot yield a lent buffer"));
+        assert!(err_of("proc f() -> lent [int] { } proc main() {}").contains("cannot yield a lent buffer"));
         ok("x := input() on NaT { yield; }; show(x);");
     }
 
@@ -829,6 +829,6 @@ proc main() -> word {
     fn consts() {
         let hir = check_src("const LIMIT: tryte = -100; const NAME: text = \"Kestrel\"; proc main() { x := LIMIT; print(NAME); }").unwrap();
         assert_eq!(hir.procs[0].locals[0].ty, Type::Scalar(Scalar::Tryte));
-        assert!(err_of("const X: word = 1 + 2; proc main() {}").contains("must be a literal"));
+        assert!(err_of("const X: int = 1 + 2; proc main() {}").contains("must be a literal"));
     }
 }

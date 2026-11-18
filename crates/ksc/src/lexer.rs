@@ -43,10 +43,9 @@ pub enum Tok {
     NaT,
     Break,
     Continue,
-    As,
     Trit,
     Tryte,
-    Word,
+    Int,
     Real,
     Text,
 
@@ -104,10 +103,9 @@ const KEYWORDS: &[(&str, Tok)] = &[
     ("NaT", Tok::NaT),
     ("break", Tok::Break),
     ("continue", Tok::Continue),
-    ("as", Tok::As),
     ("trit", Tok::Trit),
     ("tryte", Tok::Tryte),
-    ("word", Tok::Word),
+    ("int", Tok::Int),
     ("real", Tok::Real),
     ("text", Tok::Text),
 ];
@@ -285,8 +283,8 @@ impl Lexer<'_> {
                 let v: i128 = int.parse().unwrap_or(i128::MAX);
                 if v > i128::from(WORD_MAX) {
                     return Err(self
-                        .err("integer literal does not fit in a word", start)
-                        .with_note(format!("a word holds -{WORD_MAX} ..= {WORD_MAX}")));
+                        .err("integer literal does not fit in an int", start)
+                        .with_note(format!("an int holds -{WORD_MAX} ..= {WORD_MAX}")));
                 }
                 Tok::Num(Word::new(v as i64))
             }
@@ -406,8 +404,8 @@ mod tests {
     #[test]
     fn declaration_with_register() {
         assert_eq!(
-            toks("acc: word @R0 = 0; // comment"),
-            vec![id("acc"), Tok::Colon, Tok::Word, Tok::Reg(0), Tok::Eq, n(0), Tok::Semi, Tok::Eof]
+            toks("acc: int @R0 = 0; // comment"),
+            vec![id("acc"), Tok::Colon, Tok::Int, Tok::Reg(0), Tok::Eq, n(0), Tok::Semi, Tok::Eof]
         );
         assert_eq!(toks("@R-4 @R+4 @R+1"), vec![Tok::Reg(-4), Tok::Reg(4), Tok::Reg(1), Tok::Eof]);
     }
@@ -432,7 +430,7 @@ mod tests {
         assert_eq!(toks("1.5"), vec![Tok::RealLit(Real::from_decimal("1", "5").unwrap()), Tok::Eof]);
         assert_eq!(toks("3812798742493"), vec![n(WORD_MAX), Tok::Eof]);
         assert_eq!(toks("2 ** 3"), vec![n(2), Tok::StarStar, n(3), Tok::Eof]);
-        assert_eq!(toks("proc f() -> word"), vec![Tok::Proc, id("f"), Tok::LParen, Tok::RParen, Tok::Arrow, Tok::Word, Tok::Eof]);
+        assert_eq!(toks("proc f() -> int"), vec![Tok::Proc, id("f"), Tok::LParen, Tok::RParen, Tok::Arrow, Tok::Int, Tok::Eof]);
     }
 
     #[test]
@@ -443,7 +441,7 @@ mod tests {
 
     #[test]
     fn errors() {
-        assert!(err("3812798742494").contains("does not fit in a word"));
+        assert!(err("3812798742494").contains("does not fit in an int"));
         assert!(err("0t+x").contains("right after a number"));
         assert!(err("0vN").contains("`N` is not a valid digit"));
         assert!(err("0t").contains("no digits"));
@@ -472,21 +470,21 @@ mod tests {
     #[test]
     fn spec_example_lexes() {
         let src = r#"
-proc sum(v: lent [word], k: word) -> word {
-    acc: word @R0 = 0;
+proc sum(v: lent [int], k: int) -> int {
+    acc: int @R0 = 0;
     walk i in span k {
         add acc, v[i];             // acc = acc + v[i]
     }
     yield acc;
 }
 
-proc main() -> word {
-    b: own [word] = claim 5;       // indices -2..+2
+proc main() -> int {
+    b: own [int] = claim 5;       // indices -2..+2
     walk i in span 2 {
         b[i] = i * i;
     }
 
-    s: word @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s: int @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
     shl3 s, 1;                     // s = s * 3
 
     tri cmp3 s, 10 {

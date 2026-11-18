@@ -9,19 +9,19 @@ Kestrel targets the BET-VM, a simulated 27-trit processor where every digit is `
 ## A taste
 
 ```
-proc sum(v: lent [word], k: word) -> word {
-    acc: word @R0 = 0;             // pin acc to register R0
+proc sum(v: lent [int], k: int) -> int {
+    acc: int @R0 = 0;             // pin acc to register R0
     walk i in span k {             // i goes from -k to +k
         add acc, v[i];             // acc = acc + v[i]
     }
     yield acc;
 }
 
-proc main() -> word {
-    b: own [word] = claim 5;       // indices -2..+2
+proc main() -> int {
+    b: own [int] = claim 5;       // indices -2..+2
     walk i in span 2 { b[i] = i * i; }
 
-    s: word = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
 
     tri s <=> 10 {                 // three-way branch
         - => print("less"),
@@ -38,7 +38,7 @@ proc main() -> word {
 | Concept | Kestrel | Closest C / Rust equivalent |
 |---|---|---|
 | Digit | `trit`: `-`, `0`, `+` | `bit` |
-| Integers | `tryte` (6 trits, ±364), `word` (27 trits, ±3.8 × 10¹²) | `i16`, `i64` |
+| Integers | `tryte` (6 trits, ±364), `int` (27 trits, ±3.8 × 10¹²) | `i16`, `i64` |
 | Floating point | `real` (21-trit mantissa, 6-trit exponent) | `float` / `double` |
 | Strings | `text` | `const char*` |
 | Invalid value | `NaT`, which poisons every later operation | `NaN`, `None` |
@@ -54,7 +54,7 @@ Negation is free in balanced ternary: flip every trit (`0t+0-` = 8, `0t-0+` = �
 
 ```
 crates/
-├── kestrel-core/   ternary word and real types, instruction set, .ksb format
+├── kestrel-core/   ternary int and real types, instruction set, .ksb format
 ├── ksc/            compiler: lexer, parser, type checker, ownership checker, codegen
 └── ksvm/           virtual machine, runs .ksb
 examples/           sample programs

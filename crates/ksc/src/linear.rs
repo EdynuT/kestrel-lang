@@ -300,10 +300,10 @@ mod tests {
     }
 
     const DEFS: &str = "
-        proc take(b: own [word]) { burn b; }
-        proc peek(v: lent [word]) -> word { yield v[0]; }
-        proc both(v: lent [word], b: own [word]) { burn b; }
-        proc mk() -> own [word] { b: own [word] = claim 1; yield b; }
+        proc take(b: own [int]) { burn b; }
+        proc peek(v: lent [int]) -> int { yield v[0]; }
+        proc both(v: lent [int], b: own [int]) { burn b; }
+        proc mk() -> own [int] { b: own [int] = claim 1; yield b; }
     ";
 
     fn ok(body: &str) {
@@ -324,15 +324,15 @@ mod tests {
     #[test]
     fn spec_example_is_sound() {
         let src = r#"
-proc sum(v: lent [word], k: word) -> word {
-    acc: word @R0 = 0;
+proc sum(v: lent [int], k: int) -> int {
+    acc: int @R0 = 0;
     walk i in span k { add acc, v[i]; }
     yield acc;
 }
-proc main() -> word {
-    b: own [word] = claim 5;
+proc main() -> int {
+    b: own [int] = claim 5;
     walk i in span 2 { b[i] = i * i; }
-    s: word @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s: int @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
     shl3 s, 1;
     tri cmp3 s, 10 { - => print("less"), 0 => print("equal"), + => print("greater"), }
     burn b;
@@ -343,59 +343,59 @@ proc main() -> word {
 
     #[test]
     fn basic_lifecycle() {
-        ok("b: own [word] = claim 3; b[0] = 1; x := peek(lend b); burn b;");
-        ok("b: own [word] = claim 3; take(give b);");
-        ok("b: own [word] = mk(); c: own [word] = give b; burn c;");
-        assert!(err("b: own [word] = claim 3;").contains("`b` is never burned or given away"));
-        assert!(err("b: own [word] = claim 3; burn b; burn b;").contains("burned twice"));
-        assert!(err("b: own [word] = claim 3; burn b; b[0] = 1;").contains("used after it was burned"));
-        assert!(err("b: own [word] = claim 3; take(give b); x := b[0];").contains("used after it was given away"));
-        assert!(err("b: own [word] = claim 3; take(give b); burn b;").contains("given away and cannot be burned"));
-        assert!(err("b: own [word] = claim 3; take(give b); take(give b);").contains("used after it was given away"));
+        ok("b: own [int] = claim 3; b[0] = 1; x := peek(lend b); burn b;");
+        ok("b: own [int] = claim 3; take(give b);");
+        ok("b: own [int] = mk(); c: own [int] = give b; burn c;");
+        assert!(err("b: own [int] = claim 3;").contains("`b` is never burned or given away"));
+        assert!(err("b: own [int] = claim 3; burn b; burn b;").contains("burned twice"));
+        assert!(err("b: own [int] = claim 3; burn b; b[0] = 1;").contains("used after it was burned"));
+        assert!(err("b: own [int] = claim 3; take(give b); x := b[0];").contains("used after it was given away"));
+        assert!(err("b: own [int] = claim 3; take(give b); burn b;").contains("given away and cannot be burned"));
+        assert!(err("b: own [int] = claim 3; take(give b); take(give b);").contains("used after it was given away"));
     }
 
     #[test]
     fn reuse_only_after_burn() {
-        ok("b: own [word] = claim 3; burn b; b = claim 5; burn b;");
-        assert!(err("b: own [word] = claim 3; b = claim 5; burn b;").contains("assigning to it would leak"));
-        assert!(err("b: own [word] = claim 3; take(give b); b = claim 5; burn b;").contains("only be reused after `burn`"));
+        ok("b: own [int] = claim 3; burn b; b = claim 5; burn b;");
+        assert!(err("b: own [int] = claim 3; b = claim 5; burn b;").contains("assigning to it would leak"));
+        assert!(err("b: own [int] = claim 3; take(give b); b = claim 5; burn b;").contains("only be reused after `burn`"));
     }
 
     #[test]
     fn calls_and_yield() {
-        assert!(err("b: own [word] = claim 3; both(lend b, give b);").contains("lent and given away in the same call"));
-        assert!(err("b: own [word] = claim 3; b[0] = peek(lend b) + 0; take(give b); b[1] = 2;").contains("given away"));
-        assert!(err("b: own [word] = claim 3; yield;").contains("still owns a buffer when the proc yields"));
-        assert!(run(&format!("{DEFS} proc keep(b: own [word]) {{ }} proc main() {{}}")).unwrap_err().message.contains("when the proc ends"));
-        run(&format!("{DEFS} proc pass(b: own [word]) -> own [word] {{ yield b; }} proc main() {{}}")).unwrap();
+        assert!(err("b: own [int] = claim 3; both(lend b, give b);").contains("lent and given away in the same call"));
+        assert!(err("b: own [int] = claim 3; b[0] = peek(lend b) + 0; take(give b); b[1] = 2;").contains("given away"));
+        assert!(err("b: own [int] = claim 3; yield;").contains("still owns a buffer when the proc yields"));
+        assert!(run(&format!("{DEFS} proc keep(b: own [int]) {{ }} proc main() {{}}")).unwrap_err().message.contains("when the proc ends"));
+        run(&format!("{DEFS} proc pass(b: own [int]) -> own [int] {{ yield b; }} proc main() {{}}")).unwrap();
     }
 
     #[test]
     fn on_nat_must_clean_up() {
-        ok("b: own [word] = claim 3; s := peek(lend b) on NaT { burn b; yield; }; burn b;");
-        assert!(err("b: own [word] = claim 3; s := peek(lend b) on NaT { yield; }; burn b;").contains("when the proc yields"));
+        ok("b: own [int] = claim 3; s := peek(lend b) on NaT { burn b; yield; }; burn b;");
+        assert!(err("b: own [int] = claim 3; s := peek(lend b) on NaT { yield; }; burn b;").contains("when the proc yields"));
     }
 
     #[test]
     fn tri_symmetry() {
-        ok("b: own [word] = claim 3; t: trit = +; tri t { - => burn b, 0 => burn b, + => take(give b), }");
-        assert!(err("b: own [word] = claim 3; t: trit = +; tri t { - => burn b, 0 => burn b, + => take(give b), } b = claim 1; burn b;")
+        ok("b: own [int] = claim 3; t: trit = +; tri t { - => burn b, 0 => burn b, + => take(give b), }");
+        assert!(err("b: own [int] = claim 3; t: trit = +; tri t { - => burn b, 0 => burn b, + => take(give b), } b = claim 1; burn b;")
             .contains("only be reused after `burn`"));
-        ok("b: own [word] = claim 3; t: trit = +; tri t { - => { burn b; yield; } 0 => {} + => {} } burn b;");
-        let e = err("b: own [word] = claim 3; t: trit = +; tri t { - => burn b, 0 => {} + => burn b, }");
+        ok("b: own [int] = claim 3; t: trit = +; tri t { - => { burn b; yield; } 0 => {} + => {} } burn b;");
+        let e = err("b: own [int] = claim 3; t: trit = +; tri t { - => burn b, 0 => {} + => burn b, }");
         assert!(e.contains("leave `b` in different states"), "{e}");
         assert!(e.contains("`-` arm: burned, `0` arm: still owned, `+` arm: burned"), "{e}");
-        assert!(err("b: own [word] = claim 3; t: trit = +; tri t { - => yield, 0 => burn b, + => burn b, }").contains("when the proc yields"));
+        assert!(err("b: own [int] = claim 3; t: trit = +; tri t { - => yield, 0 => burn b, + => burn b, }").contains("when the proc yields"));
     }
 
     #[test]
     fn walk_rules() {
-        ok("walk i in 0..2 { b: own [word] = claim 3; b[0] = i; burn b; }");
-        ok("b: own [word] = claim 3; walk i in span 1 { b[i] = i; } burn b;");
-        assert!(err("b: own [word] = claim 3; walk i in 0..2 { burn b; }").contains("cannot change `b`, which lives outside the loop"));
-        assert!(err("walk i in 0..2 { b: own [word] = claim 3; break; }").contains("still owns a buffer at this `break`"));
-        ok("walk i in 0..2 { b: own [word] = claim 3; burn b; continue; }");
-        assert!(err("b: own [word] = claim 3; walk i in 0..2 { burn b; break; }").contains("cannot change `b`"));
-        assert!(err("c: own [word] = claim 1; burn c; walk i in 0..2 { c = claim 3; }").contains("cannot change `c`"));
+        ok("walk i in 0..2 { b: own [int] = claim 3; b[0] = i; burn b; }");
+        ok("b: own [int] = claim 3; walk i in span 1 { b[i] = i; } burn b;");
+        assert!(err("b: own [int] = claim 3; walk i in 0..2 { burn b; }").contains("cannot change `b`, which lives outside the loop"));
+        assert!(err("walk i in 0..2 { b: own [int] = claim 3; break; }").contains("still owns a buffer at this `break`"));
+        ok("walk i in 0..2 { b: own [int] = claim 3; burn b; continue; }");
+        assert!(err("b: own [int] = claim 3; walk i in 0..2 { burn b; break; }").contains("cannot change `b`"));
+        assert!(err("c: own [int] = claim 1; burn c; walk i in 0..2 { c = claim 3; }").contains("cannot change `c`"));
     }
 }

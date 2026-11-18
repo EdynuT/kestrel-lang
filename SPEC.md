@@ -24,11 +24,11 @@
 |---|---|---|
 | `trit` | 1 trit | −1 .. +1 |
 | `tryte` | 6 trits (t6) | −364 .. +364 |
-| `word` | 27 trits (t27) | −3.812.798.742.493 .. +3.812.798.742.493 |
+| `int` | 27 trits (t27) | −3.812.798.742.493 .. +3.812.798.742.493 |
 | `real` | 27 trits (t27) | ≈ ±10¹⁷⁴, com cerca de 10 dígitos decimais de precisão (§1.5) |
 | `text` | referência | String literal imutável (§1.6) |
 
-Neste documento, `t6` e `t27` indicam larguras. No código-fonte, os tipos se escrevem `tryte` e `word`.
+Neste documento, `t6` e `t27` indicam larguras. No código-fonte, os tipos se escrevem `tryte` e `int`.
 
 ### 1.3 NaT (veneno)
 
@@ -39,13 +39,13 @@ Neste documento, `t6` e `t27` indicam larguras. No código-fonte, os tipos se es
 ### 1.4 Conversões
 
 - A **ampliação** `trit → t6 → t27` é implícita e não perde informação.
-- O **estreitamento** exige `as` (`x as tryte`, `x as trit`). Um valor fora do intervalo vira **NaT**.
-- A conversão entre `word` e `real` é **sempre explícita**. `x as real` arredonda para o valor mais próximo, e `r as word` trunca em direção a zero (fora do intervalo vira NaT).
+- O **estreitamento** exige um *cast* no estilo C: `(tryte) x`, `(trit) x`. Um valor fora do intervalo vira **NaT**.
+- A conversão entre `int` e `real` é **sempre explícita**. `(real) x` arredonda para o valor mais próximo, e `(int) r` trunca em direção a zero (fora do intervalo vira NaT).
 
 ### 1.5 `real` (ponto flutuante ternário)
 
 ```
-word de 27 trits:  [ 6 trits expoente | 21 trits mantissa ]
+int de 27 trits:  [ 6 trits expoente | 21 trits mantissa ]
 valor = (mantissa / 3²⁰) × 3^expoente
 ```
 
@@ -59,7 +59,7 @@ valor = (mantissa / 3²⁰) × 3^expoente
 
 - É um literal imutável guardado no pool de strings do `.ksb`, como o `const char*` do C. É copiável e **não precisa de `burn`**.
 - `s[i]` devolve o `tryte` da posição `i`. **O índice começa em 0**, como em C (exceção à indexação simétrica dos buffers). Índice fora de `0 .. len(s)-1` dispara **Trap**.
-- `len(s)` devolve o tamanho como `word`.
+- `len(s)` devolve o tamanho como `int`.
 - `print(s)` imprime o texto.
 - Cada caractere precisa existir na tabela §4. Um caractere fora dela, como `@` ou `ç`, é **erro de compilação**.
 - Para montar texto em tempo de execução, use um `own [tryte]`, como um array de `char` em C.
@@ -97,7 +97,7 @@ Em ordem de precedência, da menor para a maior:
 | 4 | `+` `-` | Soma e subtração |
 | 5 | `*` `/` `%` | Multiplicação, divisão e resto |
 | 6 | `<<` `>>` | Deslocamento ternário (×3ᵏ e ÷3ᵏ) |
-| 7 | `~` `-` (unário), `as` | Negação e conversão |
+| 7 | `~` `-` (unário), `(T)` | Negação e cast |
 | 8 | `**` | Potência, associativa à direita (`2 ** 3 ** 2 = 2 ** 9`) |
 
 Regras:
@@ -108,9 +108,9 @@ Regras:
 - **`>>`** descarta os trits inferiores, o que equivale a arredondar para o inteiro mais próximo. Exemplo: `2 >> 1 = 1`, enquanto `2 / 3 = 0`.
 - **`<<`** produz NaT se algum trit não nulo passar da largura do tipo. Com `k ≥ 27`, o resultado é `0` se o operando for 0 e NaT caso contrário. Com `k < 0` ou `k` NaT, o resultado é NaT.
 - **`~x`** e **`-x`** são idênticos em ternário balanceado e compilam para o mesmo opcode `NEG`.
-- **`**`** aceita `word ** word` e `real ** word`. O expoente é sempre `word`. Um expoente negativo em `word` produz NaT, e `0 ** 0 = 1`. Como em Python, `-2 ** 2 = -(2 ** 2) = -4`.
-- **`real`** aceita `+ - * / ** <=> ~ -`. Os operadores `%`, `<<`, `>>`, `&&` e `||` sobre `real` são **erro de tipo**, assim como misturar `word` e `real` numa conta sem `as`.
-- **`&&`** e **`||`** são **estritos**: os dois lados são sempre avaliados, sem curto-circuito. Por isso `- && NaT = NaT`. Os operandos são do tipo `trit`. Usar `tryte` ou `word` é **erro de tipo**; para comparar números, use `<=>`.
+- **`**`** aceita `int ** int` e `real ** int`. O expoente é sempre `int`. Um expoente negativo em `int` produz NaT, e `0 ** 0 = 1`. Como em Python, `-2 ** 2 = -(2 ** 2) = -4`.
+- **`real`** aceita `+ - * / ** <=> ~ -`. Os operadores `%`, `<<`, `>>`, `&&` e `||` sobre `real` são **erro de tipo**, assim como misturar `int` e `real` numa conta sem cast. Não há promoção automática como no C: escreva `(real) a / (real) b`.
+- **`&&`** e **`||`** são **estritos**: os dois lados são sempre avaliados, sem curto-circuito. Por isso `- && NaT = NaT`. Os operandos são do tipo `trit`. Usar `tryte` ou `int` é **erro de tipo**; para comparar números, use `<=>`.
 
 ### 3.1 Tabela de verdade K₃
 
@@ -143,7 +143,7 @@ Atribuição exata da faixa de pontuação: −27 `\n`, −28 `\t`, −29 `.`, �
 ## 5. Memória simétrica
 
 - `claim N` exige `N` ímpar e positivo (`N = 2k+1`). O ponteiro aponta para o centro `[0]`, e os índices válidos vão de `-k` a `+k`.
-- As células nascem zeradas. O tipo da célula vem do tipo do buffer (`tryte` ou `word`).
+- As células nascem zeradas. O tipo da célula vem do tipo do buffer (`tryte` ou `int`).
 - `N` par, `N ≤ 0`, `N` NaT ou índice fora de `[-k, +k]` disparam **Trap**.
 
 ## 6. Buffers e posse linear
@@ -153,7 +153,7 @@ Atribuição exata da faixa de pontuação: −27 `\n`, −28 `\t`, −29 `.`, �
 | `own [T]` | Linear, dono único, não copiável | Ler, escrever, `give`, `burn`, `yield` |
 | `lent [T]` | Empréstimo, **segunda classe** | Ler e escrever |
 
-`T` pode ser `tryte` ou `word`. Não existe aritmética de ponteiros.
+`T` pode ser `tryte` ou `int`. Não existe aritmética de ponteiros.
 
 | Palavra | Equivale a (C/Rust) | Efeito |
 |---|---|---|
@@ -177,7 +177,7 @@ Erros de compilação:
 
 - Usar a variável depois de `give` ou `burn`.
 - Chegar a `}` ou `yield` com um `own` vivo (vazamento).
-- Copiar sem `give` (`c: own [word] = b;`).
+- Copiar sem `give` (`c: own [int] = b;`).
 - Guardar `claim` em uma variável que não seja `own`.
 - Atribuir a um `own` que ainda está vivo.
 - Atribuir a um `own` consumido por `give`. O nome só pode receber um novo `claim` **depois de `burn`**.
@@ -194,7 +194,7 @@ Erros de compilação:
 
 | Classe | Causas | Efeito |
 |---|---|---|
-| **NaT** (dado) | Overflow, divisão por zero, `as` fora do intervalo, `input` inválido | O valor vira NaT e pode ser interceptado por `on NaT` |
+| **NaT** (dado) | Overflow, divisão por zero, cast fora do intervalo, `input` inválido | O valor vira NaT e pode ser interceptado por `on NaT` |
 | **Trap** (estrutura) | `claim` inválido, índice fora dos limites, `tri` sobre NaT, limite de `walk` NaT, ponteiro inválido, `burn` duplo | A VM **zera todo o heap e os registradores** e aborta com código ≠ 0 |
 
 ## 8. Sintaxe
@@ -204,8 +204,8 @@ A proporção é cerca de 80% C++/Rust para 20% pseudo-assembly. Os toques de as
 ### 8.1 `proc` e `yield`
 
 ```
-proc sum(v: lent [word], k: word) -> word { ... yield acc; }
-proc main() -> word { ... yield 0; }
+proc sum(v: lent [int], k: int) -> int { ... yield acc; }
+proc main() -> int { ... yield 0; }
 ```
 
 O ponto de entrada é `main`. Um `proc` sem `-> T` usa `yield;` sem valor.
@@ -213,7 +213,7 @@ O ponto de entrada é `main`. Um `proc` sem `-> T` usa `yield;` sem valor.
 ### 8.2 Declaração e atribuição
 
 ```
-x: word = 5;          // tipo explícito
+x: int = 5;          // tipo explícito
 y := x * 3;           // tipo inferido do valor
 x = x + 1;            // atribuição
 ```
@@ -223,7 +223,7 @@ Cada declaração ocupa um slot próprio, então um `x` declarado num bloco inte
 ### 8.3 Registrador fixo `@R` (assembly)
 
 ```
-acc: word @R0 = 0;    // acc mora no registrador R0
+acc: int @R0 = 0;    // acc mora no registrador R0
 ```
 
 - Os registradores válidos são `@R-4` .. `@R+4`, e cada um aceita no máximo uma variável fixada por `proc`.
@@ -267,12 +267,12 @@ walk i in span k { ... }   // o mesmo que -k..+k
 - O intervalo é inclusivo e o passo é +1. Se `a > b`, o corpo não executa nenhuma vez.
 - `a` e `b` são avaliados **uma única vez**, antes da primeira iteração. Se algum for NaT, ocorre **Trap**.
 - `break` e `continue` são permitidos.
-- `i` é `word` e só pode ser lido dentro do laço.
+- `i` é `int` e só pode ser lido dentro do laço.
 
 ### 8.7 `on NaT` (barreira de veneno)
 
 ```
-s: word = sum(lend b, 2) on NaT { burn b; yield -1; };
+s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
 ```
 
 - Se a expressão não for NaT, `s` recebe o valor.
@@ -287,7 +287,7 @@ s: word = sum(lend b, 2) on NaT { burn b; yield -1; };
 | `len(s)` | Tamanho de um `text` |
 | `show(x)` | Imprime um valor em decimal, sem quebra de linha. As formas `0t` e `0v` aparecem no `dump` |
 | `emit(c)` | Imprime um `tryte` como caractere (tabela §4) |
-| `input()` | Lê um `word` (decimal, `0t` ou `0v`). Entrada inválida vira NaT |
+| `input()` | Lê um `int` (decimal, `0t` ou `0v`). Entrada inválida vira NaT |
 | `dump("label")` | Mostra os registradores e o heap |
 
 ## 9. BET-VM
@@ -301,7 +301,7 @@ s: word = sum(lend b, 2) on NaT { burn b; yield -1; };
 
 | Categoria | Opcodes |
 |---|---|
-| Pilha e locais | `PUSHC k` (word), `PUSHR k` (real), `LOAD s`, `STORE s`, `MOVE s`, `POP` |
+| Pilha e locais | `PUSHC k` (int), `PUSHR k` (real), `LOAD s`, `STORE s`, `MOVE s`, `POP` |
 | ALU (inteira) | `ADD`, `SUB`, `MUL`, `DIV`, `MOD`, `POW`, `NEG`, `SHL3`, `SHR3`, `CMP3`, `KAND`, `KOR` |
 | ALU (real) | `FADD`, `FSUB`, `FMUL`, `FDIV`, `FPOW`, `FNEG`, `FCMP3` |
 | Texto | `PUSHS k`, `TLEN`, `TIDX` |
@@ -350,8 +350,8 @@ const_decl = "const" IDENT ":" scalar "=" expr ";" ;
 proc_decl  = "proc" IDENT "(" [ param { "," param } ] ")" [ "->" type ] block ;
 param      = IDENT ":" type ;
 type       = scalar | "text" | ( "own" | "lent" ) "[" elem "]" ;
-scalar     = "trit" | "tryte" | "word" | "real" ;
-elem       = "tryte" | "word" ;
+scalar     = "trit" | "tryte" | "int" | "real" ;
+elem       = "tryte" | "int" ;
 REG        = "R-4" | "R-3" | "R-2" | "R-1" | "R0" | "R+1" | "R+2" | "R+3" | "R+4" ;
 
 block      = "{" { stmt } "}" ;
@@ -384,7 +384,7 @@ cmp_expr   = add_expr [ "<=>" add_expr ] ;
 add_expr   = mul_expr { ( "+" | "-" ) mul_expr } ;
 mul_expr   = sh_expr  { ( "*" | "/" | "%" ) sh_expr } ;
 sh_expr    = unary { ( "<<" | ">>" ) unary } ;
-unary      = ( "~" | "-" ) unary | power [ "as" scalar ] ;
+unary      = ( "~" | "-" | "(" scalar ")" ) unary | power ;
 power      = postfix [ "**" unary ] ;
 postfix    = primary [ "[" expr "]" ] ;
 primary    = literal | IDENT | IDENT "(" [ arg { "," arg } ] ")"
@@ -397,21 +397,21 @@ arg        = [ "give" | "lend" ] expr ;
 ### Exemplo
 
 ```
-proc sum(v: lent [word], k: word) -> word {
-    acc: word @R0 = 0;
+proc sum(v: lent [int], k: int) -> int {
+    acc: int @R0 = 0;
     walk i in span k {
         add acc, v[i];             // acc = acc + v[i]
     }
     yield acc;
 }
 
-proc main() -> word {
-    b: own [word] = claim 5;       // índices -2..+2
+proc main() -> int {
+    b: own [int] = claim 5;       // índices -2..+2
     walk i in span 2 {
         b[i] = i * i;
     }
 
-    s: word @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s: int @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
     shl3 s, 1;                     // s = s * 3
 
     tri cmp3 s, 10 {

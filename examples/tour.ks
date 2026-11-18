@@ -3,8 +3,8 @@
 const GREETING: text = "Hello from the BET-VM!\n";
 
 // Sum of a symmetric buffer with indices -k..+k.
-proc sum(v: lent [word], k: word) -> word {
-    acc: word @R0 = 0;
+proc sum(v: lent [int], k: int) -> int {
+    acc: int @R0 = 0;
     walk i in span k {
         add acc, v[i];             // acc = acc + v[i]
     }
@@ -12,7 +12,7 @@ proc sum(v: lent [word], k: word) -> word {
 }
 
 // Prints a word as "negative", "zero" or "positive".
-proc describe(x: word) {
+proc describe(x: int) {
     tri x <=> 0 {
         - => print("negative"),
         0 => print("zero"),
@@ -20,17 +20,17 @@ proc describe(x: word) {
     }
 }
 
-proc main() -> word {
+proc main() -> int {
     print(GREETING);
 
-    b: own [word] = claim 5;       // indices -2..+2
+    b: own [int] = claim 5;       // indices -2..+2
     walk i in span 2 {
         b[i] = i * i * i;          // -8 -1 0 1 8
     }
     print("cubes: ");
     walk i in span 2 { show(b[i]); print(" "); }
     print("\nsum = ");
-    s: word @R+1 = sum(lend b, 2) on NaT { burn b; yield 1; };
+    s: int @R+1 = sum(lend b, 2) on NaT { burn b; yield 1; };
     show(s);
     print(" (");
     describe(s);

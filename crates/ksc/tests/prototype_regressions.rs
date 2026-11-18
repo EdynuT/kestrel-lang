@@ -15,12 +15,12 @@ fn compile_error(src: &str) -> String {
     }
 }
 
-const TAKE: &str = "proc take(b: own [word]) { burn b; }\n";
+const TAKE: &str = "proc take(b: own [int]) { burn b; }\n";
 
 #[test]
 fn bug1_copy_creates_two_owners() {
     // Prototype: `let !b = a;` then `purge(a); purge(b);` compiled (double free).
-    let e = compile_error("proc main() { a: own [word] = claim 3; b: own [word] = a; burn a; burn b; }");
+    let e = compile_error("proc main() { a: own [int] = claim 3; b: own [int] = a; burn a; burn b; }");
     assert!(e.contains("cannot be used as a value"), "{e}");
 }
 
@@ -28,20 +28,20 @@ fn bug1_copy_creates_two_owners() {
 fn bug2_claim_into_plain_variable() {
     // Prototype: `let x = alloc(3);` leaked silently.
     assert!(compile_error("proc main() { x := claim 3; }").contains("needs to know the buffer type"));
-    assert!(compile_error("proc main() { x: own [word] = claim 3; }").contains("never burned"));
+    assert!(compile_error("proc main() { x: own [int] = claim 3; }").contains("never burned"));
 }
 
 #[test]
 fn bug3_own_parameter_without_give() {
     // Prototype: `eat(a)` without `!` let the callee free the caller's buffer.
-    let e = compile_error(&format!("{TAKE}proc main() {{ a: own [word] = claim 3; take(a); burn a; }}"));
+    let e = compile_error(&format!("{TAKE}proc main() {{ a: own [int] = claim 3; take(a); burn a; }}"));
     assert!(e.contains("takes ownership"), "{e}");
 }
 
 #[test]
 fn bug4_overwrite_live_owner() {
     // Prototype: `a = alloc(5);` while `a` was alive leaked the first buffer.
-    let e = compile_error("proc main() { a: own [word] = claim 3; a = claim 5; burn a; }");
+    let e = compile_error("proc main() { a: own [int] = claim 3; a = claim 5; burn a; }");
     assert!(e.contains("would leak"), "{e}");
 }
 
@@ -49,7 +49,7 @@ fn bug4_overwrite_live_owner() {
 fn bug5_tri_arm_leaks_when_another_diverges() {
     // Prototype: with one diverging arm, only the first surviving arm was checked.
     let e = compile_error(
-        "proc main() { a: own [word] = claim 3; t: trit = -;
+        "proc main() { a: own [int] = claim 3; t: trit = -;
            tri t { - => { burn a; yield; } 0 => burn a, + => {} } }",
     );
     assert!(e.contains("different states"), "{e}");
@@ -58,7 +58,7 @@ fn bug5_tri_arm_leaks_when_another_diverges() {
 #[test]
 fn bug8_wrong_number_of_arguments() {
     // Prototype: `f(1, 2, 3)` for `fn f(x)` panicked inside the VM.
-    let e = compile_error("proc f(x: word) -> word { yield x; } proc main() { y := f(1, 2, 3); }");
+    let e = compile_error("proc f(x: int) -> int { yield x; } proc main() { y := f(1, 2, 3); }");
     assert!(e.contains("takes 1 argument, found 3"), "{e}");
 }
 

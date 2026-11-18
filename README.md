@@ -4,7 +4,7 @@ An experimental programming language for a **balanced-ternary** virtual machine.
 
 Kestrel targets the BET-VM, a simulated 27-trit processor where every digit is `-1`, `0` or `+1`. The language has three-valued Kleene logic, a poison value (`NaT`) for invalid results instead of silent wrap-around, strict linear ownership with no garbage collector, and arrays indexed from the center.
 
-> **Status:** hobby project, early stage. The [specification](SPEC.md) is done. The compiler (`ksc`) and VM (`ksvm`) are still being written.
+> **Status:** hobby project. The [specification](SPEC.md), the compiler (`ksc`) and the VM (`ksvm`) work end to end. See [`examples/tour.ks`](examples/tour.ks).
 
 ## A taste
 
@@ -54,9 +54,10 @@ Negation is free in balanced ternary: flip every trit (`0t+0-` = 8, `0t-0+` = �
 
 ```
 crates/
-├── kestrel-core/   ternary word types, instruction set, .ksb format
-├── ksc/            compiler   .ks  -> .ksb
+├── kestrel-core/   ternary word and real types, instruction set, .ksb format
+├── ksc/            compiler: lexer, parser, type checker, ownership checker, codegen
 └── ksvm/           virtual machine, runs .ksb
+examples/           sample programs
 SPEC.md             language and VM specification (Portuguese)
 ```
 
@@ -66,8 +67,20 @@ Requires a recent stable Rust toolchain.
 
 ```
 cargo build --release
-cargo run -p ksc  -- program.ks      # compile (work in progress)
-cargo run -p ksvm -- program.ksb     # run (work in progress)
+./target/release/ksc examples/tour.ks          # writes examples/tour.ksb
+./target/release/ksvm examples/tour.ksb        # runs it
+./target/release/ksc examples/tour.ks --disasm # shows the bytecode
+```
+
+The compiler rejects ownership mistakes before anything runs:
+
+```
+error: the arms of this `tri` leave `data` in different states
+ --> leak.ks:4:5
+  |
+4 |     tri t {
+  |     ^^^^^^^
+  = note: `-` arm: burned, `0` arm: burned, `+` arm: still owned (every arm that continues must agree)
 ```
 
 ## License

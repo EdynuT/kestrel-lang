@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 kestrel-core = { path = "../kestrel-core" }
+
+[dev-dependencies]
+ksvm = { path = "../ksvm" }

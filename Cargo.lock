@@ -11,6 +11,7 @@ name = "ksc"
 version = "0.1.0"
 dependencies = [
  "kestrel-core",
+ "ksvm",
 ]
 
 [[package]]

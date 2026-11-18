@@ -1,13 +1,19 @@
-//! ksc command line: `ksc <program.ks> [--tokens] [--ast]`.
+//! ksc command line.
+//!
+//! ```text
+//! ksc program.ks [-o out.ksb] [--disasm] [--tokens] [--ast]
+//! ```
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let show_tokens = args.iter().any(|a| a == "--tokens");
-    let show_ast = args.iter().any(|a| a == "--ast");
-    let Some(path) = args.iter().find(|a| !a.starts_with("--")) else {
-        eprintln!("usage: ksc <program.ks> [--tokens] [--ast]");
+    let flag = |f: &str| args.iter().any(|a| a == f);
+    let out_arg = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1));
+    let Some(path) = args.iter().enumerate().find(|(i, a)| !a.starts_with('-') && (*i == 0 || args[i - 1] != "-o")).map(|(_, a)| a)
+    else {
+        eprintln!("usage: ksc <program.ks> [-o out.ksb] [--disasm] [--tokens] [--ast]");
         return ExitCode::from(2);
     };
     let src = match std::fs::read_to_string(path) {
@@ -17,39 +23,42 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let tokens = match ksc::lexer::lex(&src) {
-        Ok(t) => t,
-        Err(d) => {
-            eprint!("{}", d.render(path, &src));
-            return ExitCode::FAILURE;
-        }
-    };
-    if show_tokens {
-        for t in &tokens {
-            println!("{:>5}..{:<5} {}", t.span.start, t.span.end, t.tok);
-        }
-    }
-    let program = match ksc::parser::parse(tokens) {
-        Ok(p) => p,
-        Err(d) => {
-            eprint!("{}", d.render(path, &src));
-            return ExitCode::FAILURE;
-        }
-    };
-    if show_ast {
-        println!("{program:#?}");
-    }
-    let hir = match ksc::sema::check(&program) {
-        Ok(h) => h,
-        Err(d) => {
-            eprint!("{}", d.render(path, &src));
-            return ExitCode::FAILURE;
-        }
-    };
-    if let Err(d) = ksc::linear::check(&hir) {
+    let fail = |d: ksc::diag::Diagnostic| {
         eprint!("{}", d.render(path, &src));
-        return ExitCode::FAILURE;
+        ExitCode::FAILURE
+    };
+
+    if flag("--tokens") || flag("--ast") {
+        let tokens = match ksc::lexer::lex(&src) {
+            Ok(t) => t,
+            Err(d) => return fail(d),
+        };
+        if flag("--tokens") {
+            for t in &tokens {
+                println!("{:>5}..{:<5} {}", t.span.start, t.span.end, t.tok);
+            }
+        }
+        if flag("--ast") {
+            match ksc::parser::parse(tokens) {
+                Ok(p) => println!("{p:#?}"),
+                Err(d) => return fail(d),
+            }
+        }
     }
-    eprintln!("ksc: {} proc(s) checked (types and ownership); code generation is not written yet", hir.procs.len());
+
+    let module = match ksc::compile(&src) {
+        Ok(m) => m,
+        Err(d) => return fail(d),
+    };
+    if flag("--disasm") {
+        print!("{}", module.disassemble());
+    }
+    let out = out_arg.map(PathBuf::from).unwrap_or_else(|| PathBuf::from(path).with_extension("ksb"));
+    let bytes = module.to_bytes();
+    if let Err(e) = std::fs::write(&out, &bytes) {
+        eprintln!("ksc: cannot write {}: {e}", out.display());
+        return ExitCode::from(2);
+    }
+    eprintln!("ksc: wrote {} ({} bytes)", out.display(), bytes.len());
     ExitCode::SUCCESS
 }

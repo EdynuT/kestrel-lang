@@ -430,6 +430,9 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         writeln!(out, "\n=== dump: {} (in {}) ===", self.module.strings[label as usize], f.name)?;
         for (i, v) in frame.locals.iter().enumerate() {
             let name = f.local_names.get(i).map_or("", String::as_str);
+            if name.starts_with('$') {
+                continue; // compiler temporary
+            }
             let reg = slot_name(i as u16);
             let shown = match *v {
                 Value::Word(w) => {

@@ -318,7 +318,7 @@ mod tests {
         c
     }
 
-    /// main() { x := 8; show(sum(x)); } with sum(v) = v + v.
+    /// main() { x := 8; print(sum(x)); } with sum(v) = v + v.
     fn sample() -> Module {
         let main = Function {
             name: "main".into(),

@@ -65,7 +65,7 @@ fn bug8_wrong_number_of_arguments() {
 #[test]
 fn bug9_poison_guard_that_falls_through() {
     // Prototype: a guard whose else did not diverge produced NaT anyway.
-    let e = compile_error("proc main() { x := 1 / 0 on NaT { print(\"oops\"); }; show(x); }");
+    let e = compile_error("proc main() { x := 1 / 0 on NaT { print(\"oops\"); }; print(x); }");
     assert!(e.contains("must end with `yield`"), "{e}");
 }
 

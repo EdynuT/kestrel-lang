@@ -5,33 +5,23 @@ proc main() {
 
     // declaração de variaveis
     variavel1: int = 5;
-    show(variavel1);
-    print("\n");
+    printf("exemplo de %%t = %t\n", variavel1);
     variavel1 = -5;
-    show(variavel1);
-    print("\n");
+    printl(variavel1);
 
     // operações
     variavel2: int = 2;
-    show(variavel2 + 2);
-    print("\n");
-    show(variavel2 - 2);
-    print("\n");
-    show(variavel2 * 2);
-    print("\n");
-    show(variavel2 / 2);
-    print("\n");
+    printl(variavel2 + 2);
+    printl(variavel2 - 2);
+    printl(variavel2 * 2);
+    printl(variavel2 / 2);
 
     variavel3: int = variavel2 + variavel1;
-    show(variavel3);
-    print("\n");
+    printl(variavel3);
     variavel3: int = variavel2 - variavel1;
-    show(variavel3);
-    print("\n");
+    printl(variavel3);
     variavel3: int = variavel2 * variavel1;
-    show(variavel3);
-    print("\n");
+    printl(variavel3);
     variavel3: real = (real) variavel2 / (real) variavel1;
-    show(variavel3);
-    print("\n");
+    printl(variavel3);
 }

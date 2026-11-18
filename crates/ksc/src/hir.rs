@@ -96,11 +96,22 @@ pub struct HExpr {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Builtin {
-    Print,
-    Show,
     Emit,
     Input,
     Len,
+}
+
+/// How one `print`/`printf` piece is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fmt {
+    /// Text as is, numbers in decimal (`{x}`, `%d`, `%f`, `%s`).
+    Plain,
+    /// `{x:t}` / `%t`
+    Trits,
+    /// `{x:v}` / `%v`
+    Hepta,
+    /// `{x:c}` / `%c`
+    Char,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -122,6 +133,8 @@ pub enum HExprKind {
     Index(Box<HExpr>, Box<HExpr>),
     Call(ProcId, Vec<HExpr>),
     Builtin(Builtin, Vec<HExpr>),
+    /// `print` / `printf`, already split into pieces printed in order.
+    Print(Vec<(Fmt, HExpr)>),
     Claim(Box<HExpr>),
 }
 

@@ -415,10 +415,16 @@ impl<'a> ProcGen<'a> {
                 }
                 self.emit(Op::Call { f: *pid as u32, argc: args.len() as u8 });
             }
-            HExprKind::Builtin(Builtin::Print, pieces) => {
-                for p in pieces {
+            HExprKind::Print(pieces) => {
+                for (fmt, p) in pieces {
                     self.expr(p)?;
-                    self.emit(Op::Print);
+                    self.emit(match fmt {
+                        Fmt::Plain if p.ty == Type::Text => Op::Print,
+                        Fmt::Plain => Op::Show,
+                        Fmt::Trits => Op::ShowT,
+                        Fmt::Hepta => Op::ShowV,
+                        Fmt::Char => Op::Emit,
+                    });
                 }
             }
             HExprKind::Builtin(b, args) => {
@@ -426,8 +432,6 @@ impl<'a> ProcGen<'a> {
                     self.expr(a)?;
                 }
                 self.emit(match b {
-                    Builtin::Print => Op::Print,
-                    Builtin::Show => Op::Show,
                     Builtin::Emit => Op::Emit,
                     Builtin::Input => Op::Input,
                     Builtin::Len => Op::TLen,
@@ -448,6 +452,7 @@ impl<'a> ProcGen<'a> {
 fn leaves_value(e: &HExpr) -> bool {
     match e.kind {
         HExprKind::Builtin(..) => e.ty != Type::Void,
+        HExprKind::Print(_) => false,
         _ => true,
     }
 }

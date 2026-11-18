@@ -335,6 +335,15 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 };
                 self.output.write_all(s.as_bytes()).map_err(io_err)?;
             }
+            Op::ShowT | Op::ShowV => {
+                let w = self.pop_word()?;
+                let s = match (w.is_nat(), op) {
+                    (true, _) => "NaT".to_string(),
+                    (false, Op::ShowT) => Word27::from(w).to_trits_short(),
+                    (false, _) => Word27::from(w).to_hepta_short(),
+                };
+                self.output.write_all(s.as_bytes()).map_err(io_err)?;
+            }
             Op::Dump(k) => self.dump(k).map_err(io_err)?,
         }
         Ok(None)
@@ -525,7 +534,7 @@ mod tests {
 
     #[test]
     fn call_and_return() {
-        // main: show(sum(8)); yield 0     sum(v): yield v + v
+        // main: print(sum(8)); yield 0     sum(v): yield v + v
         let m = module(
             vec![
                 func("main", 0, 0, &[c(8), Op::Call { f: 1, argc: 1 }, Op::Show, c(0), Op::Ret]),
@@ -561,7 +570,7 @@ mod tests {
 
     #[test]
     fn symmetric_buffer() {
-        // b = claim 5; b[-2] = 8; b[2] = 5; show(b[-2] + b[2]); burn b
+        // b = claim 5; b[-2] = 8; b[2] = 5; print(b[-2] + b[2]); burn b
         let m = module(
             vec![func(
                 "main",
@@ -639,7 +648,7 @@ mod tests {
 
     #[test]
     fn nat_guard_and_input() {
-        // x = input(); on NaT { print "bad"; yield -1 }; show(x)
+        // x = input(); on NaT { print "bad"; yield -1 }; print(x)
         // Input(1) + JNat(5) + Show(1) + PushC(5) + Ret(1): the handler starts at byte 13.
         let m = module(
             vec![func(

@@ -28,22 +28,22 @@ proc main() -> int {
         b[i] = i * i * i;          // -8 -1 0 1 8
     }
     print("cubes: ");
-    walk i in span 2 { show(b[i]); print(" "); }
+    walk i in span 2 { print(b[i]); print(" "); }
     print("\nsum = ");
     s: int @R+1 = sum(lend b, 2) on NaT { burn b; yield 1; };
-    show(s);
+    print(s);
     print(" (");
     describe(s);
     print(")\n");
 
-    print("0t+0- = "); show(0t+0-);
-    print(", 2 pow 10 = "); show(2 ** 10);
-    print(", 1.0 / 3.0 = "); show(1.0 / 3.0);
-    print("\n");
+    print("0t+0- = "); print(0t+0-);
+    print(", 2 pow 10 = "); print(2 ** 10);
+    print(", 1.0 / 3.0 = "); print(1.0 / 3.0);
+    printl();
 
     t: tryte = 360;
     t = t + 10;                    // past 364: overflow becomes NaT, never wraps
-    print("360 + 10 as a tryte = "); show(t); print("\n");
+    print("360 + 10 as a tryte = "); printl(t);
 
     dump("before burn");
     burn b;

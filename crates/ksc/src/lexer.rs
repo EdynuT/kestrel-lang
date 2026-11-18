@@ -348,7 +348,8 @@ impl Lexer<'_> {
             },
             Some(c) => c,
         };
-        if char_to_tryte(c).is_none() {
+        // `{ } %` pass in strings so `printf` can read them; sema checks the rest.
+        if char_to_tryte(c).is_none() && !(quote == '"' && matches!(c, '{' | '}' | '%')) {
             return Err(self
                 .err(format!("character {c:?} is not in the Kestrel character table"), c_start)
                 .with_note("allowed: letters, digits, space, \\n, \\t and . , : ; ! ? - + / _ = ( ) [ ]"));

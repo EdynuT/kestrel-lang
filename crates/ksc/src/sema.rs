@@ -13,7 +13,7 @@ use crate::hir::*;
 
 type R<T> = Result<T, Diagnostic>;
 
-const BUILTINS: [&str; 6] = ["print", "show", "emit", "input", "len", "dump"];
+const BUILTINS: [&str; 7] = ["print", "printl", "printf", "emit", "input", "len", "dump"];
 
 pub fn check(program: &Program) -> R<Hir> {
     let mut cx = Checker { sigs: Vec::new(), proc_ids: HashMap::new(), consts: HashMap::new(), f: FnCx::new(Type::Void) };
@@ -341,7 +341,7 @@ impl Checker {
                     };
                 }
                 let h = self.expr(e, None)?;
-                if !matches!(h.kind, HExprKind::Call(..) | HExprKind::Builtin(..)) {
+                if !matches!(h.kind, HExprKind::Call(..) | HExprKind::Builtin(..) | HExprKind::Print(_)) {
                     return Err(err("this expression does nothing", e.span).with_note("only calls can be used as statements"));
                 }
                 if let Type::Own(_) = h.ty {
@@ -477,7 +477,10 @@ impl Checker {
             }
             ExprKind::Real(r) => hx(HExprKind::Real(*r), Type::Scalar(Scalar::Real), span),
             ExprKind::Char(c) => hx(HExprKind::Word(kestrel_core::Word::new(*c)), Type::Scalar(Scalar::Tryte), span),
-            ExprKind::Str(s) => hx(HExprKind::Text(s.clone()), Type::Text, span),
+            ExprKind::Str(s) => {
+                printable(s, span)?;
+                hx(HExprKind::Text(s.clone()), Type::Text, span)
+            }
             ExprKind::NaT => match want {
                 Some(Type::Scalar(Scalar::Real)) => hx(HExprKind::Real(kestrel_core::Real::NAT), Type::Scalar(Scalar::Real), span),
                 Some(t @ Type::Scalar(_)) => hx(HExprKind::Word(kestrel_core::Word::NAT), t, span),
@@ -601,6 +604,15 @@ impl Checker {
         Ok(hx(HExprKind::Binary(op, Box::new(ha), Box::new(hb)), ty, span))
     }
 
+    /// True if `e` is a `+` chain with a text piece in it: `print` then joins
+    /// text instead of adding numbers.
+    fn is_text_chain(&mut self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Binary(BinOp::Add, a, b) => self.is_text_chain(a) || self.is_text_chain(b),
+            _ => self.expr(e, None).is_ok_and(|h| h.ty == Type::Text),
+        }
+    }
+
     /// Flattens `print("a" + x + "b")` into its text pieces; every piece must be text.
     fn text_pieces(&mut self, e: &Expr, out: &mut Vec<HExpr>) -> R<()> {
         let ExprKind::Binary(BinOp::Add, a, b) = &e.kind else {
@@ -615,11 +627,113 @@ impl Checker {
             let h = self.expr(side, Some(Type::Text))?;
             if h.ty != Type::Text {
                 return Err(err(format!("`+` joins text with text only, found {}", h.ty), h.span)
-                    .with_note("print numbers with `show(x)`"));
+                    .with_note("print numbers on their own, or use `printf(\"x = %d\", x)`"));
             }
             out.push(h);
         }
         Ok(())
+    }
+
+    /// Splits a `printf` format into pieces. `{name}` / `{name:t|v|c}` read a
+    /// variable; `%d/%i %f/%r %s %t %v %c` take the next argument; `{{ }} %%` are literal.
+    fn format(&mut self, f: &str, fspan: Span, args: &mut std::slice::Iter<Expr>) -> R<Vec<(Fmt, HExpr)>> {
+        let mut out = Vec::new();
+        let mut lit = String::new();
+        // Source span of each character, so errors point inside the literal
+        // (skipping the opening quote; `\n` and `\t` take two source bytes).
+        let mut at = fspan.start + 1;
+        let located: Vec<(Span, char)> = f
+            .chars()
+            .map(|c| {
+                let w = if matches!(c, '\n' | '\t') { 2 } else { c.len_utf8() };
+                at += w;
+                (Span { start: at - w, end: at }, c)
+            })
+            .collect();
+        let mut chars = located.into_iter().peekable();
+        let flush = |lit: &mut String, out: &mut Vec<(Fmt, HExpr)>| -> R<()> {
+            if !lit.is_empty() {
+                printable(lit, fspan)?;
+                out.push((Fmt::Plain, hx(HExprKind::Text(std::mem::take(lit)), Type::Text, fspan)));
+            }
+            Ok(())
+        };
+        while let Some((cspan, c)) = chars.next() {
+            if matches!(c, '{' | '}' | '%') && chars.peek().map(|p| p.1) == Some(c) {
+                chars.next();
+                lit.push(c);
+                continue;
+            }
+            match c {
+                '{' => {
+                    let mut inner = String::new();
+                    let mut pspan = cspan;
+                    loop {
+                        match chars.next() {
+                            Some((sp, '}')) => {
+                                pspan = pspan.to(sp);
+                                break;
+                            }
+                            Some((sp, c)) => {
+                                pspan = pspan.to(sp);
+                                inner.push(c);
+                            }
+                            None => {
+                                return Err(err("`{` is never closed in this format", cspan)
+                                    .with_note("write `{{` to print a `{`"));
+                            }
+                        }
+                    }
+                    flush(&mut lit, &mut out)?;
+                    let label = format!("{{{inner}}}");
+                    let (name, spec) = inner.split_once(':').unwrap_or((&inner, ""));
+                    let spec = match spec {
+                        "" => ' ',
+                        "t" | "v" | "c" => spec.chars().next().unwrap_or(' '),
+                        _ => {
+                            return Err(err(format!("unknown format `:{spec}` in `{label}`"), pspan)
+                                .with_note("use `:t` (ternary), `:v` (heptavintimal) or `:c` (character)"));
+                        }
+                    };
+                    let ident = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    if !ident {
+                        return Err(err(format!("`{label}` must hold a variable name"), pspan)
+                            .with_note("for expressions use `%` and pass them as arguments: `printf(\"%d\", a + b)`"));
+                    }
+                    let h = self.expr(&Expr { kind: ExprKind::Var(name.to_string()), span: pspan }, None)?;
+                    out.push(piece(spec, &label, h)?);
+                }
+                '}' => return Err(err("`}` without a matching `{` in this format", cspan).with_note("write `}}` to print a `}`")),
+                '%' => {
+                    let (pspan, spec) = match chars.next() {
+                        Some((sp, c)) => (cspan.to(sp), c),
+                        None => (cspan, ' '),
+                    };
+                    let want = match spec {
+                        'd' | 'i' | 't' | 'v' => Type::Scalar(Scalar::Int),
+                        'f' | 'r' => Type::Scalar(Scalar::Real),
+                        's' => Type::Text,
+                        'c' => Type::Scalar(Scalar::Tryte),
+                        _ => {
+                            return Err(err(format!("unknown format `%{}`", spec.to_string().trim()), pspan)
+                                .with_note("use %d or %i (integer), %f or %r (real), %s (text), %t (ternary), %v (heptavintimal), %c (character); `%%` prints `%`"));
+                        }
+                    };
+                    let label = format!("%{spec}");
+                    let Some(a) = args.next() else {
+                        return Err(err(format!("`{label}` has no argument to print"), pspan)
+                            .with_note(format!("every `%` takes the next argument, and none is left; to print `{label}` as text, write `%{label}`")));
+                    };
+                    flush(&mut lit, &mut out)?;
+                    let h = self.expr(a, Some(want))?;
+                    out.push(piece(spec, &label, h)?);
+                }
+                _ => lit.push(c),
+            }
+        }
+        flush(&mut lit, &mut out)?;
+        Ok(out)
     }
 
     fn call(&mut self, name: &ast::Ident, args: &[Expr], span: Span) -> R<HExpr> {
@@ -634,19 +748,54 @@ impl Checker {
         let text = Type::Text;
         let builtin = |b: Builtin, args: Vec<HExpr>, ty: Type| hx(HExprKind::Builtin(b, args), ty, span);
         match name.name.as_str() {
-            "print" => {
-                arity(1)?;
+            "print" | "printl" => {
                 let mut pieces = Vec::new();
-                self.text_pieces(&args[0], &mut pieces)?;
-                return Ok(builtin(Builtin::Print, pieces, Type::Void));
-            }
-            "show" => {
-                arity(1)?;
-                let a = self.expr(&args[0], None)?;
-                if !matches!(a.ty, Type::Scalar(_) | Type::Text) {
-                    return Err(err(format!("`show` prints numbers and text, found {}", a.ty), a.span));
+                if !(name.name == "printl" && args.is_empty()) {
+                    arity(1)?;
+                    if self.is_text_chain(&args[0]) {
+                        let mut texts = Vec::new();
+                        self.text_pieces(&args[0], &mut texts)?;
+                        pieces.extend(texts.into_iter().map(|h| (Fmt::Plain, h)));
+                    } else {
+                        let a = self.expr(&args[0], None)?;
+                        if !matches!(a.ty, Type::Scalar(_) | Type::Text) {
+                            return Err(err(format!("`{}` prints numbers and text, found {}", name.name, a.ty), a.span));
+                        }
+                        pieces.push((Fmt::Plain, a));
+                    }
                 }
-                return Ok(builtin(Builtin::Show, vec![a], Type::Void));
+                if name.name == "printl" {
+                    pieces.push((Fmt::Plain, hx(HExprKind::Text("\n".into()), text, span)));
+                }
+                return Ok(hx(HExprKind::Print(pieces), Type::Void, span));
+            }
+            "printf" => {
+                let Some((first, rest)) = args.split_first() else {
+                    return Err(err("`printf` takes a format text first", span));
+                };
+                // The format may join texts with `+`: literals are read as format,
+                // anything else must be text and is printed as is.
+                let mut parts = Vec::new();
+                add_chain(first, &mut parts);
+                let mut rest = rest.iter();
+                let mut pieces = Vec::new();
+                for part in parts {
+                    if let ExprKind::Str(f) = &part.kind {
+                        pieces.extend(self.format(f, part.span, &mut rest)?);
+                        continue;
+                    }
+                    let h = self.expr(part, Some(Type::Text))?;
+                    if h.ty != Type::Text {
+                        return Err(err(format!("the format of `printf` joins text only, found {}", h.ty), h.span)
+                            .with_note("pass numbers as arguments: `printf(\"x = %d\", x)`"));
+                    }
+                    pieces.push((Fmt::Plain, h));
+                }
+                if let Some(extra) = rest.next() {
+                    return Err(err("this argument has no `%` in the format", extra.span)
+                        .with_note("a `%` inside a text variable is printed as is, not read as format"));
+                }
+                return Ok(hx(HExprKind::Print(pieces), Type::Void, span));
             }
             "emit" => {
                 arity(1)?;
@@ -702,6 +851,62 @@ impl Checker {
         }
         Ok(hx(HExprKind::Call(id, hargs), sig.ret, span))
     }
+}
+
+/// Collects the operands of a `a + b + c` chain, left to right.
+fn add_chain<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match &e.kind {
+        ExprKind::Binary(BinOp::Add, a, b) => {
+            add_chain(a, out);
+            add_chain(b, out);
+        }
+        _ => out.push(e),
+    }
+}
+
+/// Every character of a text must be in the character table (SPEC §4).
+fn printable(s: &str, span: Span) -> R<()> {
+    match s.chars().find(|&c| kestrel_core::charset::char_to_tryte(c).is_none()) {
+        Some(c @ ('{' | '}' | '%')) => Err(err(format!("{c:?} cannot be printed yet: it is not in the character table"), span)
+            .with_note("`{name}` and `%d` placeholders only work inside `printf`")),
+        Some(c) => Err(err(format!("character {c:?} is not in the Kestrel character table"), span)),
+        None => Ok(()),
+    }
+}
+
+/// Checks one `printf` value against its format letter (`' '` for a bare `{x}`).
+fn piece(spec: char, label: &str, h: HExpr) -> R<(Fmt, HExpr)> {
+    let ty = h.ty;
+    let ok = match spec {
+        'd' | 'i' | 't' | 'v' => ty.is_int(),
+        'f' | 'r' => ty == Type::Scalar(Scalar::Real),
+        's' => ty == Type::Text,
+        'c' => matches!(ty, Type::Scalar(Scalar::Tryte | Scalar::Trit)),
+        _ => matches!(ty, Type::Scalar(_) | Type::Text),
+    };
+    if !ok {
+        let wants = match spec {
+            'd' | 'i' | 't' | 'v' => "an integer",
+            'f' | 'r' => "a real",
+            's' => "text",
+            'c' => "a tryte",
+            _ => "a number or text",
+        };
+        let d = err(format!("`{label}` prints {wants}, found {ty}"), h.span);
+        return Err(match spec {
+            'c' if ty.is_int() => d.with_note("cast it: `(tryte) x`"),
+            'd' | 'i' if ty == Type::Scalar(Scalar::Real) => d.with_note("use `%f` for reals, or cast: `(int) x`"),
+            'f' | 'r' if ty.is_int() => d.with_note("use `%d` for integers, or cast: `(real) x`"),
+            _ => d,
+        });
+    }
+    let fmt = match spec {
+        't' => Fmt::Trits,
+        'v' => Fmt::Hepta,
+        'c' => Fmt::Char,
+        _ => Fmt::Plain,
+    };
+    Ok((fmt, h))
 }
 
 #[cfg(test)]
@@ -837,7 +1042,25 @@ proc main() -> int {
         assert!(err_in("x := 1; x + 1;").contains("does nothing"));
         assert!(err_in("x := print(\"a\");").contains("has no value"));
         assert!(err_in("emit(1000);").contains("does not fit in a tryte"));
-        ok("emit('A'); show(1.5); show(\"hi\"); x := input(); dump(\"here\");");
+        ok("emit('A'); print(1.5); printl(\"hi\"); printl(); print(1 + 2); x := input(); dump(\"here\");");
+    }
+
+    #[test]
+    fn printf_checks() {
+        ok("n: int = 1; t: tryte = 'A'; printf(\"{n} {n:t} {n:v} {t:c} %d %i %f %r %s %c\", n + 1, n, 2.5, 0.5, \"x\", 'b');");
+        assert!(err_in("printf(\"%d\", 1.5);").contains("prints an integer, found real"));
+        assert!(err_in("x: int = 1; printf(\"%r\", x);").contains("prints a real, found int"));
+        assert!(err_in("x: int = 70; printf(\"%c\", x);").contains("prints a tryte, found int"));
+        assert!(err_in("printf(\"%d %d\", 1);").contains("has no argument"));
+        assert!(err_in("printf(\"oi\", 1);").contains("has no `%`"));
+        assert!(err_in("printf(\"{1+2}\");").contains("must hold a variable name"));
+        assert!(err_in("printf(\"{a:q}\");").contains("unknown format `:q`"));
+        assert!(err_in("printf(\"{a\");").contains("never closed"));
+        assert!(err_in("printf(\"%x\", 1);").contains("unknown format `%x`"));
+        assert!(err_in("print(\"{x}\");").contains("cannot be printed yet"));
+        assert!(err_in("f: text = \"x\"; printf(f, 1);").contains("has no `%`"));
+        ok("f: text = \"t\"; n: int = 1; printf(\"a \" + f + \" = %t {n}\" + \"!\", n);");
+        assert!(err_in("n: int = 1; printf(\"a\" + n);").contains("joins text only, found int"));
     }
 
     #[test]
@@ -858,7 +1081,7 @@ proc main() -> int {
         assert!(err_in("yield; x := 1;").contains("unreachable code"));
         assert!(err_in("x := input() on NaT { print(\"bad\"); };").contains("must end with `yield`"));
         assert!(err_of("proc f() -> lent [int] { } proc main() {}").contains("cannot yield a lent buffer"));
-        ok("x := input() on NaT { yield; }; show(x);");
+        ok("x := input() on NaT { yield; }; print(x);");
     }
 
     #[test]

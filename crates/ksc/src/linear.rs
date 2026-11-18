@@ -284,6 +284,7 @@ impl Checker<'_> {
                 }
             }
             HExprKind::Builtin(_, args) => args.iter().try_for_each(|a| self.expr(a, st))?,
+            HExprKind::Print(pieces) => pieces.iter().try_for_each(|(_, a)| self.expr(a, st))?,
         }
         Ok(())
     }

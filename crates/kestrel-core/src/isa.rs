@@ -83,6 +83,10 @@ pub enum Op {
     Emit,
     Print,
     Show,
+    /// Print an integer in ternary (`0t+-0`), no leading zeros.
+    ShowT,
+    /// Print an integer in heptavintimal (`0vD`), no leading zeros.
+    ShowV,
     /// Print registers and heap, labeled with string `k`.
     Dump(u32),
 }
@@ -161,6 +165,8 @@ impl Op {
             Print => 0x62,
             Show => 0x63,
             Dump(_) => 0x64,
+            ShowT => 0x65,
+            ShowV => 0x66,
         }
     }
 
@@ -213,6 +219,8 @@ impl Op {
             Emit => "emit",
             Print => "print",
             Show => "show",
+            ShowT => "showt",
+            ShowV => "showv",
             Dump(_) => "dump",
         }
     }
@@ -302,6 +310,8 @@ impl Op {
             0x62 => Print,
             0x63 => Show,
             0x64 => Dump(r.u32()?),
+            0x65 => ShowT,
+            0x66 => ShowV,
             _ => return Err(DecodeError::BadOpcode { at, byte }),
         };
         Ok((op, r.pos - at))
@@ -375,7 +385,7 @@ mod tests {
             TLen, TIdx, Narrow6, Narrow1, IToF, FToI,
             Alloc, LdIdx, StIdx, Purge(8),
             Jmp(12), JNat(u32::MAX), Br3 { neg: 1, zero: 2, pos: 3 }, Call { f: 2, argc: 3 }, Ret,
-            Input, Emit, Print, Show, Dump(5),
+            Input, Emit, Print, Show, Dump(5), ShowT, ShowV,
         ]
     }
 

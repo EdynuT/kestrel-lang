@@ -51,6 +51,16 @@ impl Word27 {
         s
     }
 
+    /// Like [`Word27::to_trits`] without leading zeros: `0t0` for zero.
+    pub fn to_trits_short(self) -> String {
+        short(self.to_trits(WORD_TRITS))
+    }
+
+    /// Like [`Word27::to_hepta`] without leading zeros: `0v0` for zero.
+    pub fn to_hepta_short(self) -> String {
+        short(self.to_hepta())
+    }
+
     /// Formats as `0v` followed by 9 heptavintimal digits (3 trits each).
     pub fn to_hepta(self) -> String {
         let mut s = String::from("0v");
@@ -104,6 +114,12 @@ impl From<Word27> for Word {
 }
 
 /// Heptavintimal digit for a value in -13..=13.
+/// Drops leading zero digits after the 2-char prefix, keeping at least one.
+fn short(full: String) -> String {
+    let digits = full[2..].trim_start_matches('0');
+    format!("{}{}", &full[..2], if digits.is_empty() { "0" } else { digits })
+}
+
 fn hepta_char(v: i32) -> char {
     match v {
         0 => '0',

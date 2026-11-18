@@ -248,7 +248,7 @@ acc: int @R0 = 0;    // acc mora no registrador R0
 tri s <=> 10 {
     - => print("less"),
     0 => print("equal"),
-    + => { print("greater"); show(s); }
+    + => { print("greater"); print(s); }
 }
 tri cmp3 s, 10 { ... }     // forma assembly, idêntica
 ```
@@ -283,12 +283,41 @@ s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
 
 | Comando | Efeito |
 |---|---|
-| `print(s)` | Imprime um `text` |
+| `print(x)` | Imprime um número (em decimal) ou um `text`, sem quebra de linha. Aceita `+` entre textos: `print("Olá, " + nome)` |
+| `printl(x)` | Igual ao `print`, seguido de quebra de linha. `printl()` só quebra a linha |
+| `printf(fmt, args...)` | Imprime texto formatado (§8.8.1) |
 | `len(s)` | Tamanho de um `text` |
-| `show(x)` | Imprime um valor em decimal, sem quebra de linha. As formas `0t` e `0v` aparecem no `dump` |
 | `emit(c)` | Imprime um `tryte` como caractere (tabela §4) |
 | `input()` | Lê um `int` (decimal, `0t` ou `0v`). Entrada inválida vira NaT |
 | `dump("label")` | Mostra os registradores e o heap |
+
+#### 8.8.1 `printf`
+
+O primeiro argumento é o **formato**: um texto literal, ou vários textos unidos com `+`. Os **literais** são lidos como formato. Uma **variável `text`** entra como está: um `%t` guardado nela é impresso literalmente. Somar um número ao formato é **erro de tipo**.
+
+```
+notacao: text = "%t";
+printf("exemplo de " + notacao + " = %t\n", v);   // exemplo de %t = 0t+--
+```
+
+O formato aceita duas formas de colocar valores, que podem ser misturadas:
+
+- **Chaves:** `{nome}` imprime a variável `nome`. Só aceita nomes de variáveis e constantes. Contas vão como argumento `%`.
+- **Porcentagem:** cada `%` consome o próximo argumento, em ordem: `printf("%d + %d = %d", a, b, a + b)`.
+
+| Forma | Imprime | Aceita |
+|---|---|---|
+| `{x}` | Valor normal (decimal ou texto) | número ou `text` |
+| `%d` ou `%i` | Inteiro em decimal | `trit`, `tryte`, `int` |
+| `%f` ou `%r` | Real | `real` |
+| `%s` | Texto | `text` |
+| `{x:t}` / `%t` | Ternário sem zeros à esquerda: `-5` → `0t-++` | `trit`, `tryte`, `int` |
+| `{x:v}` / `%v` | Heptavintimal sem zeros à esquerda: `100` → `0vDh` | `trit`, `tryte`, `int` |
+| `{x:c}` / `%c` | Caractere (tabela §4) | `trit`, `tryte` (um `int` precisa de cast: `(tryte) x`) |
+
+- Tudo é verificado **na compilação**: tipo errado, `%` sem argumento, argumento sobrando ou nome desconhecido é **erro**.
+- `{{`, `}}` e `%%` imprimem `{`, `}` e `%`. Por enquanto esses caracteres não estão na tabela §4, então ainda geram erro.
+- Fora do `printf`, `{`, `}` e `%` em texto são erro de compilação.
 
 ## 9. BET-VM
 
@@ -308,7 +337,7 @@ s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
 | Largura | `NARROW6`, `NARROW1`, `ITOF`, `FTOI` (overflow vira NaT) |
 | Memória | `ALLOC`, `LDIDX`, `STIDX`, `PURGE s` |
 | Fluxo | `JMP a`, `JNAT a`, `BR3 a- a0 a+`, `CALL f n`, `RET` |
-| E/S | `INPUT`, `EMIT`, `PRINT`, `SHOW`, `DUMP str` |
+| E/S | `INPUT`, `EMIT`, `PRINT`, `SHOW`, `SHOWT` (`0t`), `SHOWV` (`0v`), `DUMP str` |
 
 **Codificação:** cada instrução tem 1 byte de opcode seguido de operandos de tamanho fixo, em little-endian. Os tipos são `k`, `f` e `a` (`u32`), `s` (`u16`) e `n` (`u8`). As faixas são: pilha `0x0_`, ALU inteira `0x1_`, ALU real `0x2_`, texto e conversão `0x3_`, memória `0x4_`, fluxo `0x5_` e E/S `0x6_`. A tabela completa está em `crates/kestrel-core/src/isa.rs`.
 
@@ -374,8 +403,8 @@ instr      = ( "add" | "sub" | "mul" | "div" | "mod" | "pow" | "shl3" | "shr3" )
 tri_head   = expr | "cmp3" expr "," expr ;
 arm        = ( "-" | "0" | "+" ) "=>" ( block | stmt_noterm "," ) ;
 range      = expr ".." expr | "span" expr ;
-io         = "print" "(" expr ")" | "show" "(" expr ")" | "emit" "(" expr ")"
-           | "dump" "(" STRING ")" ;
+io         = "print" "(" expr ")" | "printl" "(" [ expr ] ")" | "emit" "(" expr ")"
+           | "printf" "(" STRING { "," expr } ")" | "dump" "(" STRING ")" ;
 
 expr       = or_expr ;
 or_expr    = and_expr { "||" and_expr } ;

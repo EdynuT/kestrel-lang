@@ -46,6 +46,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    eprintln!("ksc: {} proc(s) type-checked; ownership checking and code generation are not written yet", hir.procs.len());
+    if let Err(d) = ksc::linear::check(&hir) {
+        eprint!("{}", d.render(path, &src));
+        return ExitCode::FAILURE;
+    }
+    eprintln!("ksc: {} proc(s) checked (types and ownership); code generation is not written yet", hir.procs.len());
     ExitCode::SUCCESS
 }

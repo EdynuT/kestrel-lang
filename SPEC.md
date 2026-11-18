@@ -332,7 +332,11 @@ Functions      fn_count ×
   param_count u8, local_count u16
   code_len u32 (em bytes)
   code: opcode u8 + operandos fixos
+  [se flags & 1] local_count × (u16 len + nome UTF-8)
 ```
+
+- **Bit 0 de `flags`** indica que o arquivo traz os nomes das variáveis, para o `dump` mostrar `R0 (acc)`.
+- **Verificação na leitura:** o arquivo é rejeitado se algum salto cair fora do início de uma instrução, se um índice de constante, string, função ou slot não existir, ou se o número de argumentos de uma chamada não bater com os parâmetros da função chamada.
 
 Os saltos usam um **offset absoluto em bytes** (`u32`) dentro do código da própria função.
 

@@ -3,11 +3,13 @@
 
 pub mod bet;
 pub mod isa;
+pub mod ksb;
 pub mod real;
 pub mod word;
 
 pub use bet::Word27;
 pub use isa::Op;
+pub use ksb::Module;
 pub use real::Real;
 pub use word::Word;
 

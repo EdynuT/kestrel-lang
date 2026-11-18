@@ -1,0 +1,8 @@
+[package]
+name = "ksc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kestrel-core = { path = "../kestrel-core" }

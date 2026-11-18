@@ -73,4 +73,3 @@ cargo run -p ksvm -- program.ksb     # run (work in progress)
 ## License
 
 [MIT](LICENSE)
-# kestrel-lang

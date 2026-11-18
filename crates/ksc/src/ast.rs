@@ -63,6 +63,66 @@ pub enum Type {
     Text,
     Own(Elem),
     Lent(Elem),
+    /// No value: the result of `print(...)` or of a proc without `->`.
+    /// Only produced by the checker, never by the parser.
+    Void,
+}
+
+impl Scalar {
+    pub fn is_int(self) -> bool {
+        self != Scalar::Real
+    }
+
+    /// Integer width rank: trit < tryte < word.
+    pub fn rank(self) -> u8 {
+        match self {
+            Scalar::Trit => 0,
+            Scalar::Tryte => 1,
+            Scalar::Word | Scalar::Real => 2,
+        }
+    }
+}
+
+impl Elem {
+    pub fn scalar(self) -> Scalar {
+        match self {
+            Elem::Tryte => Scalar::Tryte,
+            Elem::Word => Scalar::Word,
+        }
+    }
+}
+
+impl Type {
+    pub fn is_int(self) -> bool {
+        matches!(self, Type::Scalar(s) if s.is_int())
+    }
+
+    pub fn is_numeric(self) -> bool {
+        matches!(self, Type::Scalar(_))
+    }
+}
+
+impl std::fmt::Display for Scalar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Scalar::Trit => "trit",
+            Scalar::Tryte => "tryte",
+            Scalar::Word => "word",
+            Scalar::Real => "real",
+        })
+    }
+}
+
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Scalar(s) => write!(f, "{s}"),
+            Type::Text => f.write_str("text"),
+            Type::Own(e) => write!(f, "own [{}]", e.scalar()),
+            Type::Lent(e) => write!(f, "lent [{}]", e.scalar()),
+            Type::Void => f.write_str("no value"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

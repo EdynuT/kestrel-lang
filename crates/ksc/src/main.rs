@@ -38,8 +38,14 @@ fn main() -> ExitCode {
     };
     if show_ast {
         println!("{program:#?}");
-    } else {
-        eprintln!("ksc: parsed {} item(s); type checking is not written yet (try --ast)", program.items.len());
     }
+    let hir = match ksc::sema::check(&program) {
+        Ok(h) => h,
+        Err(d) => {
+            eprint!("{}", d.render(path, &src));
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!("ksc: {} proc(s) type-checked; ownership checking and code generation are not written yet", hir.procs.len());
     ExitCode::SUCCESS
 }

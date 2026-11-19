@@ -46,6 +46,8 @@ pub enum Op {
     Soft,
     /// Back to the default: failed arithmetic traps.
     Hard,
+    /// `(bool) x`: keeps 1 or -1; anything else is a failed conversion.
+    ToBool,
 
     // Real ALU
     FAdd,
@@ -96,6 +98,24 @@ pub enum Op {
     LdElem { off: u8, n: u8 },
     /// Pop `n` values, index and pointer; store them into that element from cell `off` on.
     StElem { off: u8, n: u8 },
+    /// Arrays that change size (never `sym`). The element's cells are
+    /// pushed before the pointer, so the VM knows how many to pop from the
+    /// array's element width.
+    /// `elem.. ptr` -> add the element at the end.
+    Append,
+    /// `ptr` -> remove the last element and push it.
+    PopEl,
+    /// `elem.. ptr i` -> put the element at index `i` (0..=len), shifting the rest.
+    Insert,
+    /// `ptr i` -> remove the element at index `i`, shifting the rest.
+    Remove,
+    /// `zero.. ptr n` -> grow to `n` elements with copies of `zero`, or shrink
+    /// to `n` (only if every element cut off still equals `zero`).
+    Resize,
+    /// `ptr` -> no elements left.
+    Clear,
+    /// `ptr a b c d` -> swap the ranges `a..b` and `c..d` (inclusive, not overlapping).
+    Replace,
     /// Pop index and pointer, push the cell.
     LdIdx,
     /// Pop value, index and pointer, store the cell.
@@ -114,7 +134,7 @@ pub enum Op {
     /// Pop the return value, drop the frame, push the value for the caller.
     Ret,
     /// Like `ret`, for a struct: pop `n` values and push them for the caller.
-    RetN(u8),
+    RetN(u16),
     /// Stop with a trap; the reason is string `k`.
     Trap(u32),
 
@@ -195,6 +215,7 @@ impl Op {
             Test(_) => 0x1c,
             Soft => 0x1d,
             Hard => 0x1e,
+            ToBool => 0x1f,
 
             FAdd => 0x20,
             FSub => 0x21,
@@ -226,6 +247,13 @@ impl Op {
             Purge(_) => 0x43,
             AllocZ => 0x44,
             Pack { .. } => 0x45,
+            Append => 0x70,
+            PopEl => 0x71,
+            Insert => 0x72,
+            Remove => 0x73,
+            Resize => 0x74,
+            Clear => 0x75,
+            Replace => 0x76,
             AllocT { .. } => 0x46,
             PackT { .. } => 0x47,
             LdElem { .. } => 0x48,
@@ -284,6 +312,7 @@ impl Op {
             Test(_) => "test",
             Soft => "soft",
             Hard => "hard",
+            ToBool => "tobool",
             FAdd => "fadd",
             FSub => "fsub",
             FMul => "fmul",
@@ -309,6 +338,13 @@ impl Op {
             Alloc => "alloc",
             AllocZ => "allocz",
             Pack { .. } => "pack",
+            Append => "append",
+            PopEl => "popel",
+            Insert => "insert",
+            Remove => "remove",
+            Resize => "resize",
+            Clear => "clear",
+            Replace => "replace",
             AllocT { .. } => "alloct",
             PackT { .. } => "packt",
             LdElem { .. } => "ldelem",
@@ -347,8 +383,8 @@ impl Op {
         use Op::*;
         1 + match self {
             PushC(_) | PushR(_) | PushS(_) | Jmp(_) | JNat(_) | Dump(_) | Trap(_) => 4,
-            Test(_) | CharIs(_) | RetN(_) => 1,
-            Load(_) | Store(_) | Move(_) | Purge(_) | AllocT { .. } | LdElem { .. } | StElem { .. } => 2,
+            Test(_) | CharIs(_) => 1,
+            Load(_) | Store(_) | Move(_) | Purge(_) | RetN(_) | AllocT { .. } | LdElem { .. } | StElem { .. } => 2,
             PackT { .. } => 6,
             Br3 { .. } => 12,
             Call { .. } | Pack { .. } => 5,
@@ -363,7 +399,8 @@ impl Op {
             PushC(k) | PushR(k) | PushS(k) | Jmp(k) | JNat(k) | Dump(k) | Trap(k) => {
                 out.extend_from_slice(&k.to_le_bytes())
             }
-            Test(m) | CharIs(m) | RetN(m) => out.push(m),
+            Test(m) | CharIs(m) => out.push(m),
+            RetN(n) => out.extend_from_slice(&n.to_le_bytes()),
             Load(s) | Store(s) | Move(s) | Purge(s) => out.extend_from_slice(&s.to_le_bytes()),
             Br3 { neg, zero, pos } => {
                 for a in [neg, zero, pos] {
@@ -419,6 +456,7 @@ impl Op {
             },
             0x1d => Soft,
             0x1e => Hard,
+            0x1f => ToBool,
             0x20 => FAdd,
             0x21 => FSub,
             0x22 => FMul,
@@ -470,6 +508,13 @@ impl Op {
                 }
             }
             0x48 => LdElem { off: r.u8()?, n: r.u8()? },
+            0x70 => Append,
+            0x71 => PopEl,
+            0x72 => Insert,
+            0x73 => Remove,
+            0x74 => Resize,
+            0x75 => Clear,
+            0x76 => Replace,
             0x49 => StElem { off: r.u8()?, n: r.u8()? },
             0x41 => LdIdx,
             0x42 => StIdx,
@@ -480,7 +525,7 @@ impl Op {
             0x53 => Call { f: r.u32()?, argc: r.u8()? },
             0x54 => Ret,
             0x55 => Trap(r.u32()?),
-            0x56 => RetN(r.u8()?),
+            0x56 => RetN(r.u16()?),
             0x60 => Input,
             0x61 => Emit,
             0x62 => Print,
@@ -583,10 +628,10 @@ mod tests {
         use Op::*;
         vec![
             PushC(7), PushR(70_000), PushS(0), Load(4), Store(9), Move(0), Pop,
-            Add, Sub, Mul, Div, Mod, Pow, Neg, Shl3, Shr3, Cmp3, KAnd, KOr, Test(0b101), Soft, Hard, Trap(4),
+            Add, Sub, Mul, Div, Mod, Pow, Neg, Shl3, Shr3, Cmp3, KAnd, KOr, Test(0b101), Soft, Hard, ToBool, Trap(4),
             FAdd, FSub, FMul, FDiv, FPow, FNeg, FCmp3,
             TLen, TIdx, Narrow6, Narrow1, IToF, FToI, TStr, TStrT, TStrV, TCat, TEq, TSub, TToI, TToF, CharIs(2),
-            Alloc, LdIdx, StIdx, Purge(8), AllocZ, Pack { n: 3, sym: true }, AllocT { w: 2, sym: false }, PackT { n: 3, w: 2, sym: true }, LdElem { off: 1, n: 2 }, StElem { off: 0, n: 1 },
+            Alloc, LdIdx, StIdx, Purge(8), AllocZ, Pack { n: 3, sym: true }, AllocT { w: 2, sym: false }, PackT { n: 3, w: 2, sym: true }, LdElem { off: 1, n: 2 }, StElem { off: 0, n: 1 }, Append, PopEl, Insert, Remove, Resize, Clear, Replace,
             Jmp(12), JNat(u32::MAX), Br3 { neg: 1, zero: 2, pos: 3 }, Call { f: 2, argc: 3 }, Ret, RetN(3),
             Input, Emit, Print, Show, Dump(5), ShowT, ShowV,
             ReadFile, FileExists, WriteFile, WriteBytes, ReadLine, Eof, ArgCount, Arg, Exit,

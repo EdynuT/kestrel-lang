@@ -144,6 +144,14 @@ pub enum Builtin {
     Eof,
     ArgCount,
     Arg,
+    /// Arrays that change size; the first argument is the (lent) array.
+    Append,
+    Pop,
+    Insert,
+    Remove,
+    Resize,
+    Clear,
+    Replace,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

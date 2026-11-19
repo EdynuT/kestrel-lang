@@ -3,9 +3,10 @@
 //! Ownership rules (use after give, leaks, double burn, tri symmetry) are
 //! checked afterwards by the linear checker on the HIR.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use kestrel_core::charset::char_to_tryte;
+use kestrel_core::limits::MAX_LOCALS;
 use kestrel_core::word::{TRIT_MAX, TRYTE_MAX};
 use kestrel_core::Word;
 
@@ -15,11 +16,13 @@ use crate::hir::*;
 
 type R<T> = Result<T, Diagnostic>;
 
-const BUILTINS: [&str; 25] = [
+const BUILTINS: [&str; 32] = [
     "print", "printl", "printf", "toText", "emit", "input", "len", "dump", "sub", "toInt", "toReal", "isDigit",
     "isLetter", "isUpper", "isLower", "isSpace", "readFile", "fileExists", "writeFile", "writeBytes",
-    "readLine", "eof", "argCount", "arg", "exit",
+    "readLine", "eof", "argCount", "arg", "exit", "append", "pop", "insert", "remove", "resize", "clear", "replace",
 ];
+/// Built-ins that change the size of the array they get first.
+const RESIZERS: [&str; 6] = ["append", "pop", "insert", "remove", "resize", "clear"];
 /// Most cells one array element may take (a struct takes one per field).
 const MAX_ELEM_WIDTH: usize = 243;
 
@@ -56,8 +59,9 @@ pub fn check(program: &Program) -> R<Hir> {
     for s in &decls {
         cx.declare_struct(s)?;
     }
+    let mut widths = HashMap::new();
     for s in &decls {
-        cx.no_cycle(s.name.name.as_str(), &mut Vec::new(), s.name.span)?;
+        cx.struct_width(s.name.name.as_str(), &mut widths, &mut Vec::new(), s.name.span)?;
     }
     for item in &program.items {
         match item {
@@ -114,11 +118,14 @@ struct FnCx {
     loops: usize,
     /// Arrays whose size is known here (`{...}` or `claim 5`), for index checks.
     sizes: HashMap<LocalId, i64>,
+    /// Names of arrays that may change size in this proc (given to `append`
+    /// & co. or lent to a proc): their size is never known.
+    resized: HashSet<String>,
 }
 
 impl FnCx {
     fn new(ret: Type) -> FnCx {
-        FnCx { locals: Vec::new(), scopes: vec![Scope::default()], ret, loops: 0, sizes: HashMap::new() }
+        FnCx { locals: Vec::new(), scopes: vec![Scope::default()], ret, loops: 0, sizes: HashMap::new(), resized: HashSet::new() }
     }
 }
 
@@ -142,8 +149,15 @@ fn err(msg: impl Into<String>, span: Span) -> Diagnostic {
     Diagnostic::new(msg, span)
 }
 
+/// A condition: a `bool`, or a `trit` (whose `0` traps).
+fn is_truth(t: Type) -> bool {
+    matches!(t, Type::Bool | Type::Scalar(Scalar::Trit))
+}
+
 fn fits(from: Type, to: Type) -> bool {
     match (from, to) {
+        // true/false are +1/-1: a bool is a trit that is never 0.
+        (Type::Bool, Type::Scalar(Scalar::Trit)) => true,
         (Type::Scalar(a), Type::Scalar(b)) if a.is_int() && b.is_int() => a.rank() <= b.rank(),
         _ => from == to,
     }
@@ -170,8 +184,8 @@ impl Checker {
             return Err(err(format!("const `{}` is defined twice", c.name.name), c.name.span));
         }
         let ty = self.resolve(&c.ty)?;
-        if !matches!(ty, Type::Scalar(_) | Type::Text) {
-            return Err(err("a const must be a number or text", c.ty.span));
+        if !matches!(ty, Type::Scalar(_) | Type::Text | Type::Bool) {
+            return Err(err("a const must be a number, a bool or text", c.ty.span));
         }
         let value = self.expect(&c.value, ty)?;
         if !matches!(value.kind, HExprKind::Word(_) | HExprKind::Real(_) | HExprKind::Text(_)) {
@@ -282,25 +296,35 @@ impl Checker {
         Ok(())
     }
 
-    /// A struct cannot hold itself, not even through another struct: it
-    /// would never end.
-    fn no_cycle(&self, name: &str, path: &mut Vec<String>, span: Span) -> R<()> {
-        if path.first().is_some_and(|p| p == name) {
-            path.push(name.to_string());
-            return Err(err(format!("struct `{}` contains itself", path[0]), span)
-                .with_note(format!("{}: it would never end; keep the others in an array and store an index", path.join(" -> "))));
+    /// The slots a struct takes, each struct visited once (`widths` keeps
+    /// the ones already done). A struct cannot hold itself, not even through
+    /// another struct: it would never end. A struct can also not take more
+    /// slots than a proc has.
+    fn struct_width(&self, name: &str, widths: &mut HashMap<String, usize>, path: &mut Vec<String>, span: Span) -> R<usize> {
+        if let Some(&w) = widths.get(name) {
+            return Ok(w);
         }
-        if path.iter().any(|p| p == name) {
-            return Ok(()); // a cycle that does not pass through the start; reported from its own struct
+        if let Some(at) = path.iter().position(|p| p == name) {
+            let mut cycle = path[at..].to_vec();
+            cycle.push(name.to_string());
+            return Err(err(format!("struct `{name}` contains itself"), span)
+                .with_note(format!("{}: it would never end; keep the others in an array and store an index", cycle.join(" -> "))));
         }
         path.push(name.to_string());
+        let mut w = 0usize;
         for (_, t) in &self.structs[name] {
-            if let Type::Struct(inner) = t {
-                self.no_cycle(inner, path, span)?;
-            }
+            w = w.saturating_add(match t {
+                Type::Struct(inner) => self.struct_width(inner, widths, path, span)?,
+                _ => 1,
+            });
         }
         path.pop();
-        Ok(())
+        if w > MAX_LOCALS {
+            return Err(err(format!("struct `{name}` is too big: it takes more than {MAX_LOCALS} slots"), span)
+                .with_note("each field takes a slot, and a nested struct takes one per field of its own"));
+        }
+        widths.insert(name.to_string(), w);
+        Ok(w)
     }
 
     /// The offset (in slots) and type of field `f` of struct `sname`.
@@ -342,6 +366,10 @@ impl Checker {
 
     /// How a value prints: an enum by its name, a struct as `Ponto { x: 1, y: 2 }`.
     fn displayed(&mut self, h: HExpr) -> HExpr {
+        if h.ty == Type::Bool {
+            let span = h.span;
+            return hx(HExprKind::Builtin(Builtin::ToText(Fmt::Plain), vec![h]), Type::Text, span);
+        }
         let Type::Struct(sname) = h.ty else { return self.named(h) };
         let span = h.span;
         let text = |s: &str| (Fmt::Plain, hx(HExprKind::Text(s.to_string()), Type::Text, span));
@@ -410,6 +438,19 @@ impl Checker {
     fn check_proc(&mut self, p: &ast::ProcDecl) -> R<HProc> {
         let sig = self.sigs[self.proc_ids[&p.name.name]].clone();
         self.f = FnCx::new(sig.ret);
+        let mut resized = HashSet::new();
+        visit_block(&p.body, &mut |e| match &e.kind {
+            ExprKind::Call { name, args } if RESIZERS.contains(&name.name.as_str()) => {
+                if let Some(Expr { kind: ExprKind::Var(n), .. }) = args.first() {
+                    resized.insert(n.clone());
+                }
+            }
+            ExprKind::Lend(n) => {
+                resized.insert(n.name.clone());
+            }
+            _ => {}
+        });
+        self.f.resized = resized;
         for (param, (_, ty)) in p.params.iter().zip(&sig.params) {
             self.new_local(&param.name.name, *ty, LocalKind::Param, param.name.span);
         }
@@ -488,8 +529,8 @@ impl Checker {
                 };
                 let on_nat = match on_nat {
                     Some(b) => {
-                        if !value.ty.is_numeric() {
-                            return Err(err(format!("`on NaT` needs a number, found {}", value.ty), value.span));
+                        if !value.ty.is_numeric() && value.ty != Type::Bool {
+                            return Err(err(format!("`on NaT` needs a number or a bool, found {}", value.ty), value.span));
                         }
                         let hb = self.block(b)?;
                         if !hb.diverges() {
@@ -547,8 +588,8 @@ impl Checker {
             }
             StmtKind::If { cond, then, otherwise } => {
                 let h = self.expr(cond, Some(Type::Scalar(Scalar::Trit)))?;
-                if h.ty != Type::Scalar(Scalar::Trit) {
-                    return Err(err(format!("`if` needs a trit, found {}", h.ty), cond.span)
+                if !is_truth(h.ty) {
+                    return Err(err(format!("`if` needs a bool, found {}", h.ty), cond.span)
                         .with_note("compare first, e.g. `if x > 0 { ... }`"));
                 }
                 // `if` is a `tri` whose `0` arm traps: an unknown condition is an error.
@@ -563,7 +604,7 @@ impl Checker {
             }
             StmtKind::Tri { head, neg, zero, pos } => {
                 let h = self.expr(head, Some(Type::Scalar(Scalar::Trit)))?;
-                if h.ty != Type::Scalar(Scalar::Trit) {
+                if !is_truth(h.ty) {
                     return Err(err(format!("`tri` needs a trit, found {}", h.ty), head.span)
                         .with_note("compare first, e.g. `tri x <=> 0 { ... }`"));
                 }
@@ -573,8 +614,8 @@ impl Checker {
             StmtKind::Match { scrut, arms } => self.match_stmt(scrut, arms, s.span)?,
             StmtKind::While { cond, body } => {
                 let h = self.expr(cond, Some(Type::Scalar(Scalar::Trit)))?;
-                if h.ty != Type::Scalar(Scalar::Trit) {
-                    return Err(err(format!("`while` needs a trit, found {}", h.ty), cond.span)
+                if !is_truth(h.ty) {
+                    return Err(err(format!("`while` needs a bool, found {}", h.ty), cond.span)
                         .with_note("compare first, e.g. `while i < 10 { ... }`"));
                 }
                 self.f.loops += 1;
@@ -597,8 +638,8 @@ impl Checker {
                 let result = (|| {
                     let hinit = self.stmt(init)?;
                     let h = self.expr(cond, Some(Type::Scalar(Scalar::Trit)))?;
-                    if h.ty != Type::Scalar(Scalar::Trit) {
-                        return Err(err(format!("`for` needs a trit condition, found {}", h.ty), cond.span)
+                    if !is_truth(h.ty) {
+                        return Err(err(format!("`for` needs a bool condition, found {}", h.ty), cond.span)
                             .with_note("compare, e.g. `i < 10`"));
                     }
                     self.f.loops += 1;
@@ -737,6 +778,7 @@ impl Checker {
         }
         let d = err(format!("expected {ty}, found {}", h.ty), h.span);
         Err(match (h.ty, ty) {
+            (from, Type::Bool) if from.is_int() => d.with_note("write `true` or `false`, or compare: `x != 0`"),
             (Type::Scalar(Scalar::Real), t) | (t, Type::Scalar(Scalar::Real)) if t.is_int() => {
                 d.with_note(format!("convert explicitly with `as {ty}`"))
             }
@@ -749,6 +791,9 @@ impl Checker {
 
     /// Remembers the size of an array made by `{...}` or `claim <literal>`.
     fn note_size(&mut self, id: LocalId, value: &HExpr) {
+        if self.f.resized.contains(&self.f.locals[id].name) {
+            return;
+        }
         let n = match &value.kind {
             HExprKind::Pack(items) => items.len() as i64,
             HExprKind::Claim(n) => match n.kind {
@@ -859,6 +904,7 @@ impl Checker {
             ExprKind::Real(r) => hx(HExprKind::Real(*r), Type::Scalar(Scalar::Real), span),
             ExprKind::Char(c) => hx(HExprKind::Word(kestrel_core::Word::new(*c)), Type::Scalar(Scalar::Tryte), span),
             ExprKind::Str(s) => hx(HExprKind::Text(s.clone()), Type::Text, span),
+            ExprKind::Bool(b) => hx(HExprKind::Word(if *b { Word::ONE } else { Word::NEG_ONE }), Type::Bool, span),
             ExprKind::NaT => match want {
                 Some(Type::Scalar(Scalar::Real)) => hx(HExprKind::Real(kestrel_core::Real::NAT), Type::Scalar(Scalar::Real), span),
                 Some(t @ Type::Scalar(_)) => hx(HExprKind::Word(kestrel_core::Word::NAT), t, span),
@@ -878,12 +924,19 @@ impl Checker {
                     return Err(self.unknown(name, span));
                 }
             }
+            ExprKind::Unary(UnOp::Not, inner) if self.expr(inner, None).is_ok_and(|h| h.ty == Type::Bool) => {
+                let h = self.expr(inner, None)?;
+                match h.kind {
+                    HExprKind::Word(w) => hx(HExprKind::Word(-w), Type::Bool, span),
+                    _ => hx(HExprKind::Neg(Box::new(h)), Type::Bool, span),
+                }
+            }
             ExprKind::Unary(op, inner) => {
                 let h = self.expr(inner, want.filter(|t| t.is_numeric()))?;
                 self.numeric(&h)?;
                 let ty = h.ty;
                 if *op == UnOp::Not && ty != Type::Scalar(Scalar::Trit) {
-                    return Err(err(format!("`!` works on trits, found {ty}"), h.span)
+                    return Err(err(format!("`!` works on bools and trits, found {ty}"), h.span)
                         .with_note("to flip the sign of a number use `-x`"));
                 }
                 match h.kind {
@@ -919,11 +972,16 @@ impl Checker {
                 let h = self.expr(inner, None)?;
                 // An enum value is stored as its number: `(int) c` just reads it.
                 let h = if let Type::Enum(_) = h.ty { HExpr { ty: Type::Scalar(Scalar::Int), ..h } } else { h };
-                if !h.ty.is_numeric() {
-                    return Err(err(format!("cannot cast {}", h.ty), inner.span));
+                let to = *s;
+                match (h.ty, to) {
+                    (from, to) if from == to => h,
+                    // true/false are +1/-1: as a number they need no conversion.
+                    (Type::Bool, t) if t.is_int() => HExpr { ty: t, ..h },
+                    // A number becomes a bool only if it is 1 or -1 (checked when it runs).
+                    (from, Type::Bool) if from.is_int() => hx(HExprKind::Convert(Box::new(h)), Type::Bool, span),
+                    (from, Type::Scalar(_)) if from.is_numeric() => hx(HExprKind::Convert(Box::new(h)), to, span),
+                    (from, _) => return Err(err(format!("cannot cast {from} to {to}"), inner.span)),
                 }
-                let to = Type::Scalar(*s);
-                if h.ty == to { h } else { hx(HExprKind::Convert(Box::new(h)), to, span) }
             }
             ExprKind::Index(base, idx) => {
                 if let ExprKind::Var(name) = &base.kind
@@ -974,6 +1032,10 @@ impl Checker {
                 let id = self.lookup(&name.name).ok_or_else(|| self.unknown(&name.name, name.span))?;
                 self.give(id, span)?
             }
+            ExprKind::Range(..) => {
+                return Err(err("a range `a..b` only works as an argument of `replace` here", span)
+                    .with_note("in loops, write `walk i in a..b { ... }`"));
+            }
             ExprKind::StructLit { name, fields } => {
                 let Some((&sname, decl)) = self.structs.get_key_value(name.name.as_str()) else {
                     return Err(err(format!("unknown struct `{}`", name.name), name.span));
@@ -1015,12 +1077,14 @@ impl Checker {
                 let ha = self.expr(a, Some(trit))?;
                 let hb = self.expr(b, Some(trit))?;
                 for h in [&ha, &hb] {
-                    if h.ty != trit {
-                        return Err(err(format!("`{}` works on trits, found {}", op.symbol(), h.ty), h.span)
-                            .with_note("to compare numbers use `<=>`"));
+                    if !is_truth(h.ty) {
+                        return Err(err(format!("`{}` works on bools and trits, found {}", op.symbol(), h.ty), h.span)
+                            .with_note("compare first, e.g. `a > 0 && b > 0`"));
                     }
                 }
-                (ha, hb, trit)
+                // Two bools give a bool; with a trit, the result can be 0 (unknown).
+                let ty = if ha.ty == Type::Bool && hb.ty == Type::Bool { Type::Bool } else { trit };
+                (ha, hb, ty)
             }
             // Text: `a + b` makes a new text, `==`/`!=` compare characters.
             BinOp::Add | BinOp::Eq | BinOp::Ne if self.is_text(a) || self.is_text(b) => {
@@ -1033,7 +1097,7 @@ impl Checker {
                         return Err(err(format!("{what}, found {}", h.ty), h.span).with_note("convert it first: `toText(x)`"));
                     }
                 }
-                let ty = if op == BinOp::Add { text } else { trit };
+                let ty = if op == BinOp::Add { text } else { Type::Bool };
                 (ha, hb, ty)
             }
             BinOp::Eq | BinOp::Ne if self.enum_type(a).or_else(|| self.enum_type(b)).is_some() => {
@@ -1045,11 +1109,25 @@ impl Checker {
                         return Err(err(format!("cannot compare {t} with {}", h.ty), h.span));
                     }
                 }
-                (ha, hb, trit)
+                (ha, hb, Type::Bool)
             }
+            BinOp::Eq | BinOp::Ne if self.is_bool(a) || self.is_bool(b) => {
+                let ha = self.expr(a, Some(Type::Bool))?;
+                let hb = self.expr(b, Some(Type::Bool))?;
+                for h in [&ha, &hb] {
+                    if h.ty != Type::Bool {
+                        return Err(err(format!("cannot compare bool with {}", h.ty), h.span));
+                    }
+                }
+                (ha, hb, Type::Bool)
+            }
+            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge if self.is_bool(a) || self.is_bool(b) => {
+                return Err(err(format!("`{}` does not work on bools", op.symbol()), span).with_note("only `==` and `!=` compare bools"));
+            }
+            // `<=>` answers in three ways (a trit); the others answer yes or no.
             BinOp::Cmp3 | BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                 let (ha, hb, _) = self.numeric_pair(a, b, None)?;
-                (ha, hb, trit)
+                (ha, hb, if op == BinOp::Cmp3 { trit } else { Type::Bool })
             }
             BinOp::Pow | BinOp::Shl | BinOp::Shr => {
                 let ha = self.expr(a, want.filter(|t| t.is_numeric()))?;
@@ -1139,7 +1217,7 @@ impl Checker {
                         .iter()
                         .map(|v| {
                             let k = hx(HExprKind::Word(Word::new(*v)), ty, scrut.span);
-                            hx(HExprKind::Binary(BinOp::Eq, Box::new(local()), Box::new(k)), trit, scrut.span)
+                            hx(HExprKind::Binary(BinOp::Eq, Box::new(local()), Box::new(k)), Type::Bool, scrut.span)
                         })
                         .reduce(|a, b| hx(HExprKind::Binary(BinOp::Or, Box::new(a), Box::new(b)), trit, scrut.span))
                         .expect("an arm has at least one pattern");
@@ -1159,6 +1237,10 @@ impl Checker {
     }
 
     /// Whether `e` is a text (checked without reporting errors).
+    fn is_bool(&mut self, e: &Expr) -> bool {
+        self.expr(e, None).is_ok_and(|h| h.ty == Type::Bool)
+    }
+
     fn is_text(&mut self, e: &Expr) -> bool {
         self.expr(e, None).is_ok_and(|h| h.ty == Type::Text)
     }
@@ -1166,6 +1248,23 @@ impl Checker {
     /// The enum type of `e`, if it has one.
     fn enum_type(&mut self, e: &Expr) -> Option<Type> {
         self.expr(e, None).ok().map(|h| h.ty).filter(|t| matches!(t, Type::Enum(_)))
+    }
+
+    /// The array a size-changing built-in works on, lent for the call.
+    fn array_arg(&mut self, e: &Expr, op: &str) -> R<(HExpr, ast::Buf)> {
+        let found = match &e.kind {
+            ExprKind::Var(name) => self.lookup(name).map(|id| (id, self.f.locals[id].ty)),
+            _ => None,
+        };
+        let Some((id, Type::Own(buf) | Type::Lent(buf))) = found else {
+            return Err(err(format!("`{op}` takes an array variable first"), e.span).with_note(format!("e.g. `{op}(v, ...)`")));
+        };
+        if buf.sym && op != "replace" {
+            return Err(err(format!("`{op}` does not work on a sym array"), e.span)
+                .with_note("a sym array must stay odd and centered on index 0"));
+        }
+        self.f.sizes.remove(&id);
+        Ok((hx(HExprKind::Lend(id), Type::Lent(buf), e.span), buf))
     }
 
     /// Like `expr`, but an array name is lent, for built-ins that look at
@@ -1294,9 +1393,14 @@ impl Checker {
                         return Err(err(format!("`{label}` must hold a value"), pspan)
                             .with_note("e.g. `{x}`, `{p.nome}` or `{a + b}`; write `{{` to print a `{`"));
                     }
-                    // Lex the code where it sits in the file, so errors point inside the text.
-                    let padded = format!("{}{code}", " ".repeat(cspan.end));
-                    let tokens = crate::lexer::lex(&padded)?;
+                    // Lex just the code, then move every position to where it sits in the
+                    // file, so errors point inside the text.
+                    let at = cspan.end;
+                    let shift = |sp: Span| Span::new(sp.start + at, sp.end + at);
+                    let mut tokens = crate::lexer::lex(code).map_err(|d| Diagnostic { span: shift(d.span), ..d })?;
+                    for t in &mut tokens {
+                        t.span = shift(t.span);
+                    }
                     let e = crate::parser::parse_expr(tokens)?;
                     let h = self.shown(&e, None)?;
                     let (f, h) = piece(spec, &label, h)?;
@@ -1363,7 +1467,7 @@ impl Checker {
                         pieces.extend(texts.into_iter().map(|h| (Fmt::Plain, h)));
                     } else {
                         let a = self.shown(arg, None)?;
-                        if !matches!(a.ty, Type::Scalar(_) | Type::Text | Type::Lent(_) | Type::Enum(_) | Type::Struct(_)) {
+                        if !matches!(a.ty, Type::Scalar(_) | Type::Bool | Type::Text | Type::Lent(_) | Type::Enum(_) | Type::Struct(_)) {
                             return Err(err(format!("`{}` prints numbers and text, found {}", name.name, a.ty), a.span));
                         }
                         pieces.push((Fmt::Plain, self.displayed(a)));
@@ -1418,8 +1522,8 @@ impl Checker {
                     }
                 };
                 let a = self.shown(x, None)?;
-                if fmt == Fmt::Plain && matches!(a.ty, Type::Enum(_)) {
-                    return Ok(self.named(a));
+                if fmt == Fmt::Plain && matches!(a.ty, Type::Enum(_) | Type::Bool) {
+                    return Ok(self.displayed(a));
                 }
                 let ok = match fmt {
                     Fmt::Plain => matches!(a.ty, Type::Scalar(_) | Type::Lent(_)),
@@ -1448,7 +1552,7 @@ impl Checker {
                 arity(1)?;
                 let c = self.expect(&args[0], Type::Scalar(Scalar::Tryte))?;
                 let k = CHAR_CLASSES.iter().position(|&x| x == n).expect("checked by the guard") as u8;
-                return Ok(builtin(Builtin::CharIs(k), vec![c], Type::Scalar(Scalar::Trit)));
+                return Ok(builtin(Builtin::CharIs(k), vec![c], Type::Bool));
             }
             "emit" => {
                 arity(1)?;
@@ -1474,7 +1578,7 @@ impl Checker {
                 return Ok(if name.name == "readFile" {
                     builtin(Builtin::ReadFile, vec![p], text)
                 } else {
-                    builtin(Builtin::FileExists, vec![p], Type::Scalar(Scalar::Trit))
+                    builtin(Builtin::FileExists, vec![p], Type::Bool)
                 });
             }
             "writeFile" => {
@@ -1498,7 +1602,7 @@ impl Checker {
             }
             "eof" => {
                 arity(0)?;
-                return Ok(builtin(Builtin::Eof, vec![], Type::Scalar(Scalar::Trit)));
+                return Ok(builtin(Builtin::Eof, vec![], Type::Bool));
             }
             "argCount" => {
                 arity(0)?;
@@ -1508,6 +1612,39 @@ impl Checker {
                 arity(1)?;
                 let i = self.expect(&args[0], Type::Scalar(Scalar::Int))?;
                 return Ok(builtin(Builtin::Arg, vec![i], text));
+            }
+            "append" | "pop" | "insert" | "remove" | "resize" | "clear" | "replace" => {
+                let n = match name.name.as_str() {
+                    "pop" | "clear" => 1,
+                    "append" | "remove" | "resize" => 2,
+                    "insert" => 3,
+                    _ => 3,
+                };
+                arity(n)?;
+                let (arr, buf) = self.array_arg(&args[0], &name.name)?;
+                let int = Type::Scalar(Scalar::Int);
+                let (b, rest, ty) = match name.name.as_str() {
+                    "append" => (Builtin::Append, vec![self.expect(&args[1], buf.ty())?], Type::Void),
+                    "pop" => (Builtin::Pop, vec![], buf.ty()),
+                    "insert" => (Builtin::Insert, vec![self.index(&args[1])?, self.expect(&args[2], buf.ty())?], Type::Void),
+                    "remove" => (Builtin::Remove, vec![self.index(&args[1])?], Type::Void),
+                    "resize" => (Builtin::Resize, vec![self.expect(&args[1], int)?], Type::Void),
+                    "clear" => (Builtin::Clear, vec![], Type::Void),
+                    _ => {
+                        let mut bounds = Vec::new();
+                        for a in &args[1..] {
+                            let ExprKind::Range(x, y) = &a.kind else {
+                                return Err(err("`replace` takes two ranges", a.span).with_note("e.g. `replace(v, 0..1, 3..4)`"));
+                            };
+                            bounds.push(self.index(x)?);
+                            bounds.push(self.index(y)?);
+                        }
+                        (Builtin::Replace, bounds, Type::Void)
+                    }
+                };
+                let mut all = vec![arr];
+                all.extend(rest);
+                return Ok(builtin(b, all, ty));
             }
             _ => {}
         }
@@ -1570,6 +1707,86 @@ impl Checker {
     }
 }
 
+/// Calls `f` on every expression in `b`, nested ones included.
+fn visit_block(b: &ast::Block, f: &mut dyn FnMut(&Expr)) {
+    for s in &b.stmts {
+        visit_stmt(s, f);
+    }
+}
+
+fn visit_stmt(s: &ast::Stmt, f: &mut dyn FnMut(&Expr)) {
+    match &s.kind {
+        StmtKind::Let { value, on_nat, .. } => {
+            visit_expr(value, f);
+            if let Some(b) = on_nat {
+                visit_block(b, f);
+            }
+        }
+        StmtKind::Assign { place, value } => {
+            if let Some(i) = &place.index {
+                visit_expr(i, f);
+            }
+            visit_expr(value, f);
+        }
+        StmtKind::Return(Some(e)) | StmtKind::Expr(e) => visit_expr(e, f),
+        StmtKind::Return(None) | StmtKind::Burn(_) | StmtKind::Break | StmtKind::Continue => {}
+        StmtKind::Tri { head, neg, zero, pos } => {
+            visit_expr(head, f);
+            for b in [neg, zero, pos] {
+                visit_block(b, f);
+            }
+        }
+        StmtKind::If { cond, then, otherwise } => {
+            visit_expr(cond, f);
+            visit_block(then, f);
+            if let Some(b) = otherwise {
+                visit_block(b, f);
+            }
+        }
+        StmtKind::Walk { range, body, .. } => {
+            match range {
+                Range::Between(a, b) => {
+                    visit_expr(a, f);
+                    visit_expr(b, f);
+                }
+                Range::Span(k) => visit_expr(k, f),
+            }
+            visit_block(body, f);
+        }
+        StmtKind::Match { scrut, arms } => {
+            visit_expr(scrut, f);
+            for arm in arms {
+                arm.pats.iter().for_each(|p| visit_expr(p, f));
+                visit_block(&arm.body, f);
+            }
+        }
+        StmtKind::While { cond, body } => {
+            visit_expr(cond, f);
+            visit_block(body, f);
+        }
+        StmtKind::For { init, cond, step, body } => {
+            visit_stmt(init, f);
+            visit_expr(cond, f);
+            visit_stmt(step, f);
+            visit_block(body, f);
+        }
+    }
+}
+
+fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+    f(e);
+    match &e.kind {
+        ExprKind::Unary(_, a) | ExprKind::Cast(a, _) | ExprKind::Claim(a) | ExprKind::Member(a, _) => visit_expr(a, f),
+        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b) => {
+            visit_expr(a, f);
+            visit_expr(b, f);
+        }
+        ExprKind::ArrayLit(items) | ExprKind::Call { args: items, .. } => items.iter().for_each(|a| visit_expr(a, f)),
+        ExprKind::StructLit { fields, .. } => fields.iter().for_each(|(_, a)| visit_expr(a, f)),
+        _ => {}
+    }
+}
+
 /// Collects the operands of a `a + b + c` chain, left to right.
 fn add_chain<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     match &e.kind {
@@ -1588,9 +1805,9 @@ fn piece(spec: char, label: &str, h: HExpr) -> R<(Fmt, HExpr)> {
     let ok = match spec {
         'd' | 'i' | 't' | 'v' => ty.is_int() || buffer,
         'f' | 'r' => ty == Type::Scalar(Scalar::Real),
-        's' => matches!(ty, Type::Text | Type::Enum(_) | Type::Struct(_)),
+        's' => matches!(ty, Type::Text | Type::Enum(_) | Type::Struct(_) | Type::Bool),
         'c' => matches!(ty, Type::Scalar(Scalar::Tryte | Scalar::Trit) | Type::Lent(ast::Buf { elem: Elem::Scalar(Scalar::Tryte), .. })),
-        _ => matches!(ty, Type::Scalar(_) | Type::Text | Type::Enum(_) | Type::Struct(_)) || buffer,
+        _ => matches!(ty, Type::Scalar(_) | Type::Text | Type::Enum(_) | Type::Struct(_) | Type::Bool) || buffer,
     };
     if !ok {
         let wants = match spec {
@@ -1607,7 +1824,7 @@ fn piece(spec: char, label: &str, h: HExpr) -> R<(Fmt, HExpr)> {
         let d = err(format!("`{label}` prints {wants}, found {found}"), h.span);
         return Err(match spec {
             'c' if ty.is_int() => d.with_note("cast it: `(tryte) x`"),
-            'd' | 'i' | 't' | 'v' if matches!(ty, Type::Enum(_)) => d.with_note("cast it to read the number: `(int) x`"),
+            'd' | 'i' | 't' | 'v' if matches!(ty, Type::Enum(_) | Type::Bool) => d.with_note("cast it to read the number: `(int) x`"),
             'd' | 'i' | 't' | 'v' | 'f' | 'r' | 'c' if matches!(ty, Type::Struct(_)) => {
                 d.with_note("print the whole struct with `%s` or `{x}`, or format one field: `p.x`")
             }
@@ -1709,7 +1926,7 @@ proc main() -> int {
 
     #[test]
     fn logic_and_tri() {
-        assert!(err_in("x := 1; y := x && x;").contains("`&&` works on trits, found int"));
+        assert!(err_in("x := 1; y := x && x;").contains("`&&` works on bools and trits, found int"));
         ok("a: trit = +; b: trit = 0; c := a && b || -;");
         assert!(err_in("x := 5; tri x { - => return; 0 => return; + => return; }").contains("`tri` needs a trit"));
         ok("x := 5; tri x <=> 0 { - => return; 0 => return; + => return; }");
@@ -1802,9 +2019,9 @@ proc main() -> int {
     #[test]
     fn if_checks() {
         ok("x := 1; if x > 0 { print(x); } else if x == 0 { } else { print(-x); }");
-        assert!(err_in("x := 1; if x { }").contains("`if` needs a trit, found int"));
-        assert!(err_in("x := 1; y := !x;").contains("`!` works on trits"));
-        assert!(err_in("x := 1; while x { }").contains("`while` needs a trit, found int"));
+        assert!(err_in("x := 1; if x { }").contains("`if` needs a bool, found int"));
+        assert!(err_in("x := 1; y := !x;").contains("`!` works on bools and trits"));
+        assert!(err_in("x := 1; while x { }").contains("`while` needs a bool, found int"));
         ok("i := 0; while i < 3 { i = i + 1; }");
         assert!(err_in("x := 1; t: trit = x == \"a\";").contains("compared with text, found int"));
         assert!(err_in("x := 1.5; t: trit = x < 2;").contains("integer literal where a real is expected"));

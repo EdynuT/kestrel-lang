@@ -16,8 +16,11 @@ use kestrel_core::{Module, Real, Word, Word27};
 pub use kestrel_core::limits::MAX_CALL_DEPTH as MAX_DEPTH;
 /// Largest buffer `claim` may create, in cells.
 pub const MAX_CELLS: i64 = 1 << 24;
-/// Limit on characters of texts made at run time by `toText`.
+/// Limit on characters in texts made at run time that are alive at once
+/// (each text also counts 1 for itself).
 pub const MAX_TEXT_CHARS: usize = 1 << 24;
+/// Text memory made before the first collection of unused texts.
+const TEXT_GC_START: usize = 1 << 16;
 
 /// A value on the stack or in a register.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,8 +101,16 @@ pub struct Vm<'m, R, W> {
     module: &'m Module,
     /// String pool split into chars, for `len` and `s[i]`.
     texts: Vec<Vec<char>>,
-    /// Characters in texts made at run time (they live until the program ends).
-    made_chars: usize,
+    /// Texts made at run time are collected when no value refers to them
+    /// any more. The first `pool_texts` entries are the module's strings.
+    pool_texts: usize,
+    /// Characters (+1 per text) in made texts that may still be in use.
+    live_chars: usize,
+    /// Collect unused texts when `live_chars` passes this.
+    text_gc_at: usize,
+    /// Slots of collected texts, reused by new ones; `text_free[i]` marks them.
+    free_texts: Vec<u32>,
+    text_free: Vec<bool>,
     /// Program arguments (`ksvm prog.ksb a b c` gives `a`, `b`, `c`).
     args: Vec<String>,
     /// Instructions left before a Trap, if limited (see [`Vm::with_fuel`]).
@@ -121,7 +132,11 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         Vm {
             module,
             texts: module.strings.iter().map(|s| s.chars().collect()).collect(),
-            made_chars: 0,
+            pool_texts: module.strings.len(),
+            live_chars: 0,
+            text_gc_at: TEXT_GC_START,
+            free_texts: Vec::new(),
+            text_free: vec![false; module.strings.len()],
             args: Vec::new(),
             fuel: None,
             stack: Vec::new(),
@@ -228,6 +243,11 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
 
             Op::Soft => self.frame().soft = true,
             Op::Hard => self.frame().soft = false,
+            Op::ToBool => {
+                let a = self.pop_word()?;
+                let ok = matches!(a.get(), Some(1 | -1));
+                self.check(if ok { a } else { Word::NAT }, a.is_nat(), || format!("(bool) {a}: a bool is only 1 (true) or -1 (false)"))?;
+            }
 
             Op::Add => self.arith2("+", |a, b| a + b)?,
             Op::Sub => self.arith2("-", |a, b| a - b)?,
@@ -323,6 +343,112 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 let cells = self.pop_n(n as usize * w)?;
                 let p = self.alloc(cells, w, sym);
                 self.push(Value::Ptr(p));
+            }
+            Op::Append => {
+                let p = self.pop_ptr()?;
+                let w = self.block(p)?.w;
+                let vals = self.pop_n(w)?;
+                let b = self.block(p)?;
+                if b.cells.len() + w > MAX_CELLS as usize {
+                    return Err(format!("append: out of memory (limit {MAX_CELLS} cells)"));
+                }
+                b.cells.extend(vals);
+            }
+            Op::PopEl => {
+                let p = self.pop_ptr()?;
+                let b = self.block(p)?;
+                if b.cells.is_empty() {
+                    return Err("pop: the array is empty".into());
+                }
+                let at = b.cells.len() - b.w;
+                let vals = b.cells.split_off(at);
+                self.stack.extend(vals);
+            }
+            Op::Insert => {
+                let i = self.pop_word()?;
+                let p = self.pop_ptr()?;
+                let w = self.block(p)?.w;
+                let vals = self.pop_n(w)?;
+                let b = self.block(p)?;
+                let n = (b.cells.len() / w) as i64;
+                let i = i.get().filter(|i| (0..=n).contains(i)).ok_or_else(|| format!("insert: index {i} outside 0..{n}"))?;
+                if b.cells.len() + w > MAX_CELLS as usize {
+                    return Err(format!("insert: out of memory (limit {MAX_CELLS} cells)"));
+                }
+                let at = i as usize * w;
+                b.cells.splice(at..at, vals);
+            }
+            Op::Remove => {
+                let i = self.pop_word()?;
+                let p = self.pop_ptr()?;
+                let b = self.block(p)?;
+                let at = elem_cell(b, i, 0, b.w).map_err(|e| format!("remove: {e}"))?;
+                b.cells.drain(at..at + b.w);
+            }
+            Op::Resize => {
+                let n = self.pop_word()?;
+                let p = self.pop_ptr()?;
+                let w = self.block(p)?.w;
+                let zero = self.pop_n(w)?;
+                let n = n.get().filter(|n| *n >= 0).ok_or_else(|| format!("resize: size {n} cannot be negative"))?;
+                if n.saturating_mul(w as i64) > MAX_CELLS {
+                    return Err(format!("resize {n}: out of memory (limit {MAX_CELLS} cells)"));
+                }
+                let n = n as usize;
+                let old = self.block(p)?.cells.len() / w;
+                if n < old {
+                    // Shrinking must not throw values away: the cut elements must be zero.
+                    let tail = self.cells(p)?[n * w..].to_vec();
+                    let cut = tail.chunks(w).position(|e| !e.iter().zip(&zero).all(|(c, z)| self.same(*c, *z)));
+                    if let Some(k) = cut {
+                        let first = n + k;
+                        return Err(format!(
+                            "resize(v, {n}): element {first} still holds a value; clear elements {n}..{} first (set them to zero)",
+                            old - 1
+                        ));
+                    }
+                }
+                let b = self.block(p)?;
+                b.cells.truncate(n * w);
+                while b.cells.len() < n * w {
+                    b.cells.extend_from_slice(&zero);
+                }
+            }
+            Op::Clear => {
+                let p = self.pop_ptr()?;
+                self.block(p)?.cells.clear();
+            }
+            Op::Replace => {
+                let d = self.pop_word()?;
+                let c = self.pop_word()?;
+                let b2 = self.pop_word()?;
+                let a = self.pop_word()?;
+                let p = self.pop_ptr()?;
+                let blk = self.block(p)?;
+                let (w, lo, n) = (blk.w, blk.lo, (blk.cells.len() / blk.w) as i64);
+                let range = |x: Word, y: Word| -> Result<(usize, usize), String> {
+                    let (x, y) = (x.get().ok_or("replace: a range bound is NaT")?, y.get().ok_or("replace: a range bound is NaT")?);
+                    if x > y || x < lo || y >= lo + n {
+                        return Err(format!("replace: range {x}..{y} is not inside {lo}..{}", lo + n - 1));
+                    }
+                    Ok(((x - lo) as usize, (y - lo) as usize))
+                };
+                let (mut r1, mut r2) = (range(a, b2)?, range(c, d)?);
+                if r1.0 > r2.0 {
+                    std::mem::swap(&mut r1, &mut r2);
+                }
+                if r1.1 >= r2.0 {
+                    return Err(format!("replace: ranges {a}..{b2} and {c}..{d} overlap"));
+                }
+                // [.. A .. mid .. B ..] -> [.. B .. mid .. A ..]
+                let cells = &mut blk.cells;
+                let (a0, a1, b0, b1) = (r1.0 * w, (r1.1 + 1) * w, r2.0 * w, (r2.1 + 1) * w);
+                let mut out = cells[..a0].to_vec();
+                out.extend_from_slice(&cells[b0..b1]);
+                out.extend_from_slice(&cells[a1..b0]);
+                out.extend_from_slice(&cells[a0..a1]);
+                out.extend_from_slice(&cells[b1..]);
+                *cells = out;
             }
             Op::LdIdx => self.load_elem(0, 1)?,
             Op::StIdx => self.store_elem(0, 1)?,
@@ -540,16 +666,58 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         self.stack.pop().ok_or_else(|| "stack underflow".to_string())
     }
 
-    /// Stores a text made at run time and pushes it. Such texts live until
-    /// the program ends, so their total size is capped.
+    /// Stores a text made at run time and pushes it. Every operand of the
+    /// op that made it was already popped, so a collection here is safe.
     fn make_text(&mut self, s: Vec<char>) -> Result<(), String> {
-        self.made_chars += s.len();
-        if self.made_chars > MAX_TEXT_CHARS {
-            return Err(format!("out of text memory (limit {MAX_TEXT_CHARS} characters made at run time)"));
+        let cost = s.len() + 1;
+        if self.live_chars + cost > self.text_gc_at {
+            let scanned = self.collect_texts();
+            // Grow the threshold with what is alive and with what a collection
+            // has to look at, so collecting stays cheap on average.
+            self.text_gc_at = TEXT_GC_START.max(self.live_chars * 2).max(scanned);
         }
-        self.texts.push(s);
-        self.push(Value::Text((self.texts.len() - 1) as u32));
+        if self.live_chars + cost > MAX_TEXT_CHARS {
+            return Err(format!("out of text memory (limit {MAX_TEXT_CHARS} characters in texts alive at once)"));
+        }
+        self.live_chars += cost;
+        let id = match self.free_texts.pop() {
+            Some(id) => {
+                self.texts[id as usize] = s;
+                self.text_free[id as usize] = false;
+                id
+            }
+            None => {
+                self.texts.push(s);
+                self.text_free.push(false);
+                (self.texts.len() - 1) as u32
+            }
+        };
+        self.push(Value::Text(id));
         Ok(())
+    }
+
+    /// Frees made texts that no value refers to (mark and sweep over the
+    /// stack, every frame's variables and every live array). Returns how many
+    /// values it looked at.
+    fn collect_texts(&mut self) -> usize {
+        let mut used = vec![false; self.texts.len()];
+        let mut scanned = 0;
+        let cells = self.heap.iter().filter(|b| b.live).flat_map(|b| b.cells.iter());
+        for v in self.stack.iter().chain(self.frames.iter().flat_map(|f| f.locals.iter())).chain(cells) {
+            scanned += 1;
+            if let Value::Text(t) = v {
+                used[*t as usize] = true;
+            }
+        }
+        for (i, used) in used.iter().enumerate().skip(self.pool_texts) {
+            if !used && !self.text_free[i] {
+                self.live_chars -= self.texts[i].len() + 1;
+                self.texts[i] = Vec::new();
+                self.text_free[i] = true;
+                self.free_texts.push(i as u32);
+            }
+        }
+        scanned
     }
 
     /// A value as `print`/`toText` writes it; the `T`/`V` ops take integers only.
@@ -670,6 +838,14 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             return Err(format!("claim {n}: out of memory (limit {MAX_CELLS} cells)"));
         }
         Ok(n as usize)
+    }
+
+    /// Whether two cells hold the same value (texts compare by their characters).
+    fn same(&self, a: Value, b: Value) -> bool {
+        match (a, b) {
+            (Value::Text(x), Value::Text(y)) => self.texts[x as usize] == self.texts[y as usize],
+            _ => a == b,
+        }
     }
 
     /// Pops the top `n` values, first pushed first.
@@ -834,11 +1010,33 @@ fn parse_real(s: &str) -> Real {
     if int.is_empty() {
         return Real::NAT;
     }
-    match Real::from_decimal(int, frac) {
-        Some(r) if neg => -r,
-        Some(r) => r,
-        None => Real::NAT,
+    if !int.bytes().chain(frac.bytes()).all(|b| b.is_ascii_digit()) {
+        return Real::NAT;
     }
+    let r = Real::from_decimal(int, frac).unwrap_or_else(|| long_decimal(int, frac));
+    if neg { -r } else { r }
+}
+
+/// A decimal with too many digits for an exact conversion: keep its first 36
+/// significant digits (far more than a real holds) and scale by a power of 10.
+fn long_decimal(int: &str, frac: &str) -> Real {
+    const KEEP: usize = 36;
+    let all = format!("{int}{frac}");
+    let digits = all.trim_start_matches('0');
+    if digits.is_empty() {
+        return Real::ZERO;
+    }
+    let kept = &digits[..digits.len().min(KEEP)];
+    // value = kept * 10^e10
+    let e10 = (int.len() as i64 - all.len() as i64) + (digits.len() - kept.len()) as i64;
+    let Some(m) = Real::from_decimal(kept, "") else { return Real::NAT };
+    let ten = Real::from_word(Word::new(10));
+    if e10 >= 0 {
+        return m * ten.pow(Word::new(e10));
+    }
+    // Dividing by a power of 10 too big for a real means the value rounds to 0.
+    let scale = ten.pow(Word::new(-e10));
+    if scale.is_nat() { Real::ZERO } else { m / scale }
 }
 
 fn io_err(e: std::io::Error) -> String {

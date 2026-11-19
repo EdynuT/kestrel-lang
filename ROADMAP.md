@@ -17,9 +17,9 @@ hoje:  programa.ks ──[ksc em Rust]──────────────
 | 0.2 | `int`, cast `(T) x`, `print`/`printl`/`printf`, `toText`, `final`, impressão de buffers, tabela de caracteres ampliada | ✅ |
 | 0.3 | **Controle e arrays:** `if`/`else`, `while`, `for`, comparações (`== != < > <= >=`), `+=`/`++`, enums, `match`, arrays a partir de 0 (`x[]: int`) e simétricos (`sym x[]: int`), literal `{1, 2, 3}` | ✅ |
 | 0.4 | **Textos, E/S e erros:** comparar, cortar, montar e converter textos, classificar caracteres, ler arquivo e stdin, escrever bytes, argumentos de linha de comando, `exit`, contas que falham disparam Trap e `on NaT` trata | ✅ |
-| 0.5 | **Dados:** `struct` (só dados), buffers de structs, buffer que cresce | |
+| 0.5 | **Dados:** `struct` (só dados), arrays de qualquer tipo (inclusive structs), arrays que mudam de tamanho (`append`, `pop`, `insert`, `remove`, `resize`, `clear`, `replace`) | |
 | 0.6 | **Classes:** `class` com métodos, `private`/`public`, interfaces (sem herança), anotações (`@impl`, `@test`, `@deprecated`) | |
-| 0.7 | **Ferramentas:** módulos (`use`), traceback com linha do `.ks`, `assert`, biblioteca padrão mínima escrita em Kestrel (lista, hash map, hash set, funções de texto) | |
+| 0.7 | **Ferramentas:** módulos (`use`), traceback com linha do `.ks`, `assert`, biblioteca padrão mínima escrita em Kestrel (hash map, hash set, funções de texto) | |
 | 0.8 | `ksc.ks`: lexer e parser | |
 | 0.9 | `ksc.ks`: verificação de tipos e de posse, gerador de código e escrita do `.ksb` | |
 | **1.0** | Bootstrap: o teste abaixo passa | |
@@ -37,9 +37,10 @@ A biblioteca padrão da 0.7 e o `ksc.ks` (0.8 e 0.9) são escritos como **aulas*
 - **Sem toques de assembly** (removidos na 0.3: `@R`, `add d, s;`, `tri cmp3`), porque eram só outra forma de escrever. Se um dia for preciso acesso real às instruções da ksvm, a ideia é um bloco `asm { }` isolado, depois da 1.0.
 - **Dois tipos de array** (0.3): `x[]: int` com índices `0..N-1` e `sym x[]: int` com índices `-k..+k`. Os colchetes ficam no nome; `{1, 2, 3}` é o literal; parâmetros usam `lent`/`own` como modificador.
 - **Hash map e hash set** são biblioteca escrita em Kestrel, não parte da linguagem.
+- **Lista = o próprio array** (0.5): como não há genéricos, uma `List` na biblioteca teria que ser escrita uma vez por tipo. Por isso o array tem `append`, `pop` etc. embutidos, para qualquer tipo de elemento.
 - **Primitivas × biblioteca:** só vira instrução da ksvm o que a linguagem não consegue fazer sozinha (arquivos, stdin, argumentos, hora, número aleatório). Todo o resto (math, logging, lista, hash map, funções de texto) é biblioteca escrita em Kestrel.
 - **A biblioteca padrão é feita em duas fases:**
-  - **Antes da 1.0:** só o que o `ksc.ks` usa: lista que cresce, hash map, montar textos, ler arquivo, erros com mensagem.
+  - **Antes da 1.0:** só o que o `ksc.ks` usa: hash map, montar textos, ler arquivo, erros com mensagem.
   - **Depois da 1.0:** math completo, logging, data e hora, números aleatórios e o que mais aparecer.
 - **Erros:** uma conta que falha (overflow, divisão por zero, `toInt` inválido) dispara Trap com o motivo, e `on NaT` trata o erro na própria linha. `try`/`catch` completo, com o erro subindo de um proc para quem chamou, fica para depois da 1.0, se ainda fizer falta.
 - **Orientação a dados:** a árvore do compilador fica num buffer de nós ligados por índice, sem ponteiros dentro de dados.

@@ -260,6 +260,8 @@ impl Parser {
         let sym = self.eat(&Tok::Sym);
         let ty = if let Some(s) = self.scalar() {
             Type::Scalar(s)
+        } else if self.eat(&Tok::Bool) {
+            Type::Bool
         } else {
             match self.peek().clone() {
                 Tok::Ident(name) => {
@@ -683,7 +685,7 @@ impl Parser {
         // Only prefix operators and casts nest (`- - x`, `(int) (real) x`).
         let prefix = matches!(self.peek(), Tok::Minus | Tok::Plus | Tok::Bang)
             || (self.peek() == &Tok::LParen
-                && matches!(self.peek_at(1), Tok::Trit | Tok::Tryte | Tok::Int | Tok::Real)
+                && matches!(self.peek_at(1), Tok::Trit | Tok::Tryte | Tok::Int | Tok::Real | Tok::Bool)
                 && self.peek_at(2) == &Tok::RParen);
         if !prefix {
             return self.unary_inner();
@@ -720,11 +722,11 @@ impl Parser {
         }
         // C-style cast `(T) x`: type names are keywords, so `(` + scalar + `)` is never a grouping.
         if self.peek() == &Tok::LParen
-            && matches!(self.peek_at(1), Tok::Trit | Tok::Tryte | Tok::Int | Tok::Real)
+            && matches!(self.peek_at(1), Tok::Trit | Tok::Tryte | Tok::Int | Tok::Real | Tok::Bool)
             && self.peek_at(2) == &Tok::RParen
         {
             self.bump();
-            let s = self.scalar().expect("checked above");
+            let s = if self.eat(&Tok::Bool) { Type::Bool } else { Type::Scalar(self.scalar().expect("checked above")) };
             self.bump();
             let inner = self.unary()?;
             let span = start.to(inner.span);
@@ -802,6 +804,7 @@ impl Parser {
                 self.bump();
                 ExprKind::NaT
             }
+            Tok::True | Tok::False => ExprKind::Bool(self.bump().tok == Tok::True),
             Tok::LParen => {
                 self.bump();
                 let inner = self.nested_expr()?;
@@ -839,7 +842,15 @@ impl Parser {
                 if self.eat(&Tok::LParen) {
                     let mut args = Vec::new();
                     while self.peek() != &Tok::RParen {
-                        args.push(self.nested_expr()?);
+                        let a = self.nested_expr()?;
+                        let a = if self.eat(&Tok::DotDot) {
+                            let b = self.nested_expr()?;
+                            let span = a.span.to(b.span);
+                            Expr { kind: ExprKind::Range(Box::new(a), Box::new(b)), span }
+                        } else {
+                            a
+                        };
+                        args.push(a);
                         if !self.eat(&Tok::Comma) {
                             break;
                         }
@@ -895,7 +906,8 @@ mod tests {
             ExprKind::Unary(UnOp::Neg, a) => format!("(neg {})", sx(a)),
             ExprKind::Unary(UnOp::Not, a) => format!("(! {})", sx(a)),
             ExprKind::Binary(op, a, b) => format!("({} {} {})", op.symbol(), sx(a), sx(b)),
-            ExprKind::Cast(a, s) => format!("(cast {s:?} {})", sx(a)),
+            ExprKind::Cast(a, s) => format!("(cast {s} {})", sx(a)),
+            ExprKind::Bool(b) => b.to_string(),
             ExprKind::Member(a, f) => format!("{}.{}", sx(a), f.name),
             ExprKind::ArrayLit(items) => format!("{{{}}}", items.iter().map(sx).collect::<Vec<_>>().join(" ")),
             ExprKind::Index(a, i) => format!("{}[{}]", sx(a), sx(i)),
@@ -905,6 +917,7 @@ mod tests {
             ExprKind::Claim(n) => format!("(claim {})", sx(n)),
             ExprKind::Give(n) => format!("(give {})", n.name),
             ExprKind::Lend(n) => format!("(lend {})", n.name),
+            ExprKind::Range(a, b) => format!("{}..{}", sx(a), sx(b)),
             ExprKind::StructLit { name, fields } => {
                 let fs: Vec<String> = fields.iter().map(|(f, e)| format!("{}: {}", f.name, sx(e))).collect();
                 format!("{} {{{}}}", name.name, fs.join(", "))
@@ -927,9 +940,9 @@ mod tests {
         assert_eq!(ex("2 ** 3 ** 2"), "(** 2 (** 3 2))");
         assert_eq!(ex("a <=> b && c || d"), "(|| (&& (<=> a b) c) d)");
         assert_eq!(ex("x << 2 * 3"), "(* (<< x 2) 3)");
-        assert_eq!(ex("(real) a / (real) b"), "(/ (cast Real a) (cast Real b))");
-        assert_eq!(ex("(trit) -x"), "(cast Trit (neg x))");
-        assert_eq!(ex("(int)(a + b) * 2"), "(* (cast Int (+ a b)) 2)");
+        assert_eq!(ex("(real) a / (real) b"), "(/ (cast real a) (cast real b))");
+        assert_eq!(ex("(trit) -x"), "(cast trit (neg x))");
+        assert_eq!(ex("(int)(a + b) * 2"), "(* (cast int (+ a b)) 2)");
         assert_eq!(ex("!v[i - 1] % 3"), "(% (! v[(- i 1)]) 3)");
         assert_eq!(ex("a + 1 < b && !c || d == e"), "(|| (&& (< (+ a 1) b) (! c)) (== d e))");
         assert_eq!(ex("f(lend b, give c, 'A', \"hi\")"), "f((lend b), (give c), '1, \"hi\")");

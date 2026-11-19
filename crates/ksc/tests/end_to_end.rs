@@ -219,11 +219,11 @@ fn if_and_comparisons() {
             if i < 0 { print("neg "); } else if i == 0 { print("zero "); } else { print("pos "); }
         }
         a := 3; b := 5; r := 2.5;
-        printf("%d%d%d%d%d%d ", a == b, a != b, a < b, a > b, a <= 3, a >= 4);
-        printf("%d%d ", r < 3.0, r == 2.5);
+        printf("%s %s %s %s %s %s ", a == b, a != b, a < b, a > b, a <= 3, a >= 4);
+        printf("%s %s ", r < 3.0, r == 2.5);
         t: trit = +; u: trit = 0;
         printf("%d%d%d%d", !t, !u, t && u, !(t || u));"#;
-    assert_eq!(main_out(body), "neg zero pos -111-11-1 11 -100-1");
+    assert_eq!(main_out(body), "neg zero pos false true true false true false true true -100-1");
 }
 
 #[test]
@@ -269,10 +269,10 @@ fn enums_and_match() {
             printf("{c} %d %s/", (int) c, acao(Cor.Vermelho));
             h := Http.Teapot;
             printl(toText(h) + " " + toText((int) h));
-            printf("%s %s %s %d/", tipo('e'), tipo('1'), tipo('z'), c != Cor.Azul);
+            printf("%s %s %s %s/", tipo('e'), tipo('1'), tipo('z'), c != Cor.Azul);
             match 7 % 3 { 0 => print("div"); 1 | -1 => print("r1"); else => print("r2"); }
         }"#;
-    assert_eq!(out(src), "Verde 1 pare/Teapot 405\nvogal digito outro 1/r1");
+    assert_eq!(out(src), "Verde 1 pare/Teapot 405\nvogal digito outro true/r1");
     let e = ksc::compile("enum A { X, Y } proc main() { match A.X { A.X => print(1); } }").unwrap_err();
     assert!(e.message.contains("does not cover A.Y"), "{}", e.message);
 }
@@ -292,7 +292,7 @@ fn files_args_stdin_exit() {
         b[]: int = {75, 51, 66, 1};
         writeBytes(arg(1) + ".bin", b);
         burn b;
-        printf("{n} %s %s %d", readLine(), readLine(), eof());
+        printf("{n} %s %s %s", readLine(), readLine(), eof());
         return argCount();
     }"#;
     let m = build(src);
@@ -301,7 +301,7 @@ fn files_args_stdin_exit() {
     let mut printed = Vec::new();
     let r = Vm::new(&m, "um\ndois\n".as_bytes(), &mut printed).with_args(args).run();
     assert_eq!(r, Ok(Value::Word(Word::new(2))));
-    assert_eq!(String::from_utf8(printed).unwrap(), "2 um dois 1");
+    assert_eq!(String::from_utf8(printed).unwrap(), "2 um dois true");
     assert_eq!(std::fs::read_to_string(&out_path).unwrap(), "n=2");
     assert_eq!(std::fs::read(dir.join("out.txt.bin")).unwrap(), b"K3B\x01");
     // a missing file: exit(3) when checked, Trap when read directly
@@ -324,12 +324,12 @@ fn files_args_stdin_exit() {
 fn text_operations() {
     let body = r#"nome := "Edynu"; printl("Olá, " + nome + "!");
         s := "Kestrel";
-        printf("[%s][%s][%s] %d %d\n", sub(s, 0, 3), sub(s, 3, 7), sub(s, 2, 2), s == "Kestrel", s != "kestrel");
+        printf("[%s][%s][%s] %s %s\n", sub(s, 0, 3), sub(s, 3, 7), sub(s, 2, 2), s == "Kestrel", s != "kestrel");
         printf("%d %d ", toInt("123") + toInt("-7"), toInt("0t+0-"));
         printf("%f %f\n", toReal("2.5") * 2.0, toReal("-0.75"));
-        printf("%d%d%d%d%d %d%d\n", isDigit('7'), isLetter('ç'), isUpper('Á'), isLower('a'), isSpace('\n'), isDigit('a'), isLetter(' '));
+        printf("%s%s%s%s%s %s%s\n", isDigit('7'), isLetter('ç'), isUpper('Á'), isLower('a'), isSpace('\n'), isDigit('a'), isLetter(' '));
         acc := ""; for i: int = 0; i < 3; i++ { acc = acc + toText(i) + ","; } print(acc);"#;
-    assert_eq!(main_out(body), "Olá, Edynu!\n[Kes][trel][] 1 1\n116 8 5.0 -0.75\n11111 -1-1\n0,1,2,");
+    assert_eq!(main_out(body), "Olá, Edynu!\n[Kes][trel][] true true\n116 8 5.0 -0.75\ntruetruetruetruetrue falsefalse\n0,1,2,");
     assert!(main_trap(r#"x := toInt("12a");"#).contains(r#"toInt("12a"): not an integer"#));
     assert!(main_trap(r#"x := toReal("abc");"#).contains(r#"toReal("abc"): not a number"#));
     let (r, _) = run_with(r#"proc main() { x := sub("abc", 2, 1); }"#, "");
@@ -509,7 +509,7 @@ fn print_several_values() {
         printl("total:", n, nomes);
         print(1, 2.5); print("|"); printl(); printl("a" + "b", 'c' == 'c');
         burn nomes;"#;
-    assert_eq!(main_out(body), "total: 3 [\"Ana Maria\", \"Bia\"]\n1 2.5|\nab 1\n");
+    assert_eq!(main_out(body), "total: 3 [\"Ana Maria\", \"Bia\"]\n1 2.5|\nab true\n");
     let e = ksc::compile("proc main() { print(); }").unwrap_err();
     assert!(e.message.contains("at least 1 argument"), "{}", e.message);
 }
@@ -531,8 +531,122 @@ fn printf_braces_take_expressions() {
             printf("{t[0].nome}: {media(t[0])} | {a + 1:t} {a * 2:v} {a > 1} {{a}}\n");
             burn t;
         }"#;
-    assert_eq!(out(src), "Ana: 5.25 | 0t+-0 0vJ 1 {a}\n");
+    assert_eq!(out(src), "Ana: 5.25 | 0t+-0 0vJ true {a}\n");
     let e = ksc::compile("proc main() { a := 1; printf(\"{a +}\"); }").unwrap_err();
     assert!(e.message.contains("expected an expression"), "{}", e.message);
     assert_eq!(e.span.start, 34);
+}
+
+#[test]
+fn arrays_change_size() {
+    let src = r#"struct Ponto { x: int; y: int; }
+        proc encher(lent v[]: int, n: int) { for i: int = 0; i < n; i++ { append(v, i * 10); } }
+        proc main() {
+            v[]: int = {};
+            append(v, 4); append(v, 7); printl(v, len(v));
+            x := pop(v); printl(x, v);
+            encher(lend v, 3); printl(v);
+            insert(v, 0, 99); insert(v, len(v), 5); printl(v);
+            remove(v, 1); printl(v);
+            replace(v, 0..1, 3..4); printl(v);
+            resize(v, 7); printl(v);
+            resize(v, 5); clear(v); printl(v, len(v));
+            nomes[]: text = {"Ana"}; append(nomes, "Bia"); resize(nomes, 3); resize(nomes, 2); printl(nomes);
+            ps[]: Ponto = {};
+            append(ps, Ponto { x: 1, y: 2 }); append(ps, Ponto { x: 3, y: 4 });
+            p := pop(ps); pop(ps); printl(p, len(ps));
+            a[]: int = {1, 2}; append(a, 3); printl(a[2]);
+            burn v; burn nomes; burn ps; burn a;
+        }"#;
+    assert_eq!(
+        out(src),
+        "[4, 7] 2\n7 [4]\n[4, 0, 10, 20]\n[99, 4, 0, 10, 20, 5]\n[99, 0, 10, 20, 5]\n[20, 5, 10, 99, 0]\n\
+         [20, 5, 10, 99, 0, 0, 0]\n[] 0\n[\"Ana\", \"Bia\"]\nPonto { x: 3, y: 4 } 0\n3\n"
+    );
+    for (body, why) in [
+        ("v[]: int = {1, 2, 3}; resize(v, 1); burn v;", "element 1 still holds a value; clear elements 1..2 first"),
+        ("v[]: int = {}; x := pop(v); burn v;", "pop: the array is empty"),
+        ("v[]: int = {1, 2, 3, 4}; replace(v, 0..2, 1..3); burn v;", "overlap"),
+        ("v[]: int = {1}; insert(v, 5, 2); burn v;", "insert: index 5 outside 0..1"),
+    ] {
+        assert!(main_trap(body).contains(why), "{body}");
+    }
+    let e = ksc::compile("proc main() { sym s[]: int = {1, 2, 3}; append(s, 4); burn s; }").unwrap_err();
+    assert!(e.message.contains("does not work on a sym array"), "{}", e.message);
+}
+
+#[test]
+fn regressions_from_breaking_0_5() {
+    // Diamond-shaped structs double in size per level: checked once per struct, with a cap.
+    let mut src: String = (0..40).map(|i| format!("struct S{i} {{ a: S{n}; b: S{n}; }}\n", n = i + 1)).collect();
+    src += "struct S40 { x: int; } proc main() { }";
+    let e = ksc::compile(&src).unwrap_err();
+    assert!(e.message.contains("is too big: it takes more than 59049 slots"), "{}", e.message);
+    // A struct of more than 255 fields comes back whole from `return`.
+    let fields: String = (0..300).map(|i| format!("f{i}: int; ")).collect();
+    let vals: String = (0..300).map(|i| format!("f{i}: {i}, ")).collect();
+    let src = format!("struct W {{ {fields} }} proc mk() -> W {{ return W {{ {vals} }}; }} proc main() {{ w := mk(); print(w.f0, w.f299); }}");
+    assert_eq!(out(&src), "0 299");
+    // An array given away inside the call that uses it.
+    let defs = "proc g(own v[]: int) -> int { burn v; return 1; } proc f(lent v[]: int, x: int) { }";
+    let e = ksc::compile(&format!("{defs} proc main() {{ v[]: int = {{1}}; append(v, g(give v)); }}")).unwrap_err();
+    assert!(e.message.contains("given away inside a call that uses it"), "{}", e.message);
+    let e = ksc::compile(&format!("{defs} proc main() {{ v[]: int = {{1}}; f(lend v, g(give v)); }}")).unwrap_err();
+    assert!(e.message.contains("lent and given away in the same call"), "{}", e.message);
+}
+
+#[test]
+fn regressions_from_breaking_0_1_to_0_4() {
+    let take = "proc take(own v[]: int) -> int { burn v; return 1; }";
+    for (body, why) in [
+        ("while take(give v) > 0 { }", "the loop condition gives away `v`"),
+        ("if 1 > 2 && take(give v) > 0 { }", "`give` on the right of `&&` may never run"),
+        ("t: trit = 1 < 2 || take(give v) > 0;", "`give` on the right of `||` may never run"),
+    ] {
+        let e = ksc::compile(&format!("{take} proc main() {{ v[]: int = {{1}}; {body} }}")).unwrap_err();
+        assert!(e.message.contains(why), "{body}: {}", e.message);
+    }
+    // Texts made at run time are collected once nothing refers to them,
+    // and texts kept in an array survive the collections.
+    let body = r#"keep[]: text = {};
+        walk i in 0..300000 { s := toText(i) + "abcdef"; if i % 1000 == 0 { append(keep, s); } }
+        printl(len(keep), keep[0], keep[300]); clear(keep); burn keep;"#;
+    assert_eq!(main_out(body), "301 0abcdef 300000abcdef\n");
+    // Decimals with more digits than an exact conversion handles.
+    let zeros = "0".repeat(49);
+    let body = format!(r#"printl(toReal("0.{zeros}1"), toReal("99999999999999999999999999999999999999999999.5"), toReal("0.{zeros}{zeros}{zeros}{zeros}1"));"#);
+    assert_eq!(main_out(&body), "1e-50 1e44 0.0\n");
+}
+
+#[test]
+fn bools() {
+    let src = r#"const DEBUG: bool = false;
+        struct Item { nome: text; ativo: bool; }
+        proc par(n: int) -> bool { return n % 2 == 0; }
+        proc main() {
+            ok: bool = 18 >= 18;
+            printl(ok, !ok, ok && false, ok || DEBUG, ok == true, ok != false);
+            printf("{ok} %s {par(3)}\n", par(4));
+            t: trit = ok; u: trit = 0;
+            printl(t, (int) ok, (bool) -1, 1 <=> 2, ok && u);
+            flags[]: bool = claim 2; flags[1] = true;
+            printl(flags[0], flags[1], toText(par(2)) + "!", Item { nome: "x", ativo: true });
+            n := 0; while true { n++; if n > 2 { break; } }
+            b := (bool) (n - 3) on NaT { printl("not a bool"); burn flags; return; };
+            burn flags;
+        }"#;
+    assert_eq!(
+        out(src),
+        "true false false true true true\ntrue true false\n1 1 false -1 0\nfalse true true! Item { nome: \"x\", ativo: true }\nnot a bool\n"
+    );
+    for (body, why) in [
+        ("b: bool = 1;", "expected bool, found int"),
+        ("x := true + 1;", "expected a number, found bool"),
+        ("x := true < false;", "`<` does not work on bools"),
+        ("printf(\"%d\", true);", "`%d` prints an integer, found bool"),
+    ] {
+        let e = ksc::compile(&format!("proc main() {{ {body} }}")).unwrap_err();
+        assert!(e.message.contains(why), "{body}: {}", e.message);
+    }
+    assert!(main_trap("x := 0; b := (bool) x;").contains("(bool) 0: a bool is only 1 (true) or -1 (false)"));
 }

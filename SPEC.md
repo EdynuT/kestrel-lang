@@ -22,6 +22,7 @@
 
 | Tipo no código | Largura | Intervalo |
 |---|---|---|
+| `bool` | 1 trit | `true` (+1) ou `false` (−1) |
 | `trit` | 1 trit | −1 .. +1 |
 | `tryte` | 6 trits (t6) | −364 .. +364 |
 | `int` | 27 trits (t27) | −3.812.798.742.493 .. +3.812.798.742.493 |
@@ -30,6 +31,15 @@
 | enum declarado (`Cor`) | 27 trits (t27) | Um dos valores listados na declaração (§8.7) |
 
 Neste documento, `t6` e `t27` indicam larguras. No código-fonte, os tipos se escrevem `tryte` e `int`.
+
+**`bool` × `trit`:** o `bool` é o booleano comum (`true`/`false`), para quem não precisa da lógica ternária. O `trit` acrescenta o `0`, "desconhecido".
+
+- As comparações (`== != < > <= >=`) devolvem `bool`. Só o `<=>` devolve `trit` (−1, 0 ou +1).
+- `if`, `while` e `for` aceitam `bool` ou `trit` (com `trit`, o `0` dispara Trap).
+- `&&`, `||` e `!` com dois `bool` dão `bool`. Com algum `trit`, seguem a lógica de Kleene (§3.1) e dão `trit`.
+- Um `bool` cabe num `trit` sem cast (`t: trit = ok;`). O contrário exige `(bool) t`, que falha (Trap, ou NaT com `on NaT`) se `t` não for 1 ou −1. `(int) ok` dá 1 ou −1.
+- `bool` aceita só `==` e `!=`; contas são erro de tipo. `print`, `{ok}`, `%s` e `toText` mostram `true`/`false`; `%d` exige cast.
+- `isDigit` e cia., `fileExists` e `eof` devolvem `bool`. `claim` preenche arrays de `bool` com `false`.
 
 ### 1.3 NaT (veneno)
 
@@ -70,7 +80,7 @@ valor = (mantissa / 3²⁰) × 3^expoente
 - `toInt(s)` e `toReal(s)` leem um número (`"123"`, `"-7"`, `"0t+0-"`, `"2.5"`). Texto inválido é uma conta que falha (§1.3): use `on NaT` para tratar.
 - `isDigit(c)`, `isLetter(c)`, `isUpper(c)`, `isLower(c)` e `isSpace(c)` dizem (`+`/`-`) se um `tryte` é dígito, letra (com acentos), maiúscula, minúscula ou espaço (`' '`, `\n`, `\t`).
 - Cada caractere precisa existir na tabela §4. Um caractere fora dela, como `&` ou `ñ`, é **erro de compilação**.
-- `toText(x)` cria um texto novo a partir de um número (§8.6). Todo texto criado com o programa rodando (`+`, `sub`, `toText`) dura até o fim do programa (limite de 2²⁴ caracteres no total). Para montar texto caractere por caractere, use um array de `tryte`, como um array de `char` em C.
+- `toText(x)` cria um texto novo a partir de um número (§8.6). Um texto criado com o programa rodando (`+`, `sub`, `toText`, `readLine`...) é liberado sozinho quando nenhuma variável, array ou valor em uso aponta mais para ele (coleta de lixo só para textos, sem pausas perceptíveis). O limite é de 2²⁴ caracteres em textos **vivos ao mesmo tempo**. Para montar texto caractere por caractere, use um array de `tryte`, como um array de `char` em C.
 
 ---
 
@@ -116,7 +126,7 @@ Regras (onde se lê "produz NaT", fora de uma linha com `on NaT` a conta para o 
 - **`>>`** descarta os trits inferiores, o que equivale a arredondar para o inteiro mais próximo. Exemplo: `2 >> 1 = 1`, enquanto `2 / 3 = 0`.
 - **`<<`** produz NaT se algum trit não nulo passar da largura do tipo. Com `k ≥ 27`, o resultado é `0` se o operando for 0 e NaT caso contrário. Com `k < 0` ou `k` NaT, o resultado é NaT.
 - **`!x`** inverte um `trit` (`!+ = −`, `!0 = 0`). Sobre números é erro de tipo; use `-x`. Os dois compilam para o mesmo opcode `NEG`, porque em ternário balanceado negar é inverter cada trit.
-- As **comparações** aceitam números do mesmo tipo (`int` com `real` exige cast). Se um lado for NaT, o resultado é NaT. Textos aceitam só `==` e `!=`.
+- As **comparações** aceitam números do mesmo tipo (`int` com `real` exige cast) e devolvem `bool` (`<=>` devolve `trit`). Se um lado for NaT, o resultado é NaT. Textos, enums e `bool` aceitam só `==` e `!=`.
 - **`**`** aceita `int ** int` e `real ** int`. O expoente é sempre `int`. Um expoente negativo em `int` produz NaT, e `0 ** 0 = 1`. Como em Python, `-2 ** 2 = -(2 ** 2) = -4`.
 - **`real`** aceita `+ - * / **`, as comparações e o `-` unário. Os operadores `%`, `<<`, `>>`, `&&` e `||` sobre `real` são **erro de tipo**, assim como misturar `int` e `real` numa conta sem cast. Não há promoção automática como no C: escreva `(real) a / (real) b`.
 - **`&&`** e **`||`** têm **curto-circuito**, como em Java: o lado direito só é avaliado se puder mudar o resultado. `- && x` é `−` e `+ || x` é `+` sem avaliar `x`, então `- && NaT = −`. Com `0` ou NaT à esquerda, o lado direito é avaliado (`NaT && x = NaT`). Os operandos são do tipo `trit`. Usar `tryte` ou `int` é **erro de tipo**; compare primeiro (`x > 0 && y > 0`).
@@ -179,6 +189,19 @@ Há dois tipos de array, e o tipo decide como os índices funcionam:
 - `claim N` com `N` negativo, `N` NaT ou (com `sym`) `N` par dispara **Trap**. Índice fora dos limites também.
 - Quando o tamanho e o índice são conhecidos na compilação (array criado com `{...}` ou `claim 5`, índice literal), um índice fora dos limites é **erro de compilação**, como no Rust.
 - `len(x)` devolve o tamanho.
+- **Arrays mudam de tamanho** (só os que não são `sym`, que precisam ficar ímpares e centrados no 0). O array vem sempre primeiro:
+
+| Comando | Efeito |
+|---|---|
+| `append(v, x)` | Põe `x` no fim |
+| `pop(v)` | Tira o último elemento e o devolve. Vazio dispara Trap |
+| `insert(v, i, x)` | Põe `x` na posição `i` (`0..len`), empurrando os seguintes |
+| `remove(v, i)` | Tira o elemento da posição `i`, puxando os seguintes |
+| `resize(v, n)` | Muda para `n` elementos. Ao crescer, completa com zeros. Ao diminuir, os elementos cortados precisam estar zerados, senão dispara Trap (proteção contra perder dados sem querer) |
+| `clear(v)` | Deixa o array vazio |
+| `replace(v, a..b, c..d)` | Troca os trechos `a..b` e `c..d` de lugar (inclusivos, sem sobreposição; os tamanhos podem ser diferentes). Funciona também em `sym` |
+
+  Como o Kestrel não tem genéricos, essas operações valem para arrays de qualquer tipo: elas fazem o papel do `ArrayList` do Java. Por dentro, a VM guarda uma folga, então `append` não copia o array a cada vez. Um array emprestado (`lent`) também pode mudar de tamanho. O compilador só confere índices literais de arrays que nunca mudam de tamanho no proc.
 - Um array `sym` e um array a partir de 0 **não se misturam**: o mesmo índice aponta para células diferentes.
 - Parâmetros dizem como recebem o array: `lent v[]: int` (emprestado) ou `own v[]: int` (recebe a posse, com `give`). No retorno, os colchetes vão no tipo, como em Java: `proc cria(n: int) -> int[]`.
 
@@ -224,7 +247,8 @@ Erros de compilação:
 ### 6.3 Fluxo e linearidade
 
 - **`tri`**: todos os ramos que não divergem devem terminar com o **mesmo** estado linear. Um ramo que diverge (`return`, `break`, `continue`) precisa ter consumido o que for exigido naquele ponto de saída.
-- **`walk`**: o corpo não pode consumir um `own` declarado fora do laço. Antes de `break` ou `continue`, todo `own` declarado dentro do corpo deve estar consumido.
+- **`walk`/`while`/`for`**: o corpo não pode consumir um `own` declarado fora do laço. Antes de `break` ou `continue`, todo `own` declarado dentro do corpo deve estar consumido. A condição de um `while`/`for` roda a cada volta, então também não pode consumir nada (`while f(give v) > 0` é erro).
+- **`&&` e `||`**: o lado direito pode não rodar (curto-circuito), então não pode ter `give`.
 - **`on NaT`**: o bloco é obrigado a divergir (§8.5).
 
 ## 7. Classes de falha
@@ -501,8 +525,10 @@ print(p);            // Pessoa { nome: "Ana", casa: Ponto { x: 3, y: 5 } }
 | Limite | Valor | Ao passar |
 |---|---|---|
 | Aninhamento (blocos, parênteses, operadores em sequência) | 729 = 3⁶ níveis (um tryte) | Erro de compilação: "nested too deeply" |
-| Variáveis por `proc` | 59.049 = 3¹⁰ | Erro de compilação |
-| Parâmetros por `proc` | 243 = 3⁵ | Erro de compilação |
+| Variáveis por `proc` (slots: um struct ocupa um por campo) | 59.049 = 3¹⁰ | Erro de compilação |
+| Tamanho de um struct (campos, contando os aninhados) | 59.049 = 3¹⁰ | Erro de compilação: "is too big" |
+| Campos de um struct usado como elemento de array | 243 = 3⁵ | Erro de compilação |
+| Parâmetros por `proc` (valores: um struct conta um por campo) | 243 = 3⁵ | Erro de compilação |
 | Chamadas aninhadas na execução | 6.561 = 3⁸ | Trap: "call stack overflow" |
 
 Todos os limites são potências de 3. Os de parâmetros e variáveis também cabem nos campos de 8 e 16 bits do `.ksb`.
@@ -524,6 +550,7 @@ Todos os limites são potências de 3. Os de parâmetros e variáveis também ca
 | Texto | `PUSHS k`, `TLEN`, `TIDX`, `TSTR`, `TSTRT`, `TSTRV` (número → texto), `TCAT`, `TEQ`, `TSUB`, `TTOI`, `TTOF`, `CHARIS k` |
 | Largura | `NARROW6`, `NARROW1`, `ITOF`, `FTOI` (overflow vira NaT) |
 | Modo das falhas | `SOFT` (contas que falham produzem NaT; emitido antes do valor de uma linha com `on NaT`), `HARD` (volta ao padrão: Trap). Cada proc começa em `HARD` |
+| Tamanho de arrays | `APPEND`, `POPEL`, `INSERT`, `REMOVE`, `RESIZE`, `CLEAR`, `REPLACE` (faixa `0x7_`; os valores do elemento vão abaixo do ponteiro na pilha) |
 | Memória | `ALLOC` (sym), `ALLOCZ` (a partir de 0), `ALLOCT w sym` (elementos de `w` células, preenchidos com um modelo: `real`, `text`, struct), `PACK n sym` (literal `{...}`), `PACKT n w sym`, `LDIDX`, `STIDX`, `LDELEM off n` / `STELEM off n` (`n` células de um elemento, a partir da célula `off`: campos de struct), `PURGE s` |
 | Fluxo | `JMP a`, `JNAT a`, `BR3 a- a0 a+`, `CALL f n` (`n` = valores passados; um struct conta um por campo), `RET`, `RETN n` (devolve os `n` valores de um struct), `TRAP str` |
 | E/S | `INPUT`, `EMIT`, `PRINT`, `SHOW`, `SHOWT` (`0t`), `SHOWV` (`0v`), `DUMP str`, `READF`, `FEXISTS`, `WRITEF`, `WRITEB`, `READLN`, `EOF`, `ARGC`, `ARG`, `EXIT` |
@@ -570,7 +597,7 @@ const_decl = "const" IDENT ":" scalar "=" expr ";" ;
 proc_decl  = "proc" IDENT "(" [ param { "," param } ] ")" [ "->" ret_type ] block ;
 param      = IDENT ":" type | ( "own" | "lent" ) [ "sym" ] IDENT "[" "]" ":" elem ;
 ret_type   = type | [ "sym" ] elem "[" "]" ;
-type       = scalar | "text" | IDENT ;
+type       = scalar | "bool" | "text" | IDENT ;
 scalar     = "trit" | "tryte" | "int" | "real" ;
 elem       = "tryte" | "int" ;
 
@@ -606,7 +633,7 @@ cmp_expr   = add_expr [ ( "<=>" | "==" | "!=" | "<" | ">" | "<=" | ">=" ) add_ex
 add_expr   = mul_expr { ( "+" | "-" ) mul_expr } ;
 mul_expr   = sh_expr  { ( "*" | "/" | "%" ) sh_expr } ;
 sh_expr    = unary { ( "<<" | ">>" ) unary } ;
-unary      = ( "!" | "-" | "(" scalar ")" ) unary | power ;
+unary      = ( "!" | "-" | "(" ( scalar | "bool" ) ")" ) unary | power ;
 power      = postfix [ "**" unary ] ;
 postfix    = primary { "[" expr "]" | "." IDENT } ;
 match_arm  = ( expr { "|" expr } | "else" ) "=>" ( block | stmt ) ;

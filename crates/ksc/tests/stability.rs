@@ -71,6 +71,8 @@ proc main() {
     ps[]: Ponto = {m, Ponto { x: 1, y: 2 }}; ps[1].y += ps[0].x;
     ns[]: text = claim 2; ns[0] = l.nome; rs[]: real = {1.5, 2.5};
     printl(ps[1]); printl(ns); printl(rs);
+    append(ps, m); insert(rs, 1, 9.0); remove(ns, 0); replace(rs, 0..0, 2..2);
+    q := pop(ps); resize(ns, 3); printl(q, len(ps), rs, ns); clear(ns);
     burn ps; burn ns; burn rs;
 }"#,
 ];
@@ -82,7 +84,7 @@ const VOCAB: &[&str] = &[
     "{", "}", "(", ")", "[", "]", ";", ",", ".", "..", ":", ":=", "=", "==", "!=", "<", ">", "<=", ">=", "<=>", "+",
     "-", "*", "/", "%", "**", "<<", ">>", "&&", "||", "!", "|", "=>", "->", "++", "--", "+=", "0", "1", "-1", "364",
     "3812798742493", "0t+-0", "0vM", "1.5", "'a'", "\"s\"", "x", "a", "i", "main", "print", "printf", "len", "sub",
-    "toText", "toInt", "exit", "struct", "Ponto", "x:",
+    "toText", "toInt", "exit", "bool", "true", "false", "struct", "Ponto", "x:", "append", "pop", "insert", "remove", "resize", "clear", "replace",
 ];
 
 /// The source text of each token, using the real lexer (comments are dropped).

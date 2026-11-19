@@ -70,6 +70,7 @@ pub enum Scalar {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Elem {
     Scalar(Scalar),
+    Bool,
     Text,
     Enum(&'static str),
     Struct(&'static str),
@@ -80,6 +81,8 @@ pub enum Elem {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Type {
     Scalar(Scalar),
+    /// `true` or `false` (stored as +1 / -1, so it fits in a trit).
+    Bool,
     Text,
     Own(Buf),
     Lent(Buf),
@@ -140,6 +143,7 @@ impl Elem {
     pub fn ty(self) -> Type {
         match self {
             Elem::Scalar(s) => Type::Scalar(s),
+            Elem::Bool => Type::Bool,
             Elem::Text => Type::Text,
             Elem::Enum(n) => Type::Enum(n),
             Elem::Struct(n) => Type::Struct(n),
@@ -151,6 +155,7 @@ impl Elem {
     pub fn of(ty: Type) -> Option<Elem> {
         Some(match ty {
             Type::Scalar(s) => Elem::Scalar(s),
+            Type::Bool => Elem::Bool,
             Type::Text => Elem::Text,
             Type::Enum(n) => Elem::Enum(n),
             Type::Struct(n) => Elem::Struct(n),
@@ -185,6 +190,7 @@ impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::Scalar(s) => write!(f, "{s}"),
+            Type::Bool => f.write_str("bool"),
             Type::Text => f.write_str("text"),
             Type::Own(b) => write!(f, "{b}"),
             Type::Lent(b) => write!(f, "lent {b}"),
@@ -286,7 +292,10 @@ pub enum ExprKind {
     Var(String),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
-    Cast(Box<Expr>, Scalar),
+    /// `(T) x`: T is a number type or `bool`.
+    Cast(Box<Expr>, Type),
+    /// `true` / `false`
+    Bool(bool),
     Index(Box<Expr>, Box<Expr>),
     /// `{1, 2, 3}`: a new array; the declared type says which kind.
     ArrayLit(Vec<Expr>),
@@ -294,6 +303,8 @@ pub enum ExprKind {
     Member(Box<Expr>, Ident),
     /// `Ponto { x: 1, y: 2 }`
     StructLit { name: Ident, fields: Vec<(Ident, Expr)> },
+    /// `a..b` as a call argument (inclusive), as in `replace(v, 0..1, 4..5)`.
+    Range(Box<Expr>, Box<Expr>),
     Call { name: Ident, args: Vec<Expr> },
     Claim(Box<Expr>),
     Give(Ident),

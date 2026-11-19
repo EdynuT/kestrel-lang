@@ -121,7 +121,7 @@ impl<'a> ProcGen<'a> {
     /// without a result and prints push nothing.
     fn leftover(&self, e: &HExpr) -> usize {
         match &e.kind {
-            HExprKind::Builtin(..) => usize::from(e.ty != Type::Void),
+            HExprKind::Builtin(..) => self.width(e.ty),
             HExprKind::Print(_) => 0,
             HExprKind::Bind(_, _, body) => self.leftover(body),
             HExprKind::Call(..) if e.ty == Type::Void => 1,
@@ -133,6 +133,7 @@ impl<'a> ProcGen<'a> {
     fn push_zero(&mut self, ty: Type) {
         match ty {
             Type::Scalar(Scalar::Real) => self.push_real(Real::ZERO),
+            Type::Bool => self.push_word(Word::NEG_ONE),
             Type::Text => {
                 let k = self.pools.string("");
                 self.emit(Op::PushS(k));
@@ -319,7 +320,7 @@ impl<'a> ProcGen<'a> {
                     None => self.push_word(Word::ZERO),
                 }
                 match self.p.ret {
-                    Type::Struct(_) => self.emit(Op::RetN(self.width(self.p.ret) as u8)),
+                    Type::Struct(_) => self.emit(Op::RetN(self.width(self.p.ret) as u16)),
                     _ => self.emit(Op::Ret),
                 };
             }
@@ -567,6 +568,9 @@ impl<'a> ProcGen<'a> {
                     (from, Type::Scalar(Scalar::Real)) if from.is_int() => {
                         self.emit(Op::IToF);
                     }
+                    (_, Type::Bool) => {
+                        self.emit(Op::ToBool);
+                    }
                     (Type::Scalar(Scalar::Real), to) => {
                         self.emit(Op::FToI);
                         self.narrow(to);
@@ -611,11 +615,58 @@ impl<'a> ProcGen<'a> {
                     });
                 }
             }
+            HExprKind::Builtin(b @ (Builtin::Append | Builtin::Insert | Builtin::Resize), args) => {
+                // The element (or the zero to grow with) goes below the pointer.
+                match b {
+                    Builtin::Resize => self.push_zero(elem_ty(args[0].ty)),
+                    Builtin::Append => self.expr(&args[1])?,
+                    _ => self.expr(&args[2])?,
+                }
+                self.expr(&args[0])?;
+                if *b != Builtin::Append {
+                    self.expr(&args[1])?;
+                }
+                self.emit(match b {
+                    Builtin::Append => Op::Append,
+                    Builtin::Insert => Op::Insert,
+                    _ => Op::Resize,
+                });
+            }
+            HExprKind::Builtin(Builtin::ToText(Fmt::Plain), args) if args[0].ty == Type::Bool => {
+                // `true` / `false`: branch on the value and push the right word.
+                self.expr(&args[0])?;
+                let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
+                let mut exits = Vec::new();
+                for (arm, word) in [(0, Some("false")), (1, None), (2, Some("true"))] {
+                    let at = self.here();
+                    self.patch(br, arm, at);
+                    match word {
+                        Some(w) => {
+                            let k = self.pools.string(w);
+                            self.emit(Op::PushS(k));
+                            exits.push(self.emit(Op::Jmp(0)));
+                        }
+                        None => {
+                            let k = self.pools.string("a bool holds 0");
+                            self.emit(Op::Trap(k));
+                        }
+                    }
+                }
+                let end = self.here();
+                for at in exits {
+                    self.patch(at, 0, end);
+                }
+            }
             HExprKind::Builtin(b, args) => {
                 for a in args {
                     self.expr(a)?;
                 }
                 self.emit(match b {
+                    Builtin::Pop => Op::PopEl,
+                    Builtin::Remove => Op::Remove,
+                    Builtin::Clear => Op::Clear,
+                    Builtin::Replace => Op::Replace,
+                    Builtin::Append | Builtin::Insert | Builtin::Resize => unreachable!("handled above"),
                     Builtin::Emit => Op::Emit,
                     Builtin::Input => Op::Input,
                     Builtin::Len => Op::TLen,

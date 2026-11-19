@@ -235,7 +235,13 @@ impl Checker<'_> {
                 st = first;
             }
             HStmtKind::While { cond, body, step } => {
+                // The condition runs before every turn: it cannot consume anything.
+                let before = st.clone();
                 self.expr(cond, &mut st)?;
+                if let Some(id) = (0..st.len()).find(|&i| st[i] != before[i]) {
+                    return Err(Diagnostic::new(format!("the loop condition gives away `{}`", self.name(id)), cond.span)
+                        .with_note("the condition runs before every turn, so it would give it away again"));
+                }
                 self.loops.push(LoopCx { entry: st.clone(), inner: Vec::new() });
                 let after = match (self.block(body, st.clone()), step) {
                     (Ok(Some(after)), Some(step)) => self.block(step, after),
@@ -290,8 +296,15 @@ impl Checker<'_> {
             HExprKind::Lend(id) => self.require_alive(*id, st, e.span)?,
             HExprKind::Neg(a) | HExprKind::Convert(a) | HExprKind::Claim(a) => self.expr(a, st)?,
             HExprKind::Pack(items) => items.iter().try_for_each(|a| self.expr(a, st))?,
-            HExprKind::Binary(_, a, b) => {
+            HExprKind::Binary(op, a, b) => {
                 self.expr(a, st)?;
+                // `a && b` / `a || b` may skip `b`: a `give` there might never happen.
+                if matches!(op, BinOp::And | BinOp::Or)
+                    && let Some(at) = (0..st.len()).find_map(|id| gives(b, id))
+                {
+                    return Err(Diagnostic::new(format!("`give` on the right of `{}` may never run", op.symbol()), at)
+                        .with_note("the right side is skipped when the left side decides; give the array away before the test"));
+                }
                 self.expr(b, st)?;
             }
             HExprKind::Index(base, idx) => {
@@ -305,10 +318,9 @@ impl Checker<'_> {
                 let lent: Vec<LocalId> =
                     args.iter().filter_map(|a| if let HExprKind::Lend(id) = a.kind { Some(id) } else { None }).collect();
                 for (i, a) in args.iter().enumerate() {
-                    if let HExprKind::Give(id) = a.kind
-                        && lent.contains(&id)
-                    {
-                        return Err(Diagnostic::new(format!("`{}` is lent and given away in the same call", self.name(id)), a.span)
+                    // Also nested: `f(lend v, g(give v))`.
+                    if let Some((id, at)) = lent.iter().find_map(|&id| gives(a, id).map(|s| (id, s))) {
+                        return Err(Diagnostic::new(format!("`{}` is lent and given away in the same call", self.name(id)), at)
                             .with_note("the callee would borrow an array it also owns"));
                     }
                     if let HExprKind::Lend(id) = a.kind
@@ -320,7 +332,18 @@ impl Checker<'_> {
                     self.expr(a, st)?;
                 }
             }
-            HExprKind::Builtin(_, args) => args.iter().try_for_each(|a| self.expr(a, st))?,
+            HExprKind::Builtin(_, args) => {
+                // `append(v, f(give v))`: the array would be gone before the append.
+                for a in args {
+                    if let HExprKind::Lend(id) = a.kind
+                        && let Some(g) = args.iter().find_map(|b| gives(b, id))
+                    {
+                        return Err(Diagnostic::new(format!("`{}` is given away inside a call that uses it", self.name(id)), g)
+                            .with_note("the array would be gone before the call uses it"));
+                    }
+                }
+                args.iter().try_for_each(|a| self.expr(a, st))?
+            }
             HExprKind::Print(pieces) => pieces.iter().try_for_each(|(_, a)| self.expr(a, st))?,
             HExprKind::StructLit(items) => items.iter().try_for_each(|a| self.expr(a, st))?,
             HExprKind::Field(..) => {}
@@ -334,6 +357,20 @@ impl Checker<'_> {
             }
         }
         Ok(())
+    }
+}
+
+/// The span of a `give id` inside `e`, if there is one.
+fn gives(e: &HExpr, id: LocalId) -> Option<crate::diag::Span> {
+    let sub = |x: &HExpr| gives(x, id);
+    match &e.kind {
+        HExprKind::Give(g) if *g == id => Some(e.span),
+        HExprKind::Neg(a) | HExprKind::Convert(a) | HExprKind::Claim(a) => sub(a),
+        HExprKind::Binary(_, a, b) | HExprKind::Index(a, b) | HExprKind::Bind(_, a, b) => sub(a).or_else(|| sub(b)),
+        HExprKind::ElemField(_, a, _) => sub(a),
+        HExprKind::Call(_, xs) | HExprKind::Builtin(_, xs) | HExprKind::Pack(xs) | HExprKind::StructLit(xs) => xs.iter().find_map(sub),
+        HExprKind::Print(ps) => ps.iter().find_map(|(_, x)| sub(x)),
+        _ => None,
     }
 }
 

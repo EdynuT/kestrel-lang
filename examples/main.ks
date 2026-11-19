@@ -9,6 +9,12 @@ proc media(aluno: Aluno) -> real {
     return media;
 }
 
+// Recebe a posse do array, devolve a memória e retorna 1.
+proc take(own v[]: int) -> int {
+    burn v;
+    return 1;
+}
+
 proc main() {
     nome[]: text = {"Ana", "Bia"};
     printl(nome);
@@ -20,7 +26,14 @@ proc main() {
 
     printf("A media de {turma[0].nome} é {media(turma[0])}\n");
     printf("A media de {turma[1].nome} é {media(turma[1])}\n");
-    
+
     burn nome;
     burn turma;
+
+    v[]: int = {1, 2, 3};
+    x: trit = -1;
+    while 1 {
+        if x && take(give v) > 0 {
+        }
+    }
 }

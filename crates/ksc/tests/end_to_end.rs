@@ -34,7 +34,7 @@ fn printf_formats() {
     assert_eq!(main_out(body), "Ana Ana/-5 -10/0t-++ 0t+0/0ve 0vDh/Ab/1.5\n");
     assert_eq!(main_out(r#"x: int = 0; printf("{x:t} {x:v}");"#), "0t0 0v0");
     assert_eq!(main_out(r#"x: int = 1; printf("{{x}} = {x}, %%d = %d, 100%%\n", x);"#), "{x} = 1, %d = 1, 100%\n");
-    assert_eq!(main_out(r#"printl("Ação: \"sim\" e 'não' * <> @ #"); print(~'Á');"#), "Ação: \"sim\" e 'não' * <> @ #\n-54");
+    assert_eq!(main_out(r#"printl("Ação: \"sim\" e 'não' * <> @ #"); print(-'Á');"#), "Ação: \"sim\" e 'não' * <> @ #\n-54");
     assert_eq!(main_out(r#"n: int = 5; k: text = "t"; printf("exemplo de " + k + " = %t\n", n);"#), "exemplo de t = 0t+--\n");
 }
 
@@ -115,7 +115,7 @@ fn shadowing_does_not_clobber_outer_variable() {
 fn tri_and_logic() {
     let src = r#"
 proc sign(x: int) { tri x <=> 0 { - => print("-"), 0 => print("0"), + => print("+"), } }
-proc main() { sign(-5); sign(0); sign(9); a: trit = +; b: trit = 0; print(a && b); print(a || b); print(~a); }"#;
+proc main() { sign(-5); sign(0); sign(9); a: trit = +; b: trit = 0; print(a && b); print(a || b); print(!a); }"#;
     assert_eq!(out(src), "-0+01-1");
 }
 
@@ -179,7 +179,34 @@ fn traps() {
     let (r, _) = run_with("proc main() { n := 4; b: own [int] = claim n; burn b; }", "");
     assert!(r.unwrap_err().reason.contains("odd"));
     let (r, _) = run_with("proc main() { t: trit = NaT; tri t { - => {} 0 => {} + => {} } }", "");
-    assert_eq!(r.unwrap_err().reason, "tri on NaT");
+    assert_eq!(r.unwrap_err().reason, "tri/if condition is NaT");
+    let (r, _) = run_with("proc main() { t: trit = 0; if t { print(1); } }", "");
+    assert_eq!(r.unwrap_err().reason, "if condition is 0 (unknown)");
+    let (r, _) = run_with("proc main() { x: int = NaT; if x > 0 { print(1); } }", "");
+    assert_eq!(r.unwrap_err().reason, "tri/if condition is NaT");
+}
+
+#[test]
+fn if_and_comparisons() {
+    let body = r#"walk i in -1..1 {
+            if i < 0 { print("neg "); } else if i == 0 { print("zero "); } else { print("pos "); }
+        }
+        a := 3; b := 5; r := 2.5;
+        printf("%d%d%d%d%d%d ", a == b, a != b, a < b, a > b, a <= 3, a >= 4);
+        printf("%d%d ", r < 3.0, r == 2.5);
+        t: trit = +; u: trit = 0;
+        printf("%d%d%d%d", !t, !u, t && u, !(t || u));"#;
+    assert_eq!(main_out(body), "neg zero pos -111-11-1 11 -100-1");
+}
+
+#[test]
+fn short_circuit() {
+    // The right side is skipped when the left decides: no index trap on an empty text.
+    let body = r#"s: text = ""; if len(s) > 0 && s[0] == 'a' { print("a"); } else { print("empty"); }
+        if len(s) == 0 || s[0] == 'a' { print(" ok"); }
+        n: trit = NaT; f: trit = -; z: trit = 0; p: trit = +;
+        printf(" %d %d %d %d %d", f && n, p || n, n && f, z && f, z || p);"#;
+    assert_eq!(main_out(body), "empty ok -1 1 NaT -1 1");
 }
 
 #[test]

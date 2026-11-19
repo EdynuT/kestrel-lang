@@ -74,7 +74,10 @@ pub enum HStmtKind {
     Break,
     Continue,
     /// Arms in order `-`, `0`, `+`.
-    Tri { head: HExpr, arms: Box<[HBlock; 3]> },
+    /// `from_if`: lowered from `if`/`else` (arms are else, trap, then).
+    Tri { head: HExpr, arms: Box<[HBlock; 3]>, from_if: bool },
+    /// Stop the program with a trap carrying this reason.
+    Trap(String),
     /// `walk var in start..end`. Bounds are evaluated once into hidden locals;
     /// for `span k`, `k` is first stored in `span_tmp`.
     Walk {
@@ -146,7 +149,7 @@ impl HBlock {
     /// True if control never reaches the end of the block.
     pub fn diverges(&self) -> bool {
         self.stmts.last().is_some_and(|s| match &s.kind {
-            HStmtKind::Yield(_) | HStmtKind::Break | HStmtKind::Continue => true,
+            HStmtKind::Yield(_) | HStmtKind::Break | HStmtKind::Continue | HStmtKind::Trap(_) => true,
             HStmtKind::Tri { arms, .. } => arms.iter().all(HBlock::diverges),
             _ => false,
         })

@@ -62,7 +62,15 @@ pub enum Tok {
     Spaceship,
     AndAnd,
     OrOr,
-    Tilde,
+    Bang,
+    EqEq,
+    NotEq,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    If,
+    Else,
     Eq,
     ColonEq,
     Colon,
@@ -98,6 +106,8 @@ const KEYWORDS: &[(&str, Tok)] = &[
     ("own", Tok::Own),
     ("lent", Tok::Lent),
     ("tri", Tok::Tri),
+    ("if", Tok::If),
+    ("else", Tok::Else),
     ("walk", Tok::Walk),
     ("in", Tok::In),
     ("span", Tok::Span),
@@ -118,6 +128,10 @@ const OPERATORS: &[(&str, Tok)] = &[
     ("**", Tok::StarStar),
     ("<<", Tok::Shl),
     (">>", Tok::Shr),
+    ("<=", Tok::Le),
+    (">=", Tok::Ge),
+    ("==", Tok::EqEq),
+    ("!=", Tok::NotEq),
     ("&&", Tok::AndAnd),
     ("||", Tok::OrOr),
     (":=", Tok::ColonEq),
@@ -129,7 +143,9 @@ const OPERATORS: &[(&str, Tok)] = &[
     ("*", Tok::Star),
     ("/", Tok::Slash),
     ("%", Tok::Percent),
-    ("~", Tok::Tilde),
+    ("!", Tok::Bang),
+    ("<", Tok::Lt),
+    (">", Tok::Gt),
     ("=", Tok::Eq),
     (":", Tok::Colon),
     (",", Tok::Comma),
@@ -244,8 +260,8 @@ impl Lexer<'_> {
                         self.bump();
                         let d = self.err(format!("unexpected character `{c}`"), start);
                         return Err(match c {
-                            '!' => d.with_note("ownership uses `give x` and `burn x`; negation is `~x` or `-x`"),
-                            '<' | '>' => d.with_note("comparisons use the three-way operator `a <=> b`"),
+                            '~' => d.with_note("negate a trit with `!x`, a number with `-x`"),
+                            '.' => d.with_note("there are no methods yet (they come with classes): write `f(x)` instead of `x.f()`"),
                             '\\' => d.with_note("escapes like `\\n` only work inside quotes: `\"\\n\"`"),
                             _ => d,
                         });
@@ -458,10 +474,10 @@ mod tests {
         assert!(err(r#""open"#).contains("unterminated string"));
         assert!(err("'ab'").contains("exactly one character"));
         assert!(err(r#""\q""#).contains("unknown escape"));
-        let d = lex("x != y").unwrap_err();
-        assert_eq!(d.message, "unexpected character `!`");
-        assert!(d.note.unwrap().contains("give"));
-        assert!(lex("a < b").unwrap_err().note.unwrap().contains("<=>"));
+        let d = lex("~x").unwrap_err();
+        assert_eq!(d.message, "unexpected character `~`");
+        assert!(d.note.unwrap().contains("`!x`"));
+        assert_eq!(lex("a <= b != c == d >= e < f > g <=> h ! i").unwrap().len(), 18); // 17 + Eof
     }
 
     #[test]

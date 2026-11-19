@@ -1,7 +1,7 @@
 //! Recursive-descent parser: tokens -> [`Program`] (SPEC §11).
 //!
 //! Expression precedence, lowest to highest:
-//! `||`, `&&`, `<=>`, `+ -`, `* / %`, `<< >>`, unary `~ -` and casts `(T) x`, `**`
+//! `||`, `&&`, comparisons (`<=> == != < > <= >=`, not chainable), `+ -`, `* / %`, `<< >>`, unary `! -` and casts `(T) x`, `**`
 //! (right-associative, so `-2 ** 2 == -(2 ** 2)`), indexing, primary.
 
 use kestrel_core::Word;
@@ -228,6 +228,7 @@ impl Parser {
                 kind
             }
             Tok::Tri => return self.tri(),
+            Tok::If => return self.if_stmt(),
             Tok::Walk => return self.walk(),
             Tok::Ident(name) => match self.peek_at(1) {
                 Tok::Colon | Tok::ColonEq => {
@@ -344,6 +345,23 @@ impl Parser {
         Ok(StmtKind::Assign { place, value })
     }
 
+    fn if_stmt(&mut self) -> PResult<StmtKind> {
+        self.expect(Tok::If)?;
+        let cond = self.expr()?;
+        let then = self.block()?;
+        let otherwise = if !self.eat(&Tok::Else) {
+            None
+        } else if self.peek() == &Tok::If {
+            let start = self.span();
+            let kind = self.if_stmt()?;
+            let span = start.to(self.tokens[self.pos - 1].span);
+            Some(Block { stmts: vec![Stmt { kind, span }], span })
+        } else {
+            Some(self.block()?)
+        };
+        Ok(StmtKind::If { cond, then, otherwise })
+    }
+
     fn tri(&mut self) -> PResult<StmtKind> {
         let tri_span = self.expect(Tok::Tri)?;
         // `tri cmp3 a, b { ... }` is the assembly spelling of `tri a <=> b { ... }`.
@@ -429,7 +447,15 @@ impl Parser {
         const LEVELS: &[&[(Tok, BinOp)]] = &[
             &[(Tok::OrOr, BinOp::Or)],
             &[(Tok::AndAnd, BinOp::And)],
-            &[(Tok::Spaceship, BinOp::Cmp3)],
+            &[
+                (Tok::Spaceship, BinOp::Cmp3),
+                (Tok::EqEq, BinOp::Eq),
+                (Tok::NotEq, BinOp::Ne),
+                (Tok::Lt, BinOp::Lt),
+                (Tok::Gt, BinOp::Gt),
+                (Tok::Le, BinOp::Le),
+                (Tok::Ge, BinOp::Ge),
+            ],
             &[(Tok::Plus, BinOp::Add), (Tok::Minus, BinOp::Sub)],
             &[(Tok::Star, BinOp::Mul), (Tok::Slash, BinOp::Div), (Tok::Percent, BinOp::Mod)],
             &[(Tok::Shl, BinOp::Shl), (Tok::Shr, BinOp::Shr)],
@@ -441,9 +467,9 @@ impl Parser {
         while let Some((_, op)) = ops.iter().find(|(t, _)| t == self.peek()) {
             let op_span = self.bump().span;
             let rhs = self.binary(level + 1)?;
-            if *op == BinOp::Cmp3 && self.peek() == &Tok::Spaceship {
-                return Err(Diagnostic::new("`<=>` cannot be chained", self.span())
-                    .with_note("compare two values at a time: `(a <=> b) <=> c` if you really mean it"));
+            if level == 2 && ops.iter().any(|(t, _)| t == self.peek()) {
+                return Err(Diagnostic::new("comparisons cannot be chained", self.span())
+                    .with_note("compare two values at a time: `a < b && b < c`"));
             }
             let span = lhs.span.to(rhs.span).to(op_span);
             lhs = Expr { kind: ExprKind::Binary(*op, Box::new(lhs), Box::new(rhs)), span };
@@ -454,7 +480,7 @@ impl Parser {
     fn unary(&mut self) -> PResult<Expr> {
         let start = self.span();
         let op = match self.peek() {
-            Tok::Tilde => Some(UnOp::Tilde),
+            Tok::Bang => Some(UnOp::Not),
             Tok::Minus | Tok::Plus => {
                 // A lone `-` or `+` before a delimiter is a trit literal: `x: trit = +;`
                 if matches!(self.peek_at(1), Tok::Semi | Tok::Comma | Tok::RParen | Tok::RBracket | Tok::RBrace) {
@@ -604,7 +630,7 @@ mod tests {
             ExprKind::NaT => "NaT".into(),
             ExprKind::Var(v) => v.clone(),
             ExprKind::Unary(UnOp::Neg, a) => format!("(neg {})", sx(a)),
-            ExprKind::Unary(UnOp::Tilde, a) => format!("(~ {})", sx(a)),
+            ExprKind::Unary(UnOp::Not, a) => format!("(! {})", sx(a)),
             ExprKind::Binary(op, a, b) => format!("({} {} {})", op.symbol(), sx(a), sx(b)),
             ExprKind::Cast(a, s) => format!("(cast {s:?} {})", sx(a)),
             ExprKind::Index(a, i) => format!("{}[{}]", sx(a), sx(i)),
@@ -635,7 +661,8 @@ mod tests {
         assert_eq!(ex("(real) a / (real) b"), "(/ (cast Real a) (cast Real b))");
         assert_eq!(ex("(trit) -x"), "(cast Trit (neg x))");
         assert_eq!(ex("(int)(a + b) * 2"), "(* (cast Int (+ a b)) 2)");
-        assert_eq!(ex("~v[i - 1] % 3"), "(% (~ v[(- i 1)]) 3)");
+        assert_eq!(ex("!v[i - 1] % 3"), "(% (! v[(- i 1)]) 3)");
+        assert_eq!(ex("a + 1 < b && !c || d == e"), "(|| (&& (< (+ a 1) b) (! c)) (== d e))");
         assert_eq!(ex("f(lend b, give c, 'A', \"hi\")"), "f((lend b), (give c), '1, \"hi\")");
         assert_eq!(ex("(1 + 2) * 3"), "(* (+ 1 2) 3)");
     }
@@ -704,6 +731,7 @@ mod tests {
     #[test]
     fn errors() {
         assert!(parse_err("proc main() { final 5; }").message.contains("after `final`"));
+        assert!(parse_err("proc main() { t: trit = 1 < 2 < 3; }").message.contains("cannot be chained"));
         let d = parse_err("proc main() { x := 1\n y := 2; }");
         assert_eq!(d.message, "expected `;`, found `y`");
         assert_eq!(d.span.start, "proc main() { x := 1".len());

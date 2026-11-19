@@ -93,11 +93,11 @@ Em ordem de precedência, da menor para a maior:
 |---|---|---|
 | 1 | `\|\|` | Disjunção de Kleene (`max`) |
 | 2 | `&&` | Conjunção de Kleene (`min`) |
-| 3 | `<=>` | Comparação de 3 vias, resultado `trit` (−, 0, +) |
+| 3 | `<=>` `==` `!=` `<` `>` `<=` `>=` | Comparações, resultado `trit`. `<=>` dá −, 0 ou +; as outras dão `+` (verdadeiro) ou `−` (falso). Não podem ser encadeadas: `a < b < c` é erro |
 | 4 | `+` `-` | Soma e subtração |
 | 5 | `*` `/` `%` | Multiplicação, divisão e resto |
 | 6 | `<<` `>>` | Deslocamento ternário (×3ᵏ e ÷3ᵏ) |
-| 7 | `~` `-` (unário), `(T)` | Negação e cast |
+| 7 | `!` `-` (unário), `(T)` | Negação lógica (`trit`), negação numérica e cast |
 | 8 | `**` | Potência, associativa à direita (`2 ** 3 ** 2 = 2 ** 9`) |
 
 Regras:
@@ -107,14 +107,15 @@ Regras:
 - **`%`** é o resto da divisão. O sinal segue o dividendo, e vale `a = (a/b)·b + a%b`. Resto por zero produz NaT.
 - **`>>`** descarta os trits inferiores, o que equivale a arredondar para o inteiro mais próximo. Exemplo: `2 >> 1 = 1`, enquanto `2 / 3 = 0`.
 - **`<<`** produz NaT se algum trit não nulo passar da largura do tipo. Com `k ≥ 27`, o resultado é `0` se o operando for 0 e NaT caso contrário. Com `k < 0` ou `k` NaT, o resultado é NaT.
-- **`~x`** e **`-x`** são idênticos em ternário balanceado e compilam para o mesmo opcode `NEG`.
+- **`!x`** inverte um `trit` (`!+ = −`, `!0 = 0`). Sobre números é erro de tipo; use `-x`. Os dois compilam para o mesmo opcode `NEG`, porque em ternário balanceado negar é inverter cada trit.
+- As **comparações** aceitam números do mesmo tipo (`int` com `real` exige cast). Se um lado for NaT, o resultado é NaT. Comparar textos chega na 0.4.
 - **`**`** aceita `int ** int` e `real ** int`. O expoente é sempre `int`. Um expoente negativo em `int` produz NaT, e `0 ** 0 = 1`. Como em Python, `-2 ** 2 = -(2 ** 2) = -4`.
-- **`real`** aceita `+ - * / ** <=> ~ -`. Os operadores `%`, `<<`, `>>`, `&&` e `||` sobre `real` são **erro de tipo**, assim como misturar `int` e `real` numa conta sem cast. Não há promoção automática como no C: escreva `(real) a / (real) b`.
-- **`&&`** e **`||`** são **estritos**: os dois lados são sempre avaliados, sem curto-circuito. Por isso `- && NaT = NaT`. Os operandos são do tipo `trit`. Usar `tryte` ou `int` é **erro de tipo**; para comparar números, use `<=>`.
+- **`real`** aceita `+ - * / **`, as comparações e o `-` unário. Os operadores `%`, `<<`, `>>`, `&&` e `||` sobre `real` são **erro de tipo**, assim como misturar `int` e `real` numa conta sem cast. Não há promoção automática como no C: escreva `(real) a / (real) b`.
+- **`&&`** e **`||`** têm **curto-circuito**, como em Java: o lado direito só é avaliado se puder mudar o resultado. `- && x` é `−` e `+ || x` é `+` sem avaliar `x`, então `- && NaT = −`. Com `0` ou NaT à esquerda, o lado direito é avaliado (`NaT && x = NaT`). Os operandos são do tipo `trit`. Usar `tryte` ou `int` é **erro de tipo**; compare primeiro (`x > 0 && y > 0`).
 
 ### 3.1 Tabela de verdade K₃
 
-| A | B | `A && B` | `A \|\| B` | `~A` |
+| A | B | `A && B` | `A \|\| B` | `!A` |
 |---|---|---|---|---|
 | − | − | − | − | + |
 | − | 0 | − | 0 | + |
@@ -131,11 +132,11 @@ Regras:
 |---|---|
 | 0 | espaço (memória expurgada aparece em branco) |
 | +1 .. +26 | `A`–`Z` |
-| −1 .. −26 | `a`–`z` (por isso `~'A' == 'a'`) |
+| −1 .. −26 | `a`–`z` (por isso `-'A' == 'a'`) |
 | +27 .. +36 | `0`–`9` |
 | −27 .. −53 | `\n` `\t` `.` `,` `:` `;` `!` `?` `-` `+` `/` `_` `=` `(` `)` `[` `]` `*` `<` `>` `@` `#` `%` `{` `}` `"` `'` |
 | +54 .. +65 | `Á` `À` `Â` `Ã` `É` `Ê` `Í` `Ó` `Ô` `Õ` `Ú` `Ç` |
-| −54 .. −65 | `á` `à` `â` `ã` `é` `ê` `í` `ó` `ô` `õ` `ú` `ç` (`~'Á' == 'á'`) |
+| −54 .. −65 | `á` `à` `â` `ã` `é` `ê` `í` `ó` `ô` `õ` `ú` `ç` (`-'Á' == 'á'`) |
 | demais | reservados. `emit` imprime `�` |
 
 Atribuição exata da faixa de pontuação: −27 `\n`, −28 `\t`, −29 `.`, −30 `,`, −31 `:`, −32 `;`, −33 `!`, −34 `?`, −35 `-`, −36 `+`, −37 `/`, −38 `_`, −39 `=`, −40 `(`, −41 `)`, −42 `[`, −43 `]`, −44 `*`, −45 `<`, −46 `>`, −47 `@`, −48 `#`, −49 `%`, −50 `{`, −51 `}`, −52 `"`, −53 `'`.
@@ -199,7 +200,7 @@ Erros de compilação:
 | Classe | Causas | Efeito |
 |---|---|---|
 | **NaT** (dado) | Overflow, divisão por zero, cast fora do intervalo, `input` inválido | O valor vira NaT e pode ser interceptado por `on NaT` |
-| **Trap** (estrutura) | `claim` inválido, índice fora dos limites, `tri` sobre NaT, limite de `walk` NaT, ponteiro inválido, `burn` duplo | A VM **zera todo o heap e os registradores** e aborta com código ≠ 0 |
+| **Trap** (estrutura) | `claim` inválido, índice fora dos limites, `tri`/`if` sobre NaT, `if` sobre `0`, limite de `walk` NaT, ponteiro inválido, `burn` duplo | A VM **zera todo o heap e os registradores** e aborta com código ≠ 0 |
 
 ## 8. Sintaxe
 
@@ -282,6 +283,23 @@ tri cmp3 s, 10 { ... }     // forma assembly, idêntica
 - Um ramo é um comando seguido de `,` ou um bloco `{ }`.
 - Se a expressão for NaT, ocorre **Trap**.
 
+### 8.5.1 `if` / `else`
+
+```
+if x < 0 {
+    print("negativo");
+} else if x == 0 {
+    print("zero");
+} else {
+    print("positivo");
+}
+```
+
+- A condição é um `trit`, como o `boolean` do Java. `if x` com `x: int` é erro de tipo.
+- `+` entra no `if`, `−` vai para o `else`. **`0` (desconhecido) e NaT disparam Trap**: para tratar os três casos, use `tri`.
+- Os parênteses são opcionais: `if (x < 0) { ... }` também vale. As chaves são obrigatórias.
+- Por dentro, `if c { A } else { B }` é `tri c { - => B, 0 => trap, + => A }`. As regras de posse são as do `tri`: os dois ramos que continuam precisam deixar cada buffer no mesmo estado.
+
 ### 8.6 `walk` (laço simétrico)
 
 ```
@@ -360,12 +378,12 @@ O formato aceita duas formas de colocar valores, que podem ser misturadas:
 | Categoria | Opcodes |
 |---|---|
 | Pilha e locais | `PUSHC k` (int), `PUSHR k` (real), `LOAD s`, `STORE s`, `MOVE s`, `POP` |
-| ALU (inteira) | `ADD`, `SUB`, `MUL`, `DIV`, `MOD`, `POW`, `NEG`, `SHL3`, `SHR3`, `CMP3`, `KAND`, `KOR` |
+| ALU (inteira) | `ADD`, `SUB`, `MUL`, `DIV`, `MOD`, `POW`, `NEG`, `SHL3`, `SHR3`, `CMP3`, `KAND`, `KOR`, `TEST m` (resultado de `CMP3` → `trit`; os bits 0/1/2 de `m` dizem se −/0/+ vira `+`) |
 | ALU (real) | `FADD`, `FSUB`, `FMUL`, `FDIV`, `FPOW`, `FNEG`, `FCMP3` |
 | Texto | `PUSHS k`, `TLEN`, `TIDX`, `TSTR`, `TSTRT`, `TSTRV` (número → texto) |
 | Largura | `NARROW6`, `NARROW1`, `ITOF`, `FTOI` (overflow vira NaT) |
 | Memória | `ALLOC`, `LDIDX`, `STIDX`, `PURGE s` |
-| Fluxo | `JMP a`, `JNAT a`, `BR3 a- a0 a+`, `CALL f n`, `RET` |
+| Fluxo | `JMP a`, `JNAT a`, `BR3 a- a0 a+`, `CALL f n`, `RET`, `TRAP str` |
 | E/S | `INPUT`, `EMIT`, `PRINT`, `SHOW`, `SHOWT` (`0t`), `SHOWV` (`0v`), `DUMP str` |
 
 **Codificação:** cada instrução tem 1 byte de opcode seguido de operandos de tamanho fixo, em little-endian. Os tipos são `k`, `f` e `a` (`u32`), `s` (`u16`) e `n` (`u8`). As faixas são: pilha `0x0_`, ALU inteira `0x1_`, ALU real `0x2_`, texto e conversão `0x3_`, memória `0x4_`, fluxo `0x5_` e E/S `0x6_`. A tabela completa está em `crates/kestrel-core/src/isa.rs`.
@@ -421,6 +439,7 @@ stmt       = [ "final" ] IDENT ":" type [ "@" REG ] "=" expr [ on_nat ] ";"
            | "yield" [ expr ] ";"
            | "break" ";" | "continue" ";"
            | "tri" tri_head "{" arm arm arm "}"
+           | "if" expr block [ "else" ( block | if_stmt ) ]
            | "walk" IDENT "in" range block
            | io ";"
            | expr ";" ;
@@ -438,11 +457,11 @@ io         = "print" "(" expr ")" | "printl" "(" [ expr ] ")" | "emit" "(" expr 
 expr       = or_expr ;
 or_expr    = and_expr { "||" and_expr } ;
 and_expr   = cmp_expr { "&&" cmp_expr } ;
-cmp_expr   = add_expr [ "<=>" add_expr ] ;
+cmp_expr   = add_expr [ ( "<=>" | "==" | "!=" | "<" | ">" | "<=" | ">=" ) add_expr ] ;
 add_expr   = mul_expr { ( "+" | "-" ) mul_expr } ;
 mul_expr   = sh_expr  { ( "*" | "/" | "%" ) sh_expr } ;
 sh_expr    = unary { ( "<<" | ">>" ) unary } ;
-unary      = ( "~" | "-" | "(" scalar ")" ) unary | power ;
+unary      = ( "!" | "-" | "(" scalar ")" ) unary | power ;
 power      = postfix [ "**" unary ] ;
 postfix    = primary [ "[" expr "]" ] ;
 primary    = literal | IDENT | IDENT "(" [ arg { "," arg } ] ")"

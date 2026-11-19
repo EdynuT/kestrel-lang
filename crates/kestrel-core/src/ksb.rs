@@ -200,7 +200,7 @@ impl Module {
                     Op::PushC(k) | Op::PushR(k) if k as usize >= self.consts.len() => {
                         return Err(fail(at, CodeProblem::BadConst(k)));
                     }
-                    Op::PushS(k) | Op::Dump(k) if k as usize >= self.strings.len() => {
+                    Op::PushS(k) | Op::Dump(k) | Op::Trap(k) if k as usize >= self.strings.len() => {
                         return Err(fail(at, CodeProblem::BadString(k)));
                     }
                     Op::Load(s) | Op::Store(s) | Op::Move(s) | Op::Purge(s) => check_slot(s)?,
@@ -254,7 +254,7 @@ impl Module {
         let note = match op {
             Op::PushC(k) => self.consts.get(k as usize).map(|c| crate::Word::from(*c).to_string()),
             Op::PushR(k) => self.consts.get(k as usize).map(|c| crate::Real::from(*c).to_string()),
-            Op::PushS(k) | Op::Dump(k) => self.strings.get(k as usize).map(|s| format!("{s:?}")),
+            Op::PushS(k) | Op::Dump(k) | Op::Trap(k) => self.strings.get(k as usize).map(|s| format!("{s:?}")),
             Op::Call { f: callee, .. } => self.functions.get(callee as usize).map(|g| g.name.clone()),
             Op::Load(s) | Op::Store(s) | Op::Move(s) | Op::Purge(s) => {
                 f.local_names.get(usize::from(s)).cloned()

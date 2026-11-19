@@ -164,6 +164,8 @@ pub enum StmtKind {
     Continue,
     /// Three-way branch. `head` evaluates to a trit.
     Tri { head: Expr, neg: Block, zero: Block, pos: Block },
+    /// `if cond { } else { }`; `else if` is an `else` block holding one `If`.
+    If { cond: Expr, then: Block, otherwise: Option<Block> },
     Walk { var: Ident, range: Range, body: Block },
     Expr(Expr),
 }
@@ -261,7 +263,8 @@ pub enum UnOp {
     /// `-x`
     Neg,
     /// `~x` (same value as `-x` in balanced ternary)
-    Tilde,
+    /// `!x`: flips a trit (Kleene not).
+    Not,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -269,6 +272,12 @@ pub enum BinOp {
     Or,
     And,
     Cmp3,
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
     Add,
     Sub,
     Mul,
@@ -280,11 +289,21 @@ pub enum BinOp {
 }
 
 impl BinOp {
+    pub fn is_comparison(self) -> bool {
+        matches!(self, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge)
+    }
+
     pub fn symbol(self) -> &'static str {
         match self {
             BinOp::Or => "||",
             BinOp::And => "&&",
             BinOp::Cmp3 => "<=>",
+            BinOp::Eq => "==",
+            BinOp::Ne => "!=",
+            BinOp::Lt => "<",
+            BinOp::Gt => ">",
+            BinOp::Le => "<=",
+            BinOp::Ge => ">=",
             BinOp::Add => "+",
             BinOp::Sub => "-",
             BinOp::Mul => "*",

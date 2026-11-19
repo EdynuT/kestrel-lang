@@ -176,6 +176,8 @@ impl Checker<'_> {
                 self.no_alive(&st, s.span, "the proc yields")?;
                 return Ok(None);
             }
+            // A trap zeroes the heap, so buffers still alive here are fine.
+            HStmtKind::Trap(_) => return Ok(None),
             HStmtKind::Break | HStmtKind::Continue => {
                 let word = if s.kind == HStmtKind::Break { "break" } else { "continue" };
                 let l = self.loops.last().expect("sema rejects break outside walk");
@@ -186,10 +188,11 @@ impl Checker<'_> {
                 self.outer_unchanged(&l.entry, &st, &l.inner, s.span)?;
                 return Ok(None);
             }
-            HStmtKind::Tri { head, arms } => {
+            HStmtKind::Tri { head, arms, from_if } => {
                 self.expr(head, &mut st)?;
                 let mut ends: Vec<(&str, State)> = Vec::new();
-                for (label, arm) in ["-", "0", "+"].into_iter().zip(arms.iter()) {
+                let labels = if *from_if { ["`else` branch", "", "`if` branch"] } else { ["`-` arm", "`0` arm", "`+` arm"] };
+                for (label, arm) in labels.into_iter().zip(arms.iter()) {
                     if let Some(end) = self.block(arm, st.clone())? {
                         ends.push((label, end));
                     }
@@ -200,12 +203,13 @@ impl Checker<'_> {
                 for (_, other) in &ends[1..] {
                     if let Some(id) = (0..first.len()).find(|&i| !first[i].agrees(other[i])) {
                         let detail: Vec<String> =
-                            ends.iter().map(|(label, s)| format!("`{label}` arm: {}", s[id].describe())).collect();
+                            ends.iter().map(|(label, s)| format!("{label}: {}", s[id].describe())).collect();
+                        let what = if *from_if { "the branches of this `if`" } else { "the arms of this `tri`" };
                         return Err(Diagnostic::new(
-                            format!("the arms of this `tri` leave `{}` in different states", self.name(id)),
+                            format!("{what} leave `{}` in different states", self.name(id)),
                             s.span,
                         )
-                        .with_note(format!("{} (every arm that continues must agree)", detail.join(", "))));
+                        .with_note(format!("{} (every path that continues must agree)", detail.join(", "))));
                     }
                     // If any arm gave the buffer away, its name cannot be reused afterwards.
                     for (f, o) in first.iter_mut().zip(other) {

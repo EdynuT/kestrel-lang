@@ -310,6 +310,22 @@ impl Checker {
                 }
                 if s.kind == StmtKind::Break { HStmtKind::Break } else { HStmtKind::Continue }
             }
+            StmtKind::If { cond, then, otherwise } => {
+                let h = self.expr(cond, Some(Type::Scalar(Scalar::Trit)))?;
+                if h.ty != Type::Scalar(Scalar::Trit) {
+                    return Err(err(format!("`if` needs a trit, found {}", h.ty), cond.span)
+                        .with_note("compare first, e.g. `if x > 0 { ... }`"));
+                }
+                // `if` is a `tri` whose `0` arm traps: an unknown condition is an error.
+                let then = self.block(then)?;
+                let otherwise = match otherwise {
+                    Some(b) => self.block(b)?,
+                    None => HBlock { stmts: vec![], scope: vec![], span: s.span },
+                };
+                let trap = HStmt { kind: HStmtKind::Trap("if condition is 0 (unknown)".into()), span: cond.span };
+                let unknown = HBlock { stmts: vec![trap], scope: vec![], span: cond.span };
+                HStmtKind::Tri { head: h, arms: Box::new([otherwise, unknown, then]), from_if: true }
+            }
             StmtKind::Tri { head, neg, zero, pos } => {
                 let h = self.expr(head, Some(Type::Scalar(Scalar::Trit)))?;
                 if h.ty != Type::Scalar(Scalar::Trit) {
@@ -317,7 +333,7 @@ impl Checker {
                         .with_note("compare first, e.g. `tri x <=> 0 { ... }`"));
                 }
                 let arms = [self.block(neg)?, self.block(zero)?, self.block(pos)?];
-                HStmtKind::Tri { head: h, arms: Box::new(arms) }
+                HStmtKind::Tri { head: h, arms: Box::new(arms), from_if: false }
             }
             StmtKind::Walk { var, range, body } => {
                 let word = Type::Scalar(Scalar::Int);
@@ -510,10 +526,14 @@ impl Checker {
                     return Err(self.unknown(name, span));
                 }
             }
-            ExprKind::Unary(_, inner) => {
+            ExprKind::Unary(op, inner) => {
                 let h = self.expr(inner, want.filter(|t| t.is_numeric()))?;
                 self.numeric(&h)?;
                 let ty = h.ty;
+                if *op == UnOp::Not && ty != Type::Scalar(Scalar::Trit) {
+                    return Err(err(format!("`!` works on trits, found {ty}"), h.span)
+                        .with_note("to flip the sign of a number use `-x`"));
+                }
                 match h.kind {
                     HExprKind::Word(w) => hx(HExprKind::Word(-w), ty, span),
                     HExprKind::Real(r) => hx(HExprKind::Real(-r), ty, span),
@@ -580,7 +600,7 @@ impl Checker {
                 }
                 (ha, hb, trit)
             }
-            BinOp::Cmp3 => {
+            BinOp::Cmp3 | BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                 let (ha, hb, _) = self.numeric_pair(a, b, None)?;
                 (ha, hb, trit)
             }
@@ -1103,6 +1123,15 @@ proc main() -> int {
         assert!(err_in("f: text = \"x\"; printf(f, 1);").contains("has no `%`"));
         ok("f: text = \"t\"; n: int = 1; printf(\"a \" + f + \" = %t {n}\" + \"!\", n);");
         assert!(err_in("n: int = 1; printf(\"a\" + n);").contains("joins text only, found int"));
+    }
+
+    #[test]
+    fn if_checks() {
+        ok("x := 1; if x > 0 { print(x); } else if x == 0 { } else { print(-x); }");
+        assert!(err_in("x := 1; if x { }").contains("`if` needs a trit, found int"));
+        assert!(err_in("x := 1; y := !x;").contains("`!` works on trits"));
+        assert!(err_in("x := 1; t: trit = x == \"a\";").contains("found text"));
+        assert!(err_in("x := 1.5; t: trit = x < 2;").contains("integer literal where a real is expected"));
     }
 
     #[test]

@@ -39,6 +39,9 @@ pub enum Op {
     Cmp3,
     KAnd,
     KOr,
+    /// Turns a `cmp3` result into a trit: bit 0/1/2 of the mask is the answer
+    /// for `-`/`0`/`+` (set = `+`, clear = `-`). NaT stays NaT.
+    Test(u8),
 
     // Real ALU
     FAdd,
@@ -81,6 +84,8 @@ pub enum Op {
     Call { f: u32, argc: u8 },
     /// Pop the return value, drop the frame, push the value for the caller.
     Ret,
+    /// Stop with a trap; the reason is string `k`.
+    Trap(u32),
 
     // I/O
     Input,
@@ -137,6 +142,7 @@ impl Op {
             Cmp3 => 0x19,
             KAnd => 0x1a,
             KOr => 0x1b,
+            Test(_) => 0x1c,
 
             FAdd => 0x20,
             FSub => 0x21,
@@ -166,6 +172,7 @@ impl Op {
             Br3 { .. } => 0x52,
             Call { .. } => 0x53,
             Ret => 0x54,
+            Trap(_) => 0x55,
 
             Input => 0x60,
             Emit => 0x61,
@@ -200,6 +207,7 @@ impl Op {
             Cmp3 => "cmp3",
             KAnd => "kand",
             KOr => "kor",
+            Test(_) => "test",
             FAdd => "fadd",
             FSub => "fsub",
             FMul => "fmul",
@@ -225,6 +233,7 @@ impl Op {
             Br3 { .. } => "br3",
             Call { .. } => "call",
             Ret => "ret",
+            Trap(_) => "trap",
             Input => "input",
             Emit => "emit",
             Print => "print",
@@ -239,7 +248,8 @@ impl Op {
     pub fn size(self) -> usize {
         use Op::*;
         1 + match self {
-            PushC(_) | PushR(_) | PushS(_) | Jmp(_) | JNat(_) | Dump(_) => 4,
+            PushC(_) | PushR(_) | PushS(_) | Jmp(_) | JNat(_) | Dump(_) | Trap(_) => 4,
+            Test(_) => 1,
             Load(_) | Store(_) | Move(_) | Purge(_) => 2,
             Br3 { .. } => 12,
             Call { .. } => 5,
@@ -251,9 +261,10 @@ impl Op {
         use Op::*;
         out.push(self.opcode());
         match self {
-            PushC(k) | PushR(k) | PushS(k) | Jmp(k) | JNat(k) | Dump(k) => {
+            PushC(k) | PushR(k) | PushS(k) | Jmp(k) | JNat(k) | Dump(k) | Trap(k) => {
                 out.extend_from_slice(&k.to_le_bytes())
             }
+            Test(m) => out.push(m),
             Load(s) | Store(s) | Move(s) | Purge(s) => out.extend_from_slice(&s.to_le_bytes()),
             Br3 { neg, zero, pos } => {
                 for a in [neg, zero, pos] {
@@ -293,6 +304,10 @@ impl Op {
             0x19 => Cmp3,
             0x1a => KAnd,
             0x1b => KOr,
+            0x1c => match r.u8()? {
+                m @ 0..=7 => Test(m),
+                _ => return Err(DecodeError::BadOpcode { at, byte }),
+            },
             0x20 => FAdd,
             0x21 => FSub,
             0x22 => FMul,
@@ -318,6 +333,7 @@ impl Op {
             0x52 => Br3 { neg: r.u32()?, zero: r.u32()?, pos: r.u32()? },
             0x53 => Call { f: r.u32()?, argc: r.u8()? },
             0x54 => Ret,
+            0x55 => Trap(r.u32()?),
             0x60 => Input,
             0x61 => Emit,
             0x62 => Print,
@@ -336,7 +352,19 @@ impl fmt::Display for Op {
         use Op::*;
         let m = self.mnemonic();
         match *self {
-            PushC(k) | PushR(k) | PushS(k) | Dump(k) => write!(f, "{m:<7} #{k}"),
+            PushC(k) | PushR(k) | PushS(k) | Dump(k) | Trap(k) => write!(f, "{m:<7} #{k}"),
+            Test(mask) => {
+                let name = match mask {
+                    0b001 => "lt",
+                    0b011 => "le",
+                    0b010 => "eq",
+                    0b101 => "ne",
+                    0b110 => "ge",
+                    0b100 => "gt",
+                    _ => "",
+                };
+                write!(f, "{m:<7} {name}{}", if name.is_empty() { format!("{mask:03b}") } else { String::new() })
+            }
             Load(s) | Store(s) | Move(s) | Purge(s) => write!(f, "{m:<7} {}", slot_name(s)),
             Jmp(a) | JNat(a) => write!(f, "{m:<7} @{a}"),
             Br3 { neg, zero, pos } => write!(f, "{m:<7} @{neg}, @{zero}, @{pos}"),
@@ -393,7 +421,7 @@ mod tests {
         use Op::*;
         vec![
             PushC(7), PushR(70_000), PushS(0), Load(4), Store(9), Move(0), Pop,
-            Add, Sub, Mul, Div, Mod, Pow, Neg, Shl3, Shr3, Cmp3, KAnd, KOr,
+            Add, Sub, Mul, Div, Mod, Pow, Neg, Shl3, Shr3, Cmp3, KAnd, KOr, Test(0b101), Trap(4),
             FAdd, FSub, FMul, FDiv, FPow, FNeg, FCmp3,
             TLen, TIdx, Narrow6, Narrow1, IToF, FToI, TStr, TStrT, TStrV,
             Alloc, LdIdx, StIdx, Purge(8),

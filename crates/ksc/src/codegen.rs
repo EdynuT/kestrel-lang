@@ -161,6 +161,45 @@ impl<'a> ProcGen<'a> {
         self.slots[id]
     }
 
+    /// `a && b` / `a || b`, evaluating `b` only when it can change the result
+    /// (Kleene: `- && x == -`, `+ || x == +`; NaT on the left stays NaT).
+    /// ```text
+    ///       a; jnat NAT; br3 NEG, ZERO, POS
+    /// &&:   NEG: push -; jmp END   ZERO: push 0; b; kand; jmp END   POS: b; jmp END
+    /// ||:   NEG: b; jmp END        ZERO: push 0; b; kor; jmp END    POS: push +; jmp END
+    ///       NAT: push NaT
+    /// END:
+    /// ```
+    fn short_circuit(&mut self, op: BinOp, a: &HExpr, b: &HExpr) -> R<()> {
+        let and = op == BinOp::And;
+        self.expr(a)?;
+        let jnat = self.emit(Op::JNat(0));
+        let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
+        let mut exits = Vec::new();
+        for (arm, decided) in [(0, and), (1, false), (2, !and)] {
+            let start = self.here();
+            self.patch(br, arm, start);
+            if decided {
+                self.push_word(if and { Word::NEG_ONE } else { Word::ONE });
+            } else if arm == 1 {
+                self.push_word(Word::ZERO);
+                self.expr(b)?;
+                self.emit(if and { Op::KAnd } else { Op::KOr });
+            } else {
+                self.expr(b)?;
+            }
+            exits.push(self.emit(Op::Jmp(0)));
+        }
+        let nat = self.here();
+        self.patch(jnat, 0, nat);
+        self.push_word(Word::NAT);
+        let end = self.here();
+        for at in exits {
+            self.patch(at, 0, end);
+        }
+        Ok(())
+    }
+
     fn push_word(&mut self, w: Word) {
         let k = self.pools.constant(Word27::from(w));
         self.emit(Op::PushC(k));
@@ -239,7 +278,11 @@ impl<'a> ProcGen<'a> {
                 let at = self.emit(Op::Jmp(0));
                 self.loops.last_mut().expect("continue inside walk").continues.push(at);
             }
-            HStmtKind::Tri { head, arms } => {
+            HStmtKind::Trap(reason) => {
+                let k = self.pools.string(reason);
+                self.emit(Op::Trap(k));
+            }
+            HStmtKind::Tri { head, arms, .. } => {
                 self.expr(head)?;
                 let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
                 let mut exits = Vec::new();
@@ -349,13 +392,27 @@ impl<'a> ProcGen<'a> {
                 self.expr(a)?;
                 self.emit(if real(a.ty) { Op::FNeg } else { Op::Neg });
             }
+            HExprKind::Binary(op @ (BinOp::And | BinOp::Or), a, b) => self.short_circuit(*op, a, b)?,
+            HExprKind::Binary(op, a, b) if op.is_comparison() => {
+                self.expr(a)?;
+                self.expr(b)?;
+                self.emit(if real(a.ty) { Op::FCmp3 } else { Op::Cmp3 });
+                // Answer (+ = true) for cmp3 results -, 0, + as bits 0, 1, 2.
+                let mask = match op {
+                    BinOp::Eq => 0b010,
+                    BinOp::Ne => 0b101,
+                    BinOp::Lt => 0b001,
+                    BinOp::Le => 0b011,
+                    BinOp::Gt => 0b100,
+                    _ => 0b110, // Ge
+                };
+                self.emit(Op::Test(mask));
+            }
             HExprKind::Binary(op, a, b) => {
                 self.expr(a)?;
                 self.expr(b)?;
                 let is_real = real(a.ty);
                 let code = match (op, is_real) {
-                    (BinOp::And, _) => Op::KAnd,
-                    (BinOp::Or, _) => Op::KOr,
                     (BinOp::Cmp3, false) => Op::Cmp3,
                     (BinOp::Cmp3, true) => Op::FCmp3,
                     (BinOp::Add, false) => Op::Add,
@@ -372,6 +429,7 @@ impl<'a> ProcGen<'a> {
                     (BinOp::Div, true) => Op::FDiv,
                     (BinOp::Pow, true) => Op::FPow,
                     (op, true) => unreachable!("sema rejects `{}` on reals", op.symbol()),
+                    (op, false) => unreachable!("`{}` is handled above", op.symbol()),
                 };
                 self.emit(code);
                 if !is_real {

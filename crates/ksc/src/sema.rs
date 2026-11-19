@@ -73,16 +73,26 @@ struct Sig {
     span: Span,
 }
 
+/// Names declared in one block. `names` keeps the latest local per name, so
+/// lookups stay fast even in procs with many variables.
+#[derive(Default)]
+struct Scope {
+    ids: Vec<LocalId>,
+    names: HashMap<String, LocalId>,
+}
+
 struct FnCx {
     locals: Vec<Local>,
-    scopes: Vec<Vec<(String, LocalId)>>,
+    scopes: Vec<Scope>,
     ret: Type,
     loops: usize,
+    /// Arrays whose size is known here (`{...}` or `claim 5`), for index checks.
+    sizes: HashMap<LocalId, i64>,
 }
 
 impl FnCx {
     fn new(ret: Type) -> FnCx {
-        FnCx { locals: Vec::new(), scopes: vec![Vec::new()], ret, loops: 0 }
+        FnCx { locals: Vec::new(), scopes: vec![Scope::default()], ret, loops: 0, sizes: HashMap::new() }
     }
 }
 
@@ -201,7 +211,7 @@ impl Checker {
     fn known(&self, t: &ast::TypeExpr) -> R<()> {
         match t.ty {
             Type::Enum(n) if !self.enums.contains_key(n) => Err(err(format!("unknown type `{n}`"), t.span)
-                .with_note("types are trit, tryte, int, real, text, own/lent [T] or a declared enum")),
+                .with_note("types are trit, tryte, int, real, text, arrays (`x[]: int`) or a declared enum")),
             _ => Ok(()),
         }
     }
@@ -263,13 +273,15 @@ impl Checker {
         let id = self.f.locals.len();
         self.f.locals.push(Local { name: name.to_string(), ty, kind, span, is_final: false });
         if kind != LocalKind::Hidden {
-            self.f.scopes.last_mut().expect("a scope is open").push((name.to_string(), id));
+            let scope = self.f.scopes.last_mut().expect("a scope is open");
+            scope.ids.push(id);
+            scope.names.insert(name.to_string(), id);
         }
         id
     }
 
     fn lookup(&self, name: &str) -> Option<LocalId> {
-        self.f.scopes.iter().rev().flat_map(|s| s.iter().rev()).find(|(n, _)| n == name).map(|(_, id)| *id)
+        self.f.scopes.iter().rev().find_map(|s| s.names.get(name).copied())
     }
 
     fn unknown(&self, name: &str, span: Span) -> Diagnostic {
@@ -281,7 +293,7 @@ impl Checker {
     }
 
     fn block(&mut self, b: &ast::Block) -> R<HBlock> {
-        self.f.scopes.push(Vec::new());
+        self.f.scopes.push(Scope::default());
         let mut stmts: Vec<HStmt> = Vec::new();
         for s in &b.stmts {
             if let Some(prev) = stmts.last() {
@@ -292,7 +304,7 @@ impl Checker {
             }
             stmts.push(self.stmt(s)?);
         }
-        let scope = self.f.scopes.pop().expect("scope pushed above").into_iter().map(|(_, id)| id).collect();
+        let scope = self.f.scopes.pop().expect("scope pushed above").ids;
         Ok(HBlock { stmts, scope, span: b.span })
     }
 
@@ -333,14 +345,15 @@ impl Checker {
                     }
                     None => None,
                 };
-                let in_scope = self.f.scopes.last().and_then(|s| s.iter().rev().find(|(n, _)| *n == name.name));
-                if let Some(&(_, prev)) = in_scope
+                let in_scope = self.f.scopes.last().and_then(|s| s.names.get(&name.name));
+                if let Some(&prev) = in_scope
                     && self.f.locals[prev].is_final
                 {
                     return Err(err(format!("`{}` is final and cannot be declared again", name.name), name.span)
                         .with_note("pick another name, or declare the first one without `final`"));
                 }
                 let local = self.new_local(&name.name, lty, LocalKind::Let, name.span);
+                self.note_size(local, &value);
                 self.f.locals[local].is_final = *is_final;
                 HStmtKind::Let { local, value, on_nat }
             }
@@ -412,7 +425,37 @@ impl Checker {
                 self.f.loops += 1;
                 let body = self.block(body);
                 self.f.loops -= 1;
-                HStmtKind::While { cond: h, body: body? }
+                HStmtKind::While { cond: h, body: body?, step: None }
+            }
+            // `for init; cond; step { body }` = `{ init; while cond { body } }` with `step`
+            // after the body (and on `continue`). `init`'s variable lives only in the loop.
+            StmtKind::For { init, cond, step, body } => {
+                if !matches!(init.kind, StmtKind::Let { .. } | StmtKind::Assign { .. }) {
+                    return Err(err("the first part of `for` must declare or assign a variable", init.span)
+                        .with_note("e.g. `for i := 0; i < 10; i++ { ... }`"));
+                }
+                if !matches!(step.kind, StmtKind::Assign { .. }) {
+                    return Err(err("the last part of `for` must change a variable", step.span)
+                        .with_note("e.g. `i++`, `i += 2` or `i = i * 3`"));
+                }
+                self.f.scopes.push(Scope::default());
+                let result = (|| {
+                    let hinit = self.stmt(init)?;
+                    let h = self.expr(cond, Some(Type::Scalar(Scalar::Trit)))?;
+                    if h.ty != Type::Scalar(Scalar::Trit) {
+                        return Err(err(format!("`for` needs a trit condition, found {}", h.ty), cond.span)
+                            .with_note("compare, e.g. `i < 10`"));
+                    }
+                    self.f.loops += 1;
+                    let hbody = self.block(body);
+                    self.f.loops -= 1;
+                    let hstep = self.stmt(step)?;
+                    let step_block = HBlock { stmts: vec![hstep], scope: vec![], span: step.span };
+                    let w = HStmt { kind: HStmtKind::While { cond: h, body: hbody?, step: Some(step_block) }, span: s.span };
+                    Ok(vec![hinit, w])
+                })();
+                let scope = self.f.scopes.pop().expect("pushed above").ids;
+                HStmtKind::Block(HBlock { stmts: result?, scope, span: s.span })
             }
             StmtKind::Walk { var, range, body } => {
                 let word = Type::Scalar(Scalar::Int);
@@ -427,7 +470,7 @@ impl Checker {
                     }
                 };
                 let end_tmp = self.new_local("$end", word, LocalKind::Hidden, var.span);
-                self.f.scopes.push(Vec::new());
+                self.f.scopes.push(Scope::default());
                 let v = self.new_local(&var.name, word, LocalKind::WalkVar, var.span);
                 self.f.loops += 1;
                 let body = self.block(body);
@@ -450,7 +493,7 @@ impl Checker {
                 }
                 if let Type::Own(_) = h.ty {
                     return Err(err("the buffer returned by this call would be lost", e.span)
-                        .with_note("store it, e.g. `b: own [int] = f(...);`, then burn it"));
+                        .with_note("store it, e.g. `sym b[]: int = f(...);`, then burn it"));
                 }
                 HStmtKind::Expr(h)
             }
@@ -477,6 +520,7 @@ impl Checker {
         match (&place.index, local.ty) {
             (Some(idx), Type::Own(e) | Type::Lent(e)) => {
                 let hidx = self.index(idx)?;
+                self.check_index(id, &hidx)?;
                 let hv = self.expect(value, Type::Scalar(e.scalar()))?;
                 Ok(HStmtKind::Assign { local: id, index: Some(hidx), value: hv })
             }
@@ -486,6 +530,8 @@ impl Checker {
                 .with_note("assign to its cells instead: `v[i] = ...`")),
             (None, t) => {
                 let hv = self.expect(value, t)?;
+                self.f.sizes.remove(&id);
+                self.note_size(id, &hv);
                 Ok(HStmtKind::Assign { local: id, index: None, value: hv })
             }
         }
@@ -512,6 +558,38 @@ impl Checker {
             }
             _ => d,
         })
+    }
+
+    /// Remembers the size of an array made by `{...}` or `claim <literal>`.
+    fn note_size(&mut self, id: LocalId, value: &HExpr) {
+        let n = match &value.kind {
+            HExprKind::Pack(items) => items.len() as i64,
+            HExprKind::Claim(n) => match n.kind {
+                HExprKind::Word(w) if !w.is_nat() => w.get().unwrap_or(0),
+                _ => return,
+            },
+            _ => return,
+        };
+        self.f.sizes.insert(id, n);
+    }
+
+    /// A literal index outside an array of known size would always trap:
+    /// reject it now, like Rust does for fixed-size arrays.
+    fn check_index(&self, id: LocalId, idx: &HExpr) -> R<()> {
+        let (HExprKind::Word(w), Some(&n)) = (&idx.kind, self.f.sizes.get(&id)) else { return Ok(()) };
+        let (Some(i), Type::Own(b) | Type::Lent(b)) = (w.get(), self.f.locals[id].ty) else { return Ok(()) };
+        let (lo, hi) = if b.sym { (-(n / 2), n / 2) } else { (0, n - 1) };
+        if (lo..=hi).contains(&i) {
+            return Ok(());
+        }
+        let name = &self.f.locals[id].name;
+        let range = if n == 0 { "none: it is empty".to_string() } else if b.sym { format!("{lo}..+{hi}") } else { format!("{lo}..{hi}") };
+        let note = if b.sym {
+            format!("`{name}` is `sym` with {n} cells, so index 0 is the middle one")
+        } else {
+            format!("`{name}` has {n} cells, counted from 0")
+        };
+        Err(err(format!("index {i} is out of bounds: valid indices of `{name}` are {range}"), idx.span).with_note(note))
     }
 
     fn index(&mut self, idx: &Expr) -> R<HExpr> {
@@ -651,6 +729,7 @@ impl Checker {
                     && let ty @ (Type::Own(el) | Type::Lent(el)) = self.f.locals[id].ty
                 {
                     let hidx = self.index(idx)?;
+                    self.check_index(id, &hidx)?;
                     let hb = hx(HExprKind::Local(id), ty, base.span);
                     return Ok(hx(HExprKind::Index(Box::new(hb), Box::new(hidx)), Type::Scalar(el.scalar()), span));
                 }
@@ -668,8 +747,25 @@ impl Checker {
                     hx(HExprKind::Claim(Box::new(n)), Type::Own(el), span)
                 }
                 _ => {
-                    return Err(err("`claim` needs to know the buffer type", span)
-                        .with_note("declare it, e.g. `b: own [int] = claim 5;`"));
+                    return Err(err("`claim` needs to know the array type", span)
+                        .with_note("declare it, e.g. `b[]: int = claim 5;`"));
+                }
+            },
+            ExprKind::ArrayLit(items) => match want {
+                Some(t @ Type::Own(buf)) => {
+                    if buf.sym && items.len() % 2 == 0 {
+                        return Err(err(format!("a sym array needs an odd number of values, found {}", items.len()), span)
+                            .with_note("the middle value is index 0"));
+                    }
+                    let mut hs = Vec::new();
+                    for item in items {
+                        hs.push(self.expect(item, Type::Scalar(buf.scalar()))?);
+                    }
+                    hx(HExprKind::Pack(hs), t, span)
+                }
+                _ => {
+                    return Err(err("`{...}` needs to know the array type", span)
+                        .with_note("declare it, e.g. `b[]: int = {1, 2, 3};`"));
                 }
             },
             ExprKind::Give(name) => {
@@ -1075,7 +1171,10 @@ impl Checker {
             }
             "len" => {
                 arity(1)?;
-                let a = self.expect(&args[0], text)?;
+                let a = self.shown(&args[0], None)?;
+                if !matches!(a.ty, Type::Text | Type::Lent(_)) {
+                    return Err(err(format!("`len` takes text or an array, found {}", a.ty), a.span));
+                }
                 return Ok(builtin(Builtin::Len, vec![a], Type::Scalar(Scalar::Int)));
             }
             "dump" => return Err(err("`dump(...)` is a statement, not a value", span)),
@@ -1106,7 +1205,15 @@ impl Checker {
                     let lid = self.lookup(&x.name).ok_or_else(|| self.unknown(&x.name, x.span))?;
                     match self.f.locals[lid].ty {
                         Type::Own(e2) | Type::Lent(e2) if e2 == *el => hx(HExprKind::Lend(lid), *pty, arg.span),
-                        t => return Err(err(format!("expected a buffer of {}, found {t}", el.scalar()), arg.span)),
+                        t => {
+                            let d = err(format!("expected {}, found {t}", Type::Lent(*el)), arg.span);
+                            return Err(match t {
+                                Type::Own(b) | Type::Lent(b) if b.elem == el.elem => d.with_note(
+                                    "a `sym` array (indices -k..+k) and an array from 0 cannot be swapped: the same index means different cells",
+                                ),
+                                _ => d,
+                            });
+                        }
                     }
                 }
                 (Type::Lent(_), _) => {
@@ -1139,7 +1246,7 @@ fn piece(spec: char, label: &str, h: HExpr) -> R<(Fmt, HExpr)> {
         'd' | 'i' | 't' | 'v' => ty.is_int() || buffer,
         'f' | 'r' => ty == Type::Scalar(Scalar::Real),
         's' => matches!(ty, Type::Text | Type::Enum(_)),
-        'c' => matches!(ty, Type::Scalar(Scalar::Tryte | Scalar::Trit) | Type::Lent(Elem::Tryte)),
+        'c' => matches!(ty, Type::Scalar(Scalar::Tryte | Scalar::Trit) | Type::Lent(ast::Buf { elem: Elem::Tryte, .. })),
         _ => matches!(ty, Type::Scalar(_) | Type::Text | Type::Enum(_)) || buffer,
     };
     if !ok {
@@ -1198,7 +1305,7 @@ mod tests {
     }
 
     const SPEC_EXAMPLE: &str = r#"
-proc sum(v: lent [int], k: int) -> int {
+proc sum(lent sym v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k {
         acc += v[i];
@@ -1207,7 +1314,7 @@ proc sum(v: lent [int], k: int) -> int {
 }
 
 proc main() -> int {
-    b: own [int] = claim 5;
+    sym b[]: int = claim 5;
     walk i in span 2 {
         b[i] = i * i;
     }
@@ -1276,29 +1383,34 @@ proc main() -> int {
     }
 
     #[test]
-    fn registers() {
-    }
-
-    #[test]
     fn buffers() {
-        assert!(err_in("b := claim 5;").contains("needs to know the buffer type"));
-        assert!(err_in("b: own [int] = claim 5; c := b;").contains("cannot be used as a value"));
+        assert!(err_in("b := claim 5;").contains("needs to know the array type"));
+        assert!(err_in("sym b[]: int = claim 5; c := b;").contains("cannot be used as a value"));
         assert!(err_in("x := 1; burn x;").contains("only an own buffer can be burned"));
-        assert!(err_of("proc f(v: lent [int]) { burn v; } proc main() {}").contains("cannot burn a lent buffer"));
-        assert!(err_of("proc f(v: lent [int]) { v = v; } proc main() {}").contains("cannot replace a lent buffer"));
-        assert!(err_in("b: own [int] = claim 3; x := lend b;").contains("only allowed as a call argument"));
-        assert!(err_in("x: lent [int] = 1;").contains("cannot hold a lent buffer"));
+        assert!(err_of("proc f(lent sym v[]: int) { burn v; } proc main() {}").contains("cannot burn a lent buffer"));
+        assert!(err_of("proc f(lent sym v[]: int) { v = v; } proc main() {}").contains("cannot replace a lent buffer"));
+        assert!(err_in("sym b[]: int = claim 3; x := lend b;").contains("only allowed as a call argument"));
+        assert!(err_in("b := {1, 2};").contains("needs to know the array type"));
+        assert!(err_in("sym b[]: int = {1, 2}; burn b;").contains("odd number of values"));
+        ok("a[]: int = {1, 2, 3, 4}; n := len(a); z[]: tryte = claim 0; burn a; burn z;");
+        // literal indices are checked against arrays of known size
+        assert!(err_in("sym a[]: int = {1, 2, 3}; x := a[2]; burn a;").contains("valid indices of `a` are -1..+1"));
+        assert!(err_in("a[]: int = claim 4; a[4] = 1; burn a;").contains("are 0..3"));
+        assert!(err_in("a[]: int = {1}; x := a[-1]; burn a;").contains("out of bounds"));
+        assert!(err_in("a[]: int = claim 0; x := a[0]; burn a;").contains("it is empty"));
+        ok("sym a[]: int = {1, 2, 3}; x := a[1] + a[-1]; i := 5; burn a; a = claim 11; y := a[5]; burn a;");
+        ok("n := 3; a[]: int = claim n; x := a[7]; burn a;"); // size unknown here: checked at run time
         assert!(err_in("s := \"hi\"; s[0] = 'A';").contains("text is read-only"));
-        ok("s := \"hi\"; c := s[1]; n := len(s); b: own [tryte] = claim 3; b[0] = c; burn b;");
+        ok("s := \"hi\"; c := s[1]; n := len(s); sym b[]: tryte = claim 3; b[0] = c; burn b;");
     }
 
     #[test]
     fn calls() {
-        let defs = "proc take(b: own [int]) { burn b; } proc peek(v: lent [int]) -> int { yield v[0]; }";
-        assert!(err_of(&format!("{defs} proc main() {{ b: own [int] = claim 3; take(b); }}")).contains("pass it with `give b`"));
-        assert!(err_of(&format!("{defs} proc main() {{ b: own [int] = claim 3; x := peek(b); }}")).contains("pass it with `lend b`"));
+        let defs = "proc take(own sym b[]: int) { burn b; } proc peek(lent sym v[]: int) -> int { yield v[0]; }";
+        assert!(err_of(&format!("{defs} proc main() {{ sym b[]: int = claim 3; take(b); }}")).contains("pass it with `give b`"));
+        assert!(err_of(&format!("{defs} proc main() {{ sym b[]: int = claim 3; x := peek(b); }}")).contains("pass it with `lend b`"));
         assert!(err_of(&format!("{defs} proc main() {{ x := peek(); }}")).contains("takes 1 argument, found 0"));
-        assert!(err_of("proc mk() -> own [int] { b: own [int] = claim 1; yield b; } proc main() { mk(); }").contains("would be lost"));
+        assert!(err_of("proc mk() -> sym int[] { sym b[]: int = claim 1; yield b; } proc main() { mk(); }").contains("would be lost"));
         assert!(err_in("x := 1; x + 1;").contains("does nothing"));
         assert!(err_in("x := print(\"a\");").contains("has no value"));
         assert!(err_in("emit(1000);").contains("does not fit in a tryte"));
@@ -1354,15 +1466,15 @@ proc main() -> int {
 
     #[test]
     fn print_buffers() {
-        ok("b: own [int] = claim 3; t: own [tryte] = claim 1; printl(b); printf(\"{b} {b:t} %v {t:c} %c\", b, t); s := to_text(b, 'v'); burn b; burn t;");
-        assert!(err_in("b: own [int] = claim 3; printf(\"{b:c}\"); burn b;").contains("found a buffer of int"));
-        assert!(err_in("b: own [int] = claim 3; printf(\"%f\", b); burn b;").contains("prints a real"));
+        ok("sym b[]: int = claim 3; sym t[]: tryte = claim 1; printl(b); printf(\"{b} {b:t} %v {t:c} %c\", b, t); s := to_text(b, 'v'); burn b; burn t;");
+        assert!(err_in("sym b[]: int = claim 3; printf(\"{b:c}\"); burn b;").contains("found a buffer of int"));
+        assert!(err_in("sym b[]: int = claim 3; printf(\"%f\", b); burn b;").contains("prints a real"));
     }
 
     #[test]
     fn final_locals() {
         ok("final x: int = input(); final y := x + 1; print(y);");
-        ok("final b: own [int] = claim 3; b[0] = 5; burn b;");
+        ok("final sym b[]: int = claim 3; b[0] = 5; burn b;");
         ok("final x := 1; tri x <=> 0 { - => {} 0 => {} + => { x := 2; print(x); } }");
         assert!(err_in("final x := 1; x = 2;").contains("`x` is final and cannot change"));
         assert!(err_in("final x := 1; x += 2;").contains("is final"));
@@ -1395,7 +1507,6 @@ proc main() -> int {
         assert!(err_of("proc f() -> int { x := 1; } proc main() {}").contains("must end with `yield`"));
         assert!(err_in("yield; x := 1;").contains("unreachable code"));
         assert!(err_in("x := input() on NaT { print(\"bad\"); };").contains("must end with `yield`"));
-        assert!(err_of("proc f() -> lent [int] { } proc main() {}").contains("cannot yield a lent buffer"));
         ok("x := input() on NaT { yield; }; print(x);");
     }
 

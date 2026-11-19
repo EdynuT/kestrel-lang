@@ -40,11 +40,11 @@ fn printf_formats() {
 
 #[test]
 fn print_buffers() {
-    let body = r#"b: own [int] = claim 5; walk i in -2..2 { b[i] = i * i * i; }
+    let body = r#"sym b[]: int = claim 5; walk i in -2..2 { b[i] = i * i * i; }
         printl(b); printf("{b:t} %v\n", b);
-        t: own [tryte] = claim 3; t[-1] = 'O'; t[0] = 'l'; t[1] = 'á';
+        sym t[]: tryte = claim 3; t[-1] = 'O'; t[0] = 'l'; t[1] = 'á';
         printf("{t:c} {t}\n"); print(to_text(b) + "!"); burn b; burn t;"#;
-    let e = ksc::compile("proc main() { b: own [int] = claim 3; burn b; print(b); }").unwrap_err();
+    let e = ksc::compile("proc main() { sym b[]: int = claim 3; burn b; print(b); }").unwrap_err();
     assert!(e.message.contains("after it was burned"), "{}", e.message);
     assert_eq!(main_out(body), "[-8 -1 0 1 8]\n[0t-0+ 0t- 0t0 0t+ 0t+0-] [0vh 0va 0v0 0vA 0vH]\nOlá [15 -12 -54]\n[-8 -1 0 1 8]!");
 }
@@ -64,13 +64,13 @@ fn print_concatenation() {
 #[test]
 fn spec_example() {
     let src = r#"
-proc sum(v: lent [int], k: int) -> int {
+proc sum(lent sym v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k { acc += v[i]; }
     yield acc;
 }
 proc main() -> int {
-    b: own [int] = claim 5;
+    sym b[]: int = claim 5;
     walk i in span 2 { b[i] = i * i; }
     s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
     s = s << 1;
@@ -126,12 +126,12 @@ fn walks() {
 #[test]
 fn procs_buffers_and_ownership() {
     let src = r#"
-proc fill(v: lent [int], k: int) { walk i in span k { v[i] = i * 10; } }
-proc total(v: lent [int], k: int) -> int { s := 0; walk i in span k { s += v[i]; } yield s; }
-proc make(n: int) -> own [int] { b: own [int] = claim 2 * n + 1; yield b; }
-proc consume(b: own [int]) -> int { x := b[0]; burn b; yield x; }
+proc fill(lent sym v[]: int, k: int) { walk i in span k { v[i] = i * 10; } }
+proc total(lent sym v[]: int, k: int) -> int { s := 0; walk i in span k { s += v[i]; } yield s; }
+proc make(n: int) -> sym int[] { sym b[]: int = claim 2 * n + 1; yield b; }
+proc consume(own sym b[]: int) -> int { x := b[0]; burn b; yield x; }
 proc main() {
-    b: own [int] = make(2);
+    sym b[]: int = make(2);
     fill(lend b, 2);
     print(b[-2]); print(" "); print(b[2]); print(" "); print(total(lend b, 2)); print(" ");
     print(consume(give b));
@@ -168,9 +168,9 @@ proc main() -> int {
 
 #[test]
 fn traps() {
-    let (r, _) = run_with("proc main() { b: own [int] = claim 3; b[2] = 1; burn b; }", "");
+    let (r, _) = run_with("proc main() { sym b[]: int = claim 3; i := 2; b[i] = 1; burn b; }", "");
     assert!(r.unwrap_err().reason.contains("index 2 outside -1..+1"));
-    let (r, _) = run_with("proc main() { n := 4; b: own [int] = claim n; burn b; }", "");
+    let (r, _) = run_with("proc main() { n := 4; sym b[]: int = claim n; burn b; }", "");
     assert!(r.unwrap_err().reason.contains("odd"));
     let (r, _) = run_with("proc main() { t: trit = NaT; tri t { - => {} 0 => {} + => {} } }", "");
     assert_eq!(r.unwrap_err().reason, "tri/if/while condition is NaT");
@@ -200,7 +200,7 @@ fn while_loops() {
         while i > 100 { print("never"); }"#;
     assert_eq!(main_out(body), "01234 1 2 4 5");
     let (r, _) = run_with("proc main() { t: trit = 0; while t { } }", "");
-    assert_eq!(r.unwrap_err().reason, "while condition is 0 (unknown)");
+    assert_eq!(r.unwrap_err().reason, "loop condition is 0 (unknown)");
     // collatz(27) takes 111 steps
     let src = r#"proc steps(n: int) -> int { k := 0; while n != 1 { if n % 2 == 0 { n = n / 2; } else { n = 3 * n + 1; } k = k + 1; } yield k; }
         proc main() { print(steps(27)); }"#;
@@ -213,7 +213,7 @@ fn compound_assignment() {
         x := 10; x += 5; x -= 3; x *= 2; x /= 5; x %= 3; printf(" %d", x);
         n := 5; n--; printf(" %d", n);
         r := 1.5; r *= 2.0; r -= 0.5; printf(" %f", r);
-        b: own [int] = claim 3; b[1] += 7; b[1]++; b[-1] -= 1; printf(" {b}", ); burn b;"#;
+        sym b[]: int = claim 3; b[1] += 7; b[1]++; b[-1] -= 1; printf(" {b}", ); burn b;"#;
     assert_eq!(main_out(body), "012 1 4 2.5 [-1 0 8]");
     let e = ksc::compile("proc main() { i := 0; final f := 1; f++; }").unwrap_err();
     assert!(e.message.contains("is final"), "{}", e.message);
@@ -242,6 +242,47 @@ fn enums_and_match() {
     assert_eq!(out(src), "Verde 1 pare/Teapot 405\nvogal digito outro 1/r1");
     let e = ksc::compile("enum A { X, Y } proc main() { match A.X { A.X => print(1); } }").unwrap_err();
     assert!(e.message.contains("does not cover A.Y"), "{}", e.message);
+}
+
+#[test]
+fn limits_and_messages() {
+    // deep nesting is an error, not a compiler crash
+    let deep = format!("proc main() {{ x := {}1{}; }}", "(".repeat(5000), ")".repeat(5000));
+    assert!(ksc::compile(&deep).unwrap_err().message.contains("nested too deeply"));
+    let long = format!("proc main() {{ x := 1{}; }}", " + 1".repeat(100_000));
+    assert!(ksc::compile(&long).unwrap_err().message.contains("nested too deeply"));
+    let ifs = format!("proc main() {{ {}{} }}", "if 1 > 0 { ".repeat(3000), "} ".repeat(3000));
+    assert!(ksc::compile(&ifs).unwrap_err().message.contains("nested too deeply"));
+    // but reasonable depth is fine
+    let ok = format!("proc main() {{ x := {}1{}; print(x); }}", "(".repeat(200), ")".repeat(200));
+    assert_eq!(out(&ok), "1");
+    // too many variables in one proc
+    let many: String = (0..66_000).map(|i| format!("v{i} := 1; ")).collect();
+    let e = ksc::compile(&format!("proc main() {{ {many} }}")).unwrap_err();
+    assert!(e.message.contains("at most 59049"), "{}", e.message);
+    // text index message shows the last valid index
+    let (r, _) = run_with(r#"proc main() { s := "abc"; i := 3; print(s[i]); }"#, "");
+    assert_eq!(r.unwrap_err().reason, "text index 3 outside 0..2");
+    // the same array cannot be lent twice to one call
+    let e = ksc::compile("proc f(lent a[]: int, lent b[]: int) {} proc main() { x[]: int = claim 1; f(lend x, lend x); burn x; }").unwrap_err();
+    assert!(e.message.contains("lent twice"), "{}", e.message);
+}
+
+#[test]
+fn for_loops() {
+    let body = r#"arr[]: int = {10, 20, 30, 40};
+        for i := 0; i < len(arr); i++ { printf("%d ", arr[i]); }
+        sym s[]: int = {-8, 0, 8};
+        for i := -1; i <= 1; i++ { printf("%d ", s[i]); }
+        for i := 10; i > 0; i -= 3 { printf("%d ", i); }
+        for i := 0; i < 10; i++ { if i % 2 == 0 { continue; } if i > 7 { break; } printf("%d ", i); }
+        j := 0; for j = 5; j < 7; j++ { } print(j);
+        burn arr; burn s;"#;
+    assert_eq!(main_out(body), "10 20 30 40 -8 0 8 10 7 4 1 1 3 5 7 7");
+    let e = ksc::compile("proc main() { for i := 0; i < 3; i++ { } print(i); }").unwrap_err();
+    assert!(e.message.contains("unknown name `i`"), "{}", e.message);
+    let e = ksc::compile("proc main() { for i := 0; i < 3; j := 1 { } }").unwrap_err();
+    assert!(e.message.contains("must change a variable"), "{}", e.message);
 }
 
 #[test]

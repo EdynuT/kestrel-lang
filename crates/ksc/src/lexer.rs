@@ -70,7 +70,9 @@ pub enum Tok {
     If,
     Else,
     While,
+    For,
     Enum,
+    Sym,
     Match,
     Dot,
     Pipe,
@@ -119,7 +121,9 @@ const KEYWORDS: &[(&str, Tok)] = &[
     ("if", Tok::If),
     ("else", Tok::Else),
     ("while", Tok::While),
+    ("for", Tok::For),
     ("enum", Tok::Enum),
+    ("sym", Tok::Sym),
     ("match", Tok::Match),
     ("walk", Tok::Walk),
     ("in", Tok::In),
@@ -474,7 +478,7 @@ mod tests {
     #[test]
     fn spec_example_lexes() {
         let src = r#"
-proc sum(v: lent [int], k: int) -> int {
+proc sum(lent sym v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k {
         acc += v[i];
@@ -483,7 +487,7 @@ proc sum(v: lent [int], k: int) -> int {
 }
 
 proc main() -> int {
-    b: own [int] = claim 5;       // indices -2..+2
+    sym b[]: int = claim 5;       // indices -2..+2
     walk i in span 2 {
         b[i] = i * i;
     }

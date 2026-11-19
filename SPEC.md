@@ -59,11 +59,11 @@ valor = (mantissa / 3²⁰) × 3^expoente
 ### 1.6 `text` (string)
 
 - É um literal imutável guardado no pool de strings do `.ksb`, como o `const char*` do C. É copiável e **não precisa de `burn`**.
-- `s[i]` devolve o `tryte` da posição `i`. **O índice começa em 0**, como em C (exceção à indexação simétrica dos buffers). Índice fora de `0 .. len(s)-1` dispara **Trap**.
+- `s[i]` devolve o `tryte` da posição `i`. **O índice começa em 0**, como em C (como os arrays sem `sym`). Índice fora de `0 .. len(s)-1` dispara **Trap**.
 - `len(s)` devolve o tamanho como `int`.
 - `print(s)` imprime o texto. Dentro do `print`, `+` junta textos: `print("Olá, " + nome + "\n")`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo**. Fora do `print`, `+` com texto também é erro (o texto não pode ser criado em tempo de execução).
 - Cada caractere precisa existir na tabela §4. Um caractere fora dela, como `&` ou `ñ`, é **erro de compilação**.
-- `to_text(x)` cria um texto novo a partir de um número (§8.6). Os textos criados assim duram até o fim do programa (limite de 2²⁴ caracteres no total). Para montar texto caractere por caractere, use um `own [tryte]`, como um array de `char` em C.
+- `to_text(x)` cria um texto novo a partir de um número (§8.6). Os textos criados assim duram até o fim do programa (limite de 2²⁴ caracteres no total). Para montar texto caractere por caractere, use um array de `tryte`, como um array de `char` em C.
 
 ---
 
@@ -146,24 +146,43 @@ Dentro de textos e caracteres, `"` e `'` são escritos como `\"` e `\'`. Os esca
 
 ---
 
-## 5. Memória simétrica
+## 5. Arrays
 
-- `claim N` exige `N` ímpar e positivo (`N = 2k+1`). O ponteiro aponta para o centro `[0]`, e os índices válidos vão de `-k` a `+k`.
-- As células nascem zeradas. O tipo da célula vem do tipo do buffer (`tryte` ou `int`).
-- `N` par, `N ≤ 0`, `N` NaT ou índice fora de `[-k, +k]` disparam **Trap**.
+```
+a[]: int = claim 4;                  // índices 0..3, células zeradas
+a[]: int = {1, 2, 3, 4};             // o mesmo, já preenchido
+sym s[]: int = claim 5;              // índices -2..+2
+sym s[]: int = {-8, -1, 0, 1, 8};    // s[0] == 0, o valor do meio
+n := len(a);                         // 4
+```
 
-## 6. Buffers e posse linear
+Há dois tipos de array, e o tipo decide como os índices funcionam:
+
+| Tipo | Índices | Tamanho | Uso típico |
+|---|---|---|---|
+| `x[]: T` | `0 .. N-1`, como em Java e C | Qualquer `N ≥ 0` | Listas, pilhas, texto em construção |
+| `sym x[]: T` | `-k .. +k`, com o `0` no meio | Ímpar, `N = 2k+1` | Coisas centradas: deslocamentos, coordenadas, tabelas de 3ᵏ posições |
+
+- `T` é `tryte` ou `int`. Os colchetes ficam no **nome**, como em `int x[]` do C. `sym` vem antes, como o `final`: `final sym x[]: int = ...`.
+- `{a, b, c}` cria um array já preenchido, como o inicializador do Java. Com `sym`, a quantidade de valores precisa ser ímpar.
+- `claim N` com `N` negativo, `N` NaT ou (com `sym`) `N` par dispara **Trap**. Índice fora dos limites também.
+- Quando o tamanho e o índice são conhecidos na compilação (array criado com `{...}` ou `claim 5`, índice literal), um índice fora dos limites é **erro de compilação**, como no Rust.
+- `len(x)` devolve o tamanho.
+- Um array `sym` e um array a partir de 0 **não se misturam**: o mesmo índice aponta para células diferentes.
+- Parâmetros dizem como recebem o array: `lent v[]: int` (emprestado) ou `own v[]: int` (recebe a posse, com `give`). No retorno, os colchetes vão no tipo, como em Java: `proc cria(n: int) -> int[]`.
+
+## 6. Arrays e posse linear
 
 | Tipo | Natureza | Pode |
 |---|---|---|
-| `own [T]` | Linear, dono único, não copiável | Ler, escrever, `give`, `burn`, `yield` |
-| `lent [T]` | Empréstimo, **segunda classe** | Ler e escrever |
+| `x[]: T` (variável) / `own x[]: T` (parâmetro) | Linear, dono único, não copiável | Ler, escrever, `give`, `burn`, `yield` |
+| `lent x[]: T` (só parâmetro) | Empréstimo, **segunda classe** | Ler e escrever |
 
-`T` pode ser `tryte` ou `int`. Não existe aritmética de ponteiros.
+Toda variável que guarda um array é dona dele. Não existe aritmética de ponteiros.
 
 | Palavra | Equivale a (C/Rust) | Efeito |
 |---|---|---|
-| `claim N` | `malloc` | Aloca `N` células, com índices de `-k` a `+k` |
+| `claim N` | `malloc` / `new int[N]` | Aloca `N` células zeradas |
 | `burn x` | `memset 0` + `free` | Zera o bloco, e o slot do dono vira NaT |
 | `give x` | `move` | Transfere a posse, e o slot do dono vira NaT |
 | `lend x` | `&mut x` | Empresta durante uma chamada |
@@ -174,6 +193,7 @@ Dentro de textos e caracteres, `"` e `'` são escritos como `\"` e `\'`. Os esca
 - Não pode ser retornado nem guardado em variável local.
 - Não aceita `burn` nem `give`.
 - `f(lend b, give b)` na mesma chamada é erro estático.
+- `f(lend b, lend b)` também: o `proc` veria o mesmo array com dois nomes, e uma escrita por um mudaria o outro.
 
 ### 6.2 Regras do `own`
 
@@ -183,8 +203,8 @@ Erros de compilação:
 
 - Usar a variável depois de `give` ou `burn`.
 - Chegar a `}` ou `yield` com um `own` vivo (vazamento).
-- Copiar sem `give` (`c: own [int] = b;`).
-- Guardar `claim` em uma variável que não seja `own`.
+- Copiar sem `give` (`sym c[]: int = b;`).
+- Guardar `claim` ou `{...}` em uma variável que não seja array.
 - Atribuir a um `own` que ainda está vivo.
 - Atribuir a um `own` consumido por `give`. O nome só pode receber um novo `claim` **depois de `burn`**.
 - Passar a um parâmetro `own` um argumento sem `give`.
@@ -210,7 +230,7 @@ A sintaxe segue o estilo C/Java/Rust. O que é próprio do Kestrel vem do terná
 ### 8.1 `proc` e `yield`
 
 ```
-proc sum(v: lent [int], k: int) -> int { ... yield acc; }
+proc sum(lent sym v[]: int, k: int) -> int { ... yield acc; }
 proc main() -> int { ... yield 0; }
 ```
 
@@ -311,6 +331,22 @@ while + { ... }            // laço infinito; saia com `break` ou `yield`
 - `break` sai do laço, e `continue` volta para a condição.
 - Regra de posse igual à do `walk`: o corpo não pode consumir nem criar buffers que vivem fora do laço.
 
+### 8.4.2 `for`
+
+```
+for i := 0; i < len(arr); i++ {     // começo; condição; passo
+    print(arr[i]);
+}
+for i := -1; i <= 1; i++ { ... }     // array sym
+for i := 10; i > 0; i -= 2 { ... }   // passo de -2
+```
+
+- É o `for` do Java sem os parênteses, como o do Go. As três partes são separadas por `;`.
+- **Começo:** declara (`i := 0`) ou atribui (`i = 0`) uma variável. Uma variável declarada aqui só existe dentro do laço.
+- **Condição:** um `trit`, testado antes de cada volta, com as regras do `while` (`0` e NaT disparam Trap).
+- **Passo:** muda uma variável (`i++`, `i += 2`, `i = i * 3`). Roda depois do corpo e também no `continue`.
+- `walk` continua existindo para intervalos simples (`walk i in 0..9`).
+
 ### 8.5 `on NaT` (barreira de veneno)
 
 ```
@@ -359,8 +395,8 @@ O formato aceita duas formas de colocar valores, que podem ser misturadas:
 | `{x:t}` / `%t` | Ternário sem zeros à esquerda: `-5` → `0t-++` | `trit`, `tryte`, `int` |
 | `{x:v}` / `%v` | Heptavintimal sem zeros à esquerda: `100` → `0vDh` | `trit`, `tryte`, `int` |
 | `{x:c}` / `%c` | Caractere (tabela §4) | `trit`, `tryte` (um `int` precisa de cast: `(tryte) x`) |
-| `{b}`, `{b:t}`, `{b:v}`, `%d`/`%t`/`%v` com buffer | Células entre colchetes: `[0t-0+ 0t- 0t0]` | `own`/`lent [tryte]` ou `[int]` |
-| `{b:c}` / `%c` com buffer de `tryte` | As células como texto, sem colchetes: `Olá` (como o `println(char[])` do Java) | `own`/`lent [tryte]` |
+| `{b}`, `{b:t}`, `{b:v}`, `%d`/`%t`/`%v` com buffer | Células entre colchetes: `[0t-0+ 0t- 0t0]` | array de `tryte` ou `int` |
+| `{b:c}` / `%c` com buffer de `tryte` | As células como texto, sem colchetes: `Olá` (como o `println(char[])` do Java) | array de `tryte` |
 
 - Tudo é verificado **na compilação**: tipo errado, `%` sem argumento, argumento sobrando ou nome desconhecido é **erro**.
 - `{{`, `}}` e `%%` imprimem `{`, `}` e `%`. Fora do `printf`, esses caracteres são impressos normalmente.
@@ -406,6 +442,17 @@ match letra {
 - Repetir um valor em dois braços é erro. Um `match` sobre NaT dispara Trap.
 - Por dentro, vira uma cadeia de `if`/`else`, então as regras de posse são as mesmas.
 
+### 8.9 Limites do compilador
+
+| Limite | Valor | Ao passar |
+|---|---|---|
+| Aninhamento (blocos, parênteses, operadores em sequência) | 729 = 3⁶ níveis (um tryte) | Erro de compilação: "nested too deeply" |
+| Variáveis por `proc` | 59.049 = 3¹⁰ | Erro de compilação |
+| Parâmetros por `proc` | 243 = 3⁵ | Erro de compilação |
+| Chamadas aninhadas na execução | 6.561 = 3⁸ | Trap: "call stack overflow" |
+
+Todos os limites são potências de 3. Os de parâmetros e variáveis também cabem nos campos de 8 e 16 bits do `.ksb`.
+
 ## 9. BET-VM
 
 - **Representação interna:** `i64`, com o NaT como sentinela `i64::MIN`. A forma `Word27` (BET em `u64`, 54 bits) só aparece no `.ksb`, no `dump` e na formatação `0t`/`0v`.
@@ -422,7 +469,7 @@ match letra {
 | ALU (real) | `FADD`, `FSUB`, `FMUL`, `FDIV`, `FPOW`, `FNEG`, `FCMP3` |
 | Texto | `PUSHS k`, `TLEN`, `TIDX`, `TSTR`, `TSTRT`, `TSTRV` (número → texto) |
 | Largura | `NARROW6`, `NARROW1`, `ITOF`, `FTOI` (overflow vira NaT) |
-| Memória | `ALLOC`, `LDIDX`, `STIDX`, `PURGE s` |
+| Memória | `ALLOC` (sym), `ALLOCZ` (a partir de 0), `PACK n sym` (literal `{...}`), `LDIDX`, `STIDX`, `PURGE s` |
 | Fluxo | `JMP a`, `JNAT a`, `BR3 a- a0 a+`, `CALL f n`, `RET`, `TRAP str` |
 | E/S | `INPUT`, `EMIT`, `PRINT`, `SHOW`, `SHOWT` (`0t`), `SHOWV` (`0v`), `DUMP str` |
 
@@ -464,14 +511,16 @@ Os saltos usam um **offset absoluto em bytes** (`u32`) dentro do código da pró
 program    = { const_decl | proc_decl | enum_decl } ;
 enum_decl  = "enum" IDENT "{" [ IDENT [ "=" expr ] { "," IDENT [ "=" expr ] } [ "," ] ] "}" ;
 const_decl = "const" IDENT ":" scalar "=" expr ";" ;
-proc_decl  = "proc" IDENT "(" [ param { "," param } ] ")" [ "->" type ] block ;
-param      = IDENT ":" type ;
-type       = scalar | "text" | ( "own" | "lent" ) "[" elem "]" | IDENT ;
+proc_decl  = "proc" IDENT "(" [ param { "," param } ] ")" [ "->" ret_type ] block ;
+param      = IDENT ":" type | ( "own" | "lent" ) [ "sym" ] IDENT "[" "]" ":" elem ;
+ret_type   = type | [ "sym" ] elem "[" "]" ;
+type       = scalar | "text" | IDENT ;
 scalar     = "trit" | "tryte" | "int" | "real" ;
 elem       = "tryte" | "int" ;
 
 block      = "{" { stmt } "}" ;
 stmt       = [ "final" ] IDENT ":" type "=" expr [ on_nat ] ";"
+           | [ "final" ] [ "sym" ] IDENT "[" "]" ":" elem "=" expr ";"
            | [ "final" ] IDENT ":=" expr [ on_nat ] ";"
            | place ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr ";"
            | place ( "++" | "--" ) ";"
@@ -482,6 +531,7 @@ stmt       = [ "final" ] IDENT ":" type "=" expr [ on_nat ] ";"
            | "if" expr block [ "else" ( block | if_stmt ) ]
            | "walk" IDENT "in" range block
            | "while" expr block
+           | "for" ( decl | assign ) ";" expr ";" assign block
            | "match" expr "{" { match_arm } "}"
            | io ";"
            | expr ";" ;
@@ -505,7 +555,8 @@ power      = postfix [ "**" unary ] ;
 postfix    = primary { "[" expr "]" | "." IDENT } ;
 match_arm  = ( expr { "|" expr } | "else" ) "=>" ( block | stmt ) ;
 primary    = literal | IDENT | IDENT "(" [ arg { "," arg } ] ")"
-           | "claim" expr | "input" "(" ")" | "len" "(" expr ")" | "(" expr ")" ;
+           | "claim" expr | "{" [ expr { "," expr } [ "," ] ] "}"
+           | "input" "(" ")" | "len" "(" expr ")" | "(" expr ")" ;
 arg        = [ "give" | "lend" ] expr ;
 ```
 
@@ -513,7 +564,7 @@ arg        = [ "give" | "lend" ] expr ;
 ### Exemplo
 
 ```
-proc sum(v: lent [int], k: int) -> int {
+proc sum(lent sym v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k {
         acc += v[i];
@@ -522,7 +573,7 @@ proc sum(v: lent [int], k: int) -> int {
 }
 
 proc main() -> int {
-    b: own [int] = claim 5;       // índices -2..+2
+    sym b[]: int = claim 5;       // índices -2..+2
     walk i in span 2 {
         b[i] = i * i;
     }

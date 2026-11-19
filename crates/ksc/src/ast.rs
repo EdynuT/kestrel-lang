@@ -69,8 +69,8 @@ pub enum Elem {
 pub enum Type {
     Scalar(Scalar),
     Text,
-    Own(Elem),
-    Lent(Elem),
+    Own(Buf),
+    Lent(Buf),
     /// A declared enum, by name (interned: types stay `Copy`).
     Enum(&'static str),
     /// No value: the result of `print(...)` or of a proc without `->`.
@@ -96,6 +96,25 @@ impl Scalar {
             Scalar::Tryte => 1,
             Scalar::Int | Scalar::Real => 2,
         }
+    }
+}
+
+/// An array type: `int[]` (indices `0..n-1`) or `sym int[]` (`-k..+k`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Buf {
+    pub elem: Elem,
+    pub sym: bool,
+}
+
+impl Buf {
+    pub fn scalar(self) -> Scalar {
+        self.elem.scalar()
+    }
+}
+
+impl std::fmt::Display for Buf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}[]", if self.sym { "sym " } else { "" }, self.elem.scalar())
     }
 }
 
@@ -134,8 +153,8 @@ impl std::fmt::Display for Type {
         match self {
             Type::Scalar(s) => write!(f, "{s}"),
             Type::Text => f.write_str("text"),
-            Type::Own(e) => write!(f, "own [{}]", e.scalar()),
-            Type::Lent(e) => write!(f, "lent [{}]", e.scalar()),
+            Type::Own(b) => write!(f, "{b}"),
+            Type::Lent(b) => write!(f, "lent {b}"),
             Type::Enum(name) => f.write_str(name),
             Type::Void => f.write_str("no value"),
         }
@@ -194,6 +213,8 @@ pub enum StmtKind {
     Match { scrut: Expr, arms: Vec<MatchArm> },
     /// `while cond { }`
     While { cond: Expr, body: Block },
+    /// `for init; cond; step { }`, like Java's `for` without parentheses.
+    For { init: Box<Stmt>, cond: Expr, step: Box<Stmt>, body: Block },
     Expr(Expr),
 }
 
@@ -232,6 +253,8 @@ pub enum ExprKind {
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Cast(Box<Expr>, Scalar),
     Index(Box<Expr>, Box<Expr>),
+    /// `{1, 2, 3}`: a new array; the declared type says which kind.
+    ArrayLit(Vec<Expr>),
     /// `base.name`: for now only enum values, `Cor.Verde`.
     Member(Box<Expr>, Ident),
     Call { name: Ident, args: Vec<Expr> },

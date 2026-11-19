@@ -13,7 +13,7 @@ use kestrel_core::isa::{Op, slot_name};
 use kestrel_core::{Module, Real, Word, Word27};
 
 /// Deepest call chain before the VM traps with a stack overflow.
-pub const MAX_DEPTH: usize = 4096;
+pub use kestrel_core::limits::MAX_CALL_DEPTH as MAX_DEPTH;
 /// Largest buffer `claim` may create, in cells.
 pub const MAX_CELLS: i64 = 1 << 24;
 /// Limit on characters of texts made at run time by `to_text`.
@@ -66,7 +66,8 @@ impl std::error::Error for Trap {}
 
 struct Block {
     cells: Vec<Word>,
-    half: i64,
+    /// Lowest valid index: `-k` for a symmetric buffer, `0` otherwise.
+    lo: i64,
     generation: u32,
     live: bool,
 }
@@ -227,8 +228,12 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             }
 
             Op::TLen => {
-                let t = self.pop_text()?;
-                self.push(Value::Word(Word::new(self.texts[t].len() as i64)));
+                let n = match self.pop()? {
+                    Value::Text(t) => self.texts[t as usize].len(),
+                    Value::Ptr(p) => self.cells(p)?.len(),
+                    other => return Err(format!("expected text or a buffer, found {other:?}")),
+                };
+                self.push(Value::Word(Word::new(n as i64)));
             }
             Op::TIdx => {
                 let i = self.pop_word()?;
@@ -238,20 +243,42 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 let c = usize::try_from(i)
                     .ok()
                     .and_then(|i| chars.get(i))
-                    .ok_or_else(|| format!("text index {i} outside 0..{}", chars.len()))?;
+                    .ok_or_else(|| match chars.len() {
+                        0 => format!("text index {i}: the text is empty"),
+                        n => format!("text index {i} outside 0..{}", n - 1),
+                    })?;
                 let v = char_to_tryte(*c).ok_or_else(|| format!("character {c:?} is not in the tryte table"))?;
                 self.push(Value::Word(Word::new(v)));
             }
 
-            Op::Alloc => {
+            Op::Alloc | Op::AllocZ => {
                 let n = self.pop_word()?.get().ok_or("claim size is NaT")?;
-                if n <= 0 || n % 2 == 0 {
-                    return Err(format!("claim {n}: size must be odd and positive (2k+1)"));
+                let sym = op == Op::Alloc;
+                if sym && (n <= 0 || n % 2 == 0) {
+                    return Err(format!("claim {n}: a sym array needs an odd, positive size (2k+1)"));
+                }
+                if n < 0 {
+                    return Err(format!("claim {n}: size cannot be negative"));
                 }
                 if n > MAX_CELLS {
                     return Err(format!("claim {n}: out of memory (limit {MAX_CELLS} cells)"));
                 }
-                let p = self.alloc(n);
+                let p = self.alloc(vec![Word::ZERO; n as usize], sym);
+                self.push(Value::Ptr(p));
+            }
+            Op::Pack { n, sym } => {
+                let n = n as usize;
+                if self.stack.len() < n {
+                    return Err("stack underflow".to_string());
+                }
+                let mut cells = Vec::with_capacity(n);
+                for v in self.stack.split_off(self.stack.len() - n) {
+                    match v {
+                        Value::Word(w) => cells.push(w),
+                        other => return Err(format!("expected an int, found {other:?}")),
+                    }
+                }
+                let p = self.alloc(cells, sym);
                 self.push(Value::Ptr(p));
             }
             Op::LdIdx => {
@@ -446,17 +473,16 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         Ok(())
     }
 
-    fn alloc(&mut self, n: i64) -> Ptr {
-        let cells = vec![Word::ZERO; n as usize];
-        let half = n / 2;
+    fn alloc(&mut self, cells: Vec<Word>, sym: bool) -> Ptr {
+        let lo = if sym { -(cells.len() as i64 / 2) } else { 0 };
         if let Some(idx) = self.free.pop() {
             let b = &mut self.heap[idx as usize];
             b.cells = cells;
-            b.half = half;
+            b.lo = lo;
             b.live = true;
             Ptr { block: idx, generation: b.generation }
         } else {
-            self.heap.push(Block { cells, half, generation: 0, live: true });
+            self.heap.push(Block { cells, lo, generation: 0, live: true });
             Ptr { block: (self.heap.len() - 1) as u32, generation: 0 }
         }
     }
@@ -501,7 +527,12 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         for (i, b) in self.heap.iter().enumerate().filter(|(_, b)| b.live) {
             write!(out, "  heap #{i} ({} cells):", b.cells.len())?;
             for (k, c) in b.cells.iter().enumerate() {
-                write!(out, " [{:+}]={c}", k as i64 - b.half)?;
+                let i = k as i64 + b.lo;
+                if b.lo < 0 {
+                    write!(out, " [{i:+}]={c}")?;
+                } else {
+                    write!(out, " [{i}]={c}")?;
+                }
             }
             writeln!(out)?;
         }
@@ -525,10 +556,12 @@ fn tryte_char(w: Word) -> char {
 
 fn cell_index(b: &Block, i: Word) -> Result<usize, String> {
     let i = i.get().ok_or("buffer index is NaT")?;
-    if i.abs() > b.half {
-        Err(format!("index {i} outside -{h}..+{h}", h = b.half))
+    let hi = b.lo + b.cells.len() as i64 - 1;
+    if i < b.lo || i > hi {
+        let range = if b.lo < 0 { format!("{}..+{hi}", b.lo) } else { format!("0..{hi}") };
+        Err(format!("index {i} outside {range}"))
     } else {
-        Ok((i + b.half) as usize)
+        Ok((i - b.lo) as usize)
     }
 }
 

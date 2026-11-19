@@ -3,7 +3,7 @@
 const GREETING: text = "Hello from the BET-VM!\n";
 
 // Sum of a symmetric buffer with indices -k..+k.
-proc sum(v: lent [int], k: int) -> int {
+proc sum(lent sym v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k {
         acc += v[i];
@@ -23,7 +23,7 @@ proc describe(x: int) {
 proc main() -> int {
     print(GREETING);
 
-    b: own [int] = claim 5;       // indices -2..+2
+    sym b[]: int = claim 5;       // indices -2..+2
     walk i in span 2 {
         b[i] = i * i * i;          // -8 -1 0 1 8
     }

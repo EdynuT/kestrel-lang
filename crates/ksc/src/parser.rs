@@ -11,7 +11,7 @@ use crate::diag::{Diagnostic, Span};
 use crate::lexer::{Tok, Token};
 
 pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
-    let mut p = Parser { tokens, pos: 0 };
+    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0 };
     let mut items = Vec::new();
     while p.peek() != &Tok::Eof {
         items.push(p.item()?);
@@ -22,7 +22,16 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Inside the head of `if`/`while`/`match`/`tri`/`walk`: a `{` there
+    /// opens the body, never an array literal (the same rule as Rust).
+    in_head: bool,
+    /// How deep the code being parsed is nested (blocks, parentheses,
+    /// operators). Bounded so deep input gives an error, not a stack overflow.
+    depth: u32,
 }
+
+/// Nesting limit, like rustc's `recursion_limit`.
+use kestrel_core::limits::MAX_NESTING as MAX_DEPTH;
 
 type PResult<T> = Result<T, Diagnostic>;
 
@@ -115,9 +124,29 @@ impl Parser {
         self.expect(Tok::LParen)?;
         let mut params = Vec::new();
         while self.peek() != &Tok::RParen {
-            let pname = self.ident()?;
-            self.expect(Tok::Colon)?;
-            params.push(Param { name: pname, ty: self.type_expr()? });
+            // `lent v[]: int` borrows an array, `own v[]: int` takes it (`give`).
+            let mode_span = self.span();
+            let mode = match self.peek() {
+                Tok::Lent | Tok::Own => Some(self.bump().tok.clone()),
+                _ => None,
+            };
+            let sym_span = self.span();
+            let sym = self.eat(&Tok::Sym);
+            let (pname, mut ty) = self.typed_name(sym, sym_span)?;
+            match (mode, ty.ty) {
+                (Some(Tok::Lent), Type::Own(b)) => ty.ty = Type::Lent(b),
+                (Some(Tok::Own), Type::Own(_)) => {}
+                (None, Type::Own(_)) => {
+                    return Err(Diagnostic::new("an array parameter needs `lent` or `own`", pname.span)
+                        .with_note(format!("`lent {0}[]: ...` borrows it, `own {0}[]: ...` takes it", pname.name)));
+                }
+                (Some(_), _) => {
+                    return Err(Diagnostic::new("`lent` and `own` only apply to arrays", mode_span)
+                        .with_note(format!("write `{}[]: ...`", pname.name)));
+                }
+                (None, _) => {}
+            }
+            params.push(Param { name: pname, ty });
             if !self.eat(&Tok::Comma) {
                 break;
             }
@@ -126,6 +155,42 @@ impl Parser {
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
         let body = self.block()?;
         Ok(ProcDecl { name, params, ret, body })
+    }
+
+    fn elem(&self, s: Scalar, span: Span) -> PResult<Elem> {
+        match s {
+            Scalar::Tryte => Ok(Elem::Tryte),
+            Scalar::Int => Ok(Elem::Int),
+            _ => Err(Diagnostic::new(format!("arrays hold trytes or ints, not {s}"), span)),
+        }
+    }
+
+    /// `[sym] name[]: T` (array) or `name: T`, as in declarations and
+    /// parameters. Returns the name and its type.
+    fn typed_name(&mut self, sym: bool, sym_span: Span) -> PResult<(Ident, TypeExpr)> {
+        let name = self.ident()?;
+        let array = self.peek() == &Tok::LBracket;
+        if array {
+            self.bump();
+            self.expect(Tok::RBracket)?;
+        } else if sym {
+            return Err(Diagnostic::new("`sym` only applies to arrays", sym_span)
+                .with_note(format!("write `sym {}[]: int`", name.name)));
+        }
+        self.expect(Tok::Colon)?;
+        let ty = self.type_expr()?;
+        if !array {
+            if let Type::Own(_) = ty.ty {
+                return Err(Diagnostic::new("put the `[]` on the name", ty.span)
+                    .with_note(format!("write `{}[]: {}`", name.name, ty.ty.to_string().trim_end_matches("[]").trim_start_matches("sym "))));
+            }
+            return Ok((name, ty));
+        }
+        let Type::Scalar(s) = ty.ty else {
+            return Err(Diagnostic::new(format!("arrays hold trytes or ints, not {}", ty.ty), ty.span));
+        };
+        let elem = self.elem(s, ty.span)?;
+        Ok((name, TypeExpr { ty: Type::Own(Buf { elem, sym }), span: ty.span }))
     }
 
     fn scalar(&mut self) -> Option<Scalar> {
@@ -157,10 +222,25 @@ impl Parser {
         Ok(EnumDecl { name, variants })
     }
 
+    /// A type: `int`, `text`, an enum name, or an array type `[sym] T[]`
+    /// (array types are written this way only after `->`).
     fn type_expr(&mut self) -> PResult<TypeExpr> {
         let start = self.span();
+        let sym = self.eat(&Tok::Sym);
         if let Some(s) = self.scalar() {
+            if self.peek() == &Tok::LBracket && self.peek_at(1) == &Tok::RBracket {
+                self.bump();
+                self.bump();
+                let elem = self.elem(s, start)?;
+                return Ok(TypeExpr { ty: Type::Own(Buf { elem, sym }), span: start.to(self.tokens[self.pos - 1].span) });
+            }
+            if sym {
+                return Err(Diagnostic::new("`sym` only applies to arrays", start).with_note("write `sym int[]`"));
+            }
             return Ok(TypeExpr { ty: Type::Scalar(s), span: start });
+        }
+        if sym {
+            return Err(self.unexpected("`tryte[]` or `int[]` after `sym`"));
         }
         if let Tok::Ident(name) = self.peek() {
             let ty = Type::Enum(intern(name));
@@ -173,20 +253,9 @@ impl Parser {
                 Type::Text
             }
             Tok::Own | Tok::Lent => {
-                let own = self.bump().tok == Tok::Own;
-                self.expect(Tok::LBracket)?;
-                let elem = match self.peek() {
-                    Tok::Tryte => Elem::Tryte,
-                    Tok::Int => Elem::Int,
-                    _ => {
-                        return Err(self
-                            .unexpected("`tryte` or `int`")
-                            .with_note("buffers hold trytes or ints"));
-                    }
-                };
-                self.bump();
-                self.expect(Tok::RBracket)?;
-                if own { Type::Own(elem) } else { Type::Lent(elem) }
+                return Err(self
+                    .unexpected("a type")
+                    .with_note("arrays are declared on the name: `x[]: int`, or `lent v[]: int` for a parameter"));
             }
             _ => return Err(self.unexpected("a type")),
         };
@@ -195,13 +264,25 @@ impl Parser {
 
     // ---- statements ----
 
+    /// One level deeper; fails past [`MAX_DEPTH`]. Pair with `self.depth -= n`.
+    fn nest(&mut self) -> PResult<()> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(Diagnostic::new(format!("this code is nested too deeply (limit {MAX_DEPTH} levels)"), self.span())
+                .with_note("split it into smaller pieces: intermediate variables or separate procs"));
+        }
+        Ok(())
+    }
+
     fn block(&mut self) -> PResult<Block> {
+        self.nest()?;
         let start = self.expect(Tok::LBrace)?;
         let mut stmts = Vec::new();
         while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
             stmts.push(self.stmt()?);
         }
         let end = self.expect(Tok::RBrace)?;
+        self.depth -= 1;
         Ok(Block { stmts, span: start.to(end) })
     }
 
@@ -239,7 +320,7 @@ impl Parser {
             }
             Tok::Final => {
                 self.bump();
-                if !matches!((self.peek(), self.peek_at(1)), (Tok::Ident(_), Tok::Colon | Tok::ColonEq)) {
+                if !self.at_declaration() {
                     return Err(self.unexpected("a variable declaration after `final`, like `final x: int = 5;`"));
                 }
                 let mut kind = self.let_stmt()?;
@@ -254,23 +335,17 @@ impl Parser {
             Tok::Match => return self.match_stmt(),
             Tok::While => {
                 self.bump();
-                let cond = self.expr()?;
+                let cond = self.head_expr()?;
                 let body = self.block()?;
                 return Ok(StmtKind::While { cond, body });
             }
             Tok::Walk => return self.walk(),
-            Tok::Ident(_) => match self.peek_at(1) {
-                Tok::Colon | Tok::ColonEq => {
-                    let kind = self.let_stmt()?;
-                    end(self)?;
-                    kind
-                }
-                _ => {
-                    let kind = self.expr_or_assign()?;
-                    end(self)?;
-                    kind
-                }
-            },
+            Tok::For => return self.for_stmt(),
+            _ if self.at_declaration() => {
+                let kind = self.let_stmt()?;
+                end(self)?;
+                kind
+            }
             _ => {
                 let kind = self.expr_or_assign()?;
                 end(self)?;
@@ -280,15 +355,27 @@ impl Parser {
         Ok(kind)
     }
 
+    /// True at the start of a declaration: `x: T`, `x := e`, `x[]: T` or `sym x[]: T`.
+    fn at_declaration(&self) -> bool {
+        match (self.peek(), self.peek_at(1)) {
+            (Tok::Sym, _) => true,
+            (Tok::Ident(_), Tok::Colon | Tok::ColonEq) => true,
+            (Tok::Ident(_), Tok::LBracket) => self.peek_at(2) == &Tok::RBracket,
+            _ => false,
+        }
+    }
+
     fn let_stmt(&mut self) -> PResult<StmtKind> {
-        let name = self.ident()?;
-        let ty = if self.eat(&Tok::ColonEq) {
-            None
+        let sym_span = self.span();
+        let sym = self.eat(&Tok::Sym);
+        let (name, ty) = if !sym && self.peek_at(1) == &Tok::ColonEq {
+            let name = self.ident()?;
+            self.bump();
+            (name, None)
         } else {
-            self.expect(Tok::Colon)?;
-            let ty = self.type_expr()?;
+            let (name, ty) = self.typed_name(sym, sym_span)?;
             self.expect(Tok::Eq)?;
-            Some(ty)
+            (name, Some(ty))
         };
         let value = self.expr()?;
         let on_nat = if self.eat(&Tok::On) {
@@ -342,7 +429,7 @@ impl Parser {
 
     fn if_stmt(&mut self) -> PResult<StmtKind> {
         self.expect(Tok::If)?;
-        let cond = self.expr()?;
+        let cond = self.head_expr()?;
         let then = self.block()?;
         let otherwise = if !self.eat(&Tok::Else) {
             None
@@ -370,7 +457,7 @@ impl Parser {
 
     fn match_stmt(&mut self) -> PResult<StmtKind> {
         self.expect(Tok::Match)?;
-        let scrut = self.expr()?;
+        let scrut = self.head_expr()?;
         self.expect(Tok::LBrace)?;
         let mut arms = Vec::new();
         while self.peek() != &Tok::RBrace {
@@ -395,7 +482,7 @@ impl Parser {
 
     fn tri(&mut self) -> PResult<StmtKind> {
         let tri_span = self.expect(Tok::Tri)?;
-        let head = self.expr()?;
+        let head = self.head_expr()?;
         self.expect(Tok::LBrace)?;
         let mut arms: [Option<Block>; 3] = [None, None, None];
         while self.peek() != &Tok::RBrace {
@@ -430,16 +517,41 @@ impl Parser {
         Ok(StmtKind::Tri { head, neg: neg.unwrap(), zero: zero.unwrap(), pos: pos.unwrap() })
     }
 
+    /// `for i := 0; i < n; i++ { ... }`
+    fn for_stmt(&mut self) -> PResult<StmtKind> {
+        self.expect(Tok::For)?;
+        let start = self.span();
+        let init = if self.at_declaration() { self.let_stmt()? } else { self.expr_or_assign()? };
+        let init = Stmt { kind: init, span: start.to(self.tokens[self.pos - 1].span) };
+        self.expect(Tok::Semi)?;
+        let cond = self.head_expr()?;
+        self.expect(Tok::Semi)?;
+        let start = self.span();
+        if self.at_declaration() {
+            return Err(Diagnostic::new("the last part of `for` must change a variable, not declare one", start)
+                .with_note("e.g. `i++`, `i += 2` or `i = i * 3`"));
+        }
+        let outer = std::mem::replace(&mut self.in_head, true);
+        let step = self.expr_or_assign();
+        self.in_head = outer;
+        let step = Stmt { kind: step?, span: start.to(self.tokens[self.pos - 1].span) };
+        let body = self.block()?;
+        Ok(StmtKind::For { init: Box::new(init), cond, step: Box::new(step), body })
+    }
+
     fn walk(&mut self) -> PResult<StmtKind> {
         self.expect(Tok::Walk)?;
         let var = self.ident()?;
         self.expect(Tok::In)?;
         let range = if self.eat(&Tok::Span) {
-            Range::Span(self.expr()?)
+            Range::Span(self.head_expr()?)
         } else {
-            let a = self.expr()?;
+            let a = self.head_expr()?;
             self.expect(Tok::DotDot)?;
-            Range::Between(a, self.expr()?)
+            if self.peek() == &Tok::LBrace {
+                return Err(self.unexpected("the end of the range after `..`").with_note("ranges have both ends: `walk i in 3..10 { ... }`"));
+            }
+            Range::Between(a, self.head_expr()?)
         };
         let body = self.block()?;
         Ok(StmtKind::Walk { var, range, body })
@@ -448,7 +560,26 @@ impl Parser {
     // ---- expressions ----
 
     pub fn expr(&mut self) -> PResult<Expr> {
-        self.binary(0)
+        self.nest()?;
+        let e = self.binary(0)?;
+        self.depth -= 1;
+        Ok(e)
+    }
+
+    /// An expression inside `( )` or `[ ]`, where `{` is a literal again.
+    fn nested_expr(&mut self) -> PResult<Expr> {
+        let outer = std::mem::replace(&mut self.in_head, false);
+        let e = self.expr();
+        self.in_head = outer;
+        e
+    }
+
+    /// An expression right before a body block (`if x { ... }`).
+    fn head_expr(&mut self) -> PResult<Expr> {
+        let outer = std::mem::replace(&mut self.in_head, true);
+        let e = self.expr();
+        self.in_head = outer;
+        e
     }
 
     /// Binary operators by level; level 0 binds loosest.
@@ -473,7 +604,11 @@ impl Parser {
             return self.unary();
         };
         let mut lhs = self.binary(level + 1)?;
+        // Each operator in a chain like `a + b + c` makes the tree one level deeper.
+        let mut chain = 0;
         while let Some((_, op)) = ops.iter().find(|(t, _)| t == self.peek()) {
+            self.nest()?;
+            chain += 1;
             let op_span = self.bump().span;
             let rhs = self.binary(level + 1)?;
             if level == 2 && ops.iter().any(|(t, _)| t == self.peek()) {
@@ -483,10 +618,26 @@ impl Parser {
             let span = lhs.span.to(rhs.span).to(op_span);
             lhs = Expr { kind: ExprKind::Binary(*op, Box::new(lhs), Box::new(rhs)), span };
         }
+        self.depth -= chain;
         Ok(lhs)
     }
 
     fn unary(&mut self) -> PResult<Expr> {
+        // Only prefix operators and casts nest (`- - x`, `(int) (real) x`).
+        let prefix = matches!(self.peek(), Tok::Minus | Tok::Plus | Tok::Bang)
+            || (self.peek() == &Tok::LParen
+                && matches!(self.peek_at(1), Tok::Trit | Tok::Tryte | Tok::Int | Tok::Real)
+                && self.peek_at(2) == &Tok::RParen);
+        if !prefix {
+            return self.unary_inner();
+        }
+        self.nest()?;
+        let e = self.unary_inner()?;
+        self.depth -= 1;
+        Ok(e)
+    }
+
+    fn unary_inner(&mut self) -> PResult<Expr> {
         let start = self.span();
         let op = match self.peek() {
             Tok::Bang => Some(UnOp::Not),
@@ -530,7 +681,9 @@ impl Parser {
         if !self.eat(&Tok::StarStar) {
             return Ok(base);
         }
+        self.nest()?;
         let exp = self.unary()?; // right-associative: 2 ** 3 ** 2 == 2 ** 9
+        self.depth -= 1;
         let span = base.span.to(exp.span);
         Ok(Expr { kind: ExprKind::Binary(BinOp::Pow, Box::new(base), Box::new(exp)), span })
     }
@@ -539,7 +692,7 @@ impl Parser {
         let mut e = self.primary()?;
         loop {
             if self.eat(&Tok::LBracket) {
-                let idx = self.expr()?;
+                let idx = self.nested_expr()?;
                 let close = self.expect(Tok::RBracket)?;
                 let span = e.span.to(close);
                 e = Expr { kind: ExprKind::Index(Box::new(e), Box::new(idx)), span };
@@ -578,9 +731,22 @@ impl Parser {
             }
             Tok::LParen => {
                 self.bump();
-                let inner = self.expr()?;
+                let inner = self.nested_expr()?;
                 let close = self.expect(Tok::RParen)?;
                 return Ok(Expr { kind: inner.kind, span: start.to(close) });
+            }
+            Tok::LBrace if self.in_head => return Err(self.unexpected("an expression")),
+            Tok::LBrace => {
+                self.bump();
+                let mut items = Vec::new();
+                while self.peek() != &Tok::RBrace {
+                    items.push(self.expr()?);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                let close = self.expect(Tok::RBrace)?;
+                return Ok(Expr { kind: ExprKind::ArrayLit(items), span: start.to(close) });
             }
             Tok::Claim => {
                 self.bump();
@@ -600,7 +766,7 @@ impl Parser {
                 if self.eat(&Tok::LParen) {
                     let mut args = Vec::new();
                     while self.peek() != &Tok::RParen {
-                        args.push(self.expr()?);
+                        args.push(self.nested_expr()?);
                         if !self.eat(&Tok::Comma) {
                             break;
                         }
@@ -650,6 +816,7 @@ mod tests {
             ExprKind::Binary(op, a, b) => format!("({} {} {})", op.symbol(), sx(a), sx(b)),
             ExprKind::Cast(a, s) => format!("(cast {s:?} {})", sx(a)),
             ExprKind::Member(a, f) => format!("{}.{}", sx(a), f.name),
+            ExprKind::ArrayLit(items) => format!("{{{}}}", items.iter().map(sx).collect::<Vec<_>>().join(" ")),
             ExprKind::Index(a, i) => format!("{}[{}]", sx(a), sx(i)),
             ExprKind::Call { name, args } => {
                 format!("{}({})", name.name, args.iter().map(sx).collect::<Vec<_>>().join(", "))
@@ -737,10 +904,10 @@ mod tests {
 
     #[test]
     fn items() {
-        let p = program("const LIMIT: int = 0vMM;\nproc sum(v: lent [int], k: int) -> int { yield k; }");
+        let p = program("const LIMIT: int = 0vMM;\nproc sum(lent sym v[]: int, k: int) -> int { yield k; }");
         assert!(matches!(&p.items[0], Item::Const(c) if c.name.name == "LIMIT"));
         let Item::Proc(f) = &p.items[1] else { panic!() };
-        assert_eq!(f.params[0].ty.ty, Type::Lent(Elem::Int));
+        assert_eq!(f.params[0].ty.ty, Type::Lent(Buf { elem: Elem::Int, sym: true }));
         assert_eq!(f.ret.unwrap().ty, Type::Scalar(Scalar::Int));
     }
 
@@ -755,7 +922,11 @@ mod tests {
         assert!(parse_err("proc main() { tri x { - => a; + => b; } }").message.contains("missing the 0 arm"));
         assert!(parse_err("proc main() { tri x { - => a; - => b; 0 => c; + => d; } }").message.contains("appears twice"));
         assert!(parse_err("proc main() { x + 1 = 3; }").message.contains("cannot assign"));
-        assert!(parse_err("proc main() { b: own [real] = claim 3; }").note.unwrap().contains("trytes or ints"));
+        assert!(parse_err("proc main() { b[]: real = claim 3; }").message.contains("trytes or ints"));
+        let e = parse_err("proc main() { walk i in 3.. { print(i); } }");
+        assert!(e.message.contains("the end of the range"), "{}", e.message);
+        assert!(parse_err("proc main() { if {1} { } }").message.contains("expected an expression, found `{`"));
+        assert!(parse_err("proc f() -> lent int[] { } proc main() {}").note.unwrap().contains("declared on the name"));
         assert!(parse_err("proc main() { x := a <=> b <=> c; }").message.contains("cannot be chained"));
         assert!(parse_err("x := 1;").message.contains("expected `proc`, `const` or `enum`"));
         assert!(parse_err("proc main() { x := ; }").message.contains("expected an expression, found `;`"));
@@ -764,7 +935,7 @@ mod tests {
     #[test]
     fn spec_example_parses() {
         let src = r#"
-proc sum(v: lent [int], k: int) -> int {
+proc sum(lent sym v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k {
         acc += v[i];
@@ -773,7 +944,7 @@ proc sum(v: lent [int], k: int) -> int {
 }
 
 proc main() -> int {
-    b: own [int] = claim 5;
+    sym b[]: int = claim 5;
     walk i in span 2 {
         b[i] = i * i;
     }

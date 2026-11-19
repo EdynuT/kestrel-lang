@@ -35,7 +35,7 @@ A biblioteca padrão da 0.7 e o `ksc.ks` (0.8 e 0.9) são escritos como **aulas*
 - **Sem construtor especial:** o objeto é criado preenchendo os campos: `Token { kind: 1, start: 0, len: 4 }`.
 - **Anotações** são sempre minúsculas (`@impl`) e só são conferidas na compilação, como em Java.
 - **Sem toques de assembly** (removidos na 0.3: `@R`, `add d, s;`, `tri cmp3`), porque eram só outra forma de escrever. Se um dia for preciso acesso real às instruções da ksvm, a ideia é um bloco `asm { }` isolado, depois da 1.0.
-- **Dois tipos de buffer:** o simétrico (`claim N`, `N` ímpar, índices `-k..+k`) continua sendo o padrão. O buffer a partir de 0 aceita qualquer tamanho, com índices `0..N-1`, para listas, pilhas e textos em construção. A sintaxe exata é decidida na 0.3.
+- **Dois tipos de array** (0.3): `x[]: int` com índices `0..N-1` e `sym x[]: int` com índices `-k..+k`. Os colchetes ficam no nome; `{1, 2, 3}` é o literal; parâmetros usam `lent`/`own` como modificador.
 - **Hash map e hash set** são biblioteca escrita em Kestrel, não parte da linguagem.
 - **Orientação a dados:** a árvore do compilador fica num buffer de nós ligados por índice, sem ponteiros dentro de dados.
 

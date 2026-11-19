@@ -4,6 +4,7 @@
 pub mod bet;
 pub mod charset;
 pub mod isa;
+pub mod limits;
 pub mod ksb;
 pub mod real;
 pub mod word;

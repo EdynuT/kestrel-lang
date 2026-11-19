@@ -78,7 +78,8 @@ pub enum HStmtKind {
     /// A nested block (used by `match`, which stores its value first).
     Block(HBlock),
     /// `while cond { body }`: `-` leaves, `0` traps, `+` runs the body again.
-    While { cond: HExpr, body: HBlock },
+    /// `step` runs after the body and on `continue` (from a `for`).
+    While { cond: HExpr, body: HBlock, step: Option<HBlock> },
     /// Stop the program with a trap carrying this reason.
     Trap(String),
     /// `walk var in start..end`. Bounds are evaluated once into hidden locals;
@@ -152,7 +153,10 @@ pub enum HExprKind {
     Builtin(Builtin, Vec<HExpr>),
     /// `print` / `printf`, already split into pieces printed in order.
     Print(Vec<(Fmt, HExpr)>),
+    /// `claim n`: the node's type says symmetric or from 0.
     Claim(Box<HExpr>),
+    /// `{a, b, c}`: a new array holding these values.
+    Pack(Vec<HExpr>),
 }
 
 impl HBlock {

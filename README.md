@@ -2,14 +2,14 @@
 
 An experimental programming language for a **balanced-ternary** virtual machine.
 
-Kestrel targets the BET-VM, a simulated 27-trit processor where every digit is `-1`, `0` or `+1`. The language has three-valued Kleene logic, a poison value (`NaT`) for invalid results instead of silent wrap-around, strict linear ownership with no garbage collector, and arrays indexed from the center.
+Kestrel targets the BET-VM, a simulated 27-trit processor where every digit is `-1`, `0` or `+1`. The language has three-valued Kleene logic, a poison value (`NaT`) for invalid results instead of silent wrap-around, strict linear ownership with no garbage collector, and arrays that can be indexed from the center (`sym`).
 
 > **Status:** hobby project. The [specification](SPEC.md), the compiler (`ksc`) and the VM (`ksvm`) work end to end. See [`examples/tour.ks`](examples/tour.ks).
 
 ## A taste
 
 ```
-proc sum(v: lent [int], k: int) -> int {
+proc sum(lent sym v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k {             // i goes from -k to +k
         acc += v[i];
@@ -18,7 +18,7 @@ proc sum(v: lent [int], k: int) -> int {
 }
 
 proc main() -> int {
-    b: own [int] = claim 5;       // indices -2..+2
+    sym b[]: int = claim 5;       // indices -2..+2
     walk i in span 2 { b[i] = i * i; }
 
     s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
@@ -44,9 +44,9 @@ proc main() -> int {
 | Invalid value | `NaT`, which poisons every later operation | `NaN`, `None` |
 | Overflow | Produces `NaT`, never wraps around | Wraps or is undefined behavior |
 | Branching | `tri x <=> y { - 0 + }` | `match x.cmp(&y)` |
-| Memory | `own [T]` must be `burn`ed or `give`n exactly once | `Box<[T]>` without `Drop` |
-| Borrowing | `lent [T]` | `&mut [T]` |
-| Arrays | `claim 5` gives indices `-2..+2` | `malloc`, but the pointer is in the middle |
+| Memory | an array `x[]: int` must be `burn`ed or `give`n exactly once | `Box<[T]>` without `Drop` |
+| Borrowing | `lent v[]: int` | `&mut [T]` |
+| Arrays | `a[]: int = {1, 2, 3}` (0-based) or `sym s[]: int = claim 5` (`-2..+2`) | `int[]`, or `malloc` with the pointer in the middle |
 
 Negation is free in balanced ternary: flip every trit (`0t+0-` = 8, `0t-0+` = −8). There is no sign bit and no two's complement.
 

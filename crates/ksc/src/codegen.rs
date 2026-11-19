@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use kestrel_core::isa::{Addr, Op, Slot};
+use kestrel_core::limits::{MAX_LOCALS, MAX_PARAMS};
 use kestrel_core::ksb::{Function, Module};
 use kestrel_core::{Real, Word, Word27};
 
@@ -71,6 +72,13 @@ struct ProcGen<'a> {
 impl<'a> ProcGen<'a> {
     fn new(p: &'a HProc, pools: &'a mut Pools) -> R<Self> {
         let n = p.locals.len();
+        if n > MAX_LOCALS {
+            return Err(Diagnostic::new(
+                format!("`{}` has {n} variables; a proc can have at most {MAX_LOCALS}", p.name),
+                p.body.span,
+            )
+            .with_note("split it into smaller procs"));
+        }
         let mut slots = vec![Slot::MAX; n];
         let mut taken: HashMap<Slot, usize> = HashMap::new();
         for (i, slot) in slots.iter_mut().enumerate().take(p.params) {
@@ -99,8 +107,8 @@ impl<'a> ProcGen<'a> {
         for (i, l) in p.locals.iter().enumerate() {
             names[usize::from(slots[i])] = l.name.clone();
         }
-        if p.params > usize::from(u8::MAX) {
-            return Err(Diagnostic::new("a proc can take at most 255 parameters", p.body.span));
+        if p.params > MAX_PARAMS {
+            return Err(Diagnostic::new(format!("a proc can take at most {MAX_PARAMS} parameters"), p.body.span));
         }
         Ok(ProcGen { p, pools, slots, names, code: Vec::new(), loops: Vec::new() })
     }
@@ -282,7 +290,7 @@ impl<'a> ProcGen<'a> {
                     self.patch(at, 0, end);
                 }
             }
-            HStmtKind::While { cond, body } => self.while_loop(cond, body)?,
+            HStmtKind::While { cond, body, step } => self.while_loop(cond, body, step.as_ref())?,
             HStmtKind::Walk { var, span_tmp, start, end, end_tmp, body } => self.walk(*var, span_tmp, start, end, *end_tmp, body)?,
             HStmtKind::Expr(e) => {
                 self.expr(e)?;
@@ -357,21 +365,26 @@ impl<'a> ProcGen<'a> {
 
     /// ```text
     /// TOP:  cond; br3 EXIT, UNKNOWN, BODY     (NaT traps in br3)
-    /// UNKNOWN: trap "while condition is 0 (unknown)"
-    /// BODY: body; jmp TOP                      (continue -> TOP, break -> EXIT)
+    /// UNKNOWN: trap "loop condition is 0 (unknown)"
+    /// BODY: body
+    /// CONT: step; jmp TOP                      (continue -> CONT, break -> EXIT)
     /// EXIT:
     /// ```
-    fn while_loop(&mut self, cond: &HExpr, body: &HBlock) -> R<()> {
+    fn while_loop(&mut self, cond: &HExpr, body: &HBlock, step: Option<&HBlock>) -> R<()> {
         let top = self.here();
         self.expr(cond)?;
         let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
         let unknown = self.here();
-        let k = self.pools.string("while condition is 0 (unknown)");
+        let k = self.pools.string("loop condition is 0 (unknown)");
         self.emit(Op::Trap(k));
         let body_at = self.here();
         self.loops.push(LoopLabels { breaks: Vec::new(), continues: Vec::new() });
         self.block(body)?;
         let labels = self.loops.pop().expect("pushed above");
+        let cont = self.here();
+        if let Some(step) = step {
+            self.block(step)?;
+        }
         self.emit(Op::Jmp(top));
         let exit = self.here();
         self.patch(br, 0, exit);
@@ -381,7 +394,7 @@ impl<'a> ProcGen<'a> {
             self.patch(at, 0, exit);
         }
         for at in labels.continues {
-            self.patch(at, 0, top);
+            self.patch(at, 0, cont);
         }
         Ok(())
     }
@@ -515,11 +528,21 @@ impl<'a> ProcGen<'a> {
             }
             HExprKind::Claim(n) => {
                 self.expr(n)?;
-                self.emit(Op::Alloc);
+                self.emit(if is_sym(e.ty) { Op::Alloc } else { Op::AllocZ });
+            }
+            HExprKind::Pack(items) => {
+                for item in items {
+                    self.expr(item)?;
+                }
+                self.emit(Op::Pack { n: items.len() as u32, sym: is_sym(e.ty) });
             }
         }
         Ok(())
     }
+}
+
+fn is_sym(t: Type) -> bool {
+    matches!(t, Type::Own(b) | Type::Lent(b) if b.sym)
 }
 
 /// Whether an expression statement leaves a value to pop. Every proc call

@@ -54,4 +54,20 @@ proc main() {
         else => dias = 31;
     }
     printf("O mês %d tem %d dias, muita curtição!\n", mes, dias);
+
+    // arrays simétricos e assimétricos e laço de repetição com for
+    sym arr[]: int = {1, 2, 3};
+    walk i in span 1 {
+        printf("%d ", arr[i]);
+    }
+    burn arr;
+    print("\n");
+
+    arr[]: int = {1, 2, 3, 4};
+    for i := 0; i < len(arr); i++ {
+        printf("%d ", arr[i]);
+    }
+    burn arr;
+    burn arr;
+    print("\n");
 }

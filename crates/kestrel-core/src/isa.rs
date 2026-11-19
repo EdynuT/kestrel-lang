@@ -64,9 +64,13 @@ pub enum Op {
     IToF,
     FToI,
 
-    // Symmetric memory
-    /// Pop N, push a pointer to a fresh buffer of N cells (N odd, else Trap).
+    // Memory
+    /// Pop N, push a pointer to a fresh symmetric buffer `-k..+k` (N = 2k+1, else Trap).
     Alloc,
+    /// Pop N, push a pointer to a fresh buffer indexed `0..N-1` (N >= 0).
+    AllocZ,
+    /// Pop `n` values (the first pushed is the first cell) into a fresh buffer.
+    Pack { n: u32, sym: bool },
     /// Pop index and pointer, push the cell.
     LdIdx,
     /// Pop value, index and pointer, store the cell.
@@ -166,6 +170,8 @@ impl Op {
             LdIdx => 0x41,
             StIdx => 0x42,
             Purge(_) => 0x43,
+            AllocZ => 0x44,
+            Pack { .. } => 0x45,
 
             Jmp(_) => 0x50,
             JNat(_) => 0x51,
@@ -225,6 +231,8 @@ impl Op {
             IToF => "itof",
             FToI => "ftoi",
             Alloc => "alloc",
+            AllocZ => "allocz",
+            Pack { .. } => "pack",
             LdIdx => "ldidx",
             StIdx => "stidx",
             Purge(_) => "purge",
@@ -252,7 +260,7 @@ impl Op {
             Test(_) => 1,
             Load(_) | Store(_) | Move(_) | Purge(_) => 2,
             Br3 { .. } => 12,
-            Call { .. } => 5,
+            Call { .. } | Pack { .. } => 5,
             _ => 0,
         }
     }
@@ -274,6 +282,10 @@ impl Op {
             Call { f, argc } => {
                 out.extend_from_slice(&f.to_le_bytes());
                 out.push(argc);
+            }
+            Pack { n, sym } => {
+                out.extend_from_slice(&n.to_le_bytes());
+                out.push(u8::from(sym));
             }
             _ => {}
         }
@@ -325,6 +337,15 @@ impl Op {
             0x37 => TStrT,
             0x38 => TStrV,
             0x40 => Alloc,
+            0x44 => AllocZ,
+            0x45 => {
+                let n = r.u32()?;
+                match r.u8()? {
+                    0 => Pack { n, sym: false },
+                    1 => Pack { n, sym: true },
+                    _ => return Err(DecodeError::BadOpcode { at, byte }),
+                }
+            }
             0x41 => LdIdx,
             0x42 => StIdx,
             0x43 => Purge(r.u16()?),
@@ -369,6 +390,7 @@ impl fmt::Display for Op {
             Jmp(a) | JNat(a) => write!(f, "{m:<7} @{a}"),
             Br3 { neg, zero, pos } => write!(f, "{m:<7} @{neg}, @{zero}, @{pos}"),
             Call { f: func, argc } => write!(f, "{m:<7} fn#{func}, {argc}"),
+            Pack { n, sym } => write!(f, "{m:<7} {n}{}", if sym { ", sym" } else { "" }),
             _ => f.write_str(m),
         }
     }
@@ -424,7 +446,7 @@ mod tests {
             Add, Sub, Mul, Div, Mod, Pow, Neg, Shl3, Shr3, Cmp3, KAnd, KOr, Test(0b101), Trap(4),
             FAdd, FSub, FMul, FDiv, FPow, FNeg, FCmp3,
             TLen, TIdx, Narrow6, Narrow1, IToF, FToI, TStr, TStrT, TStrV,
-            Alloc, LdIdx, StIdx, Purge(8),
+            Alloc, LdIdx, StIdx, Purge(8), AllocZ, Pack { n: 3, sym: true },
             Jmp(12), JNat(u32::MAX), Br3 { neg: 1, zero: 2, pos: 3 }, Call { f: 2, argc: 3 }, Ret,
             Input, Emit, Print, Show, Dump(5), ShowT, ShowV,
         ]

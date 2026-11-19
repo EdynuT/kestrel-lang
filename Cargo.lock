@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "kestrel-core"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "ksc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "kestrel-core",
  "ksvm",
@@ -16,7 +16,7 @@ dependencies = [
 
 [[package]]
 name = "ksvm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "kestrel-core",
 ]

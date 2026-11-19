@@ -14,9 +14,9 @@ proc sum(v: lent [int], k: int) -> int {
 // Prints a word as "negative", "zero" or "positive".
 proc describe(x: int) {
     tri x <=> 0 {
-        - => print("negative"),
-        0 => print("zero"),
-        + => print("positive"),
+        - => print("negative");
+        0 => print("zero");
+        + => print("positive");
     }
 }
 

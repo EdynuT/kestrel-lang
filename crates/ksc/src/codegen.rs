@@ -260,6 +260,7 @@ impl<'a> ProcGen<'a> {
                 let at = self.emit(Op::Jmp(0));
                 self.loops.last_mut().expect("continue inside walk").continues.push(at);
             }
+            HStmtKind::Block(b) => self.block(b)?,
             HStmtKind::Trap(reason) => {
                 let k = self.pools.string(reason);
                 self.emit(Op::Trap(k));

@@ -74,7 +74,7 @@ proc main() -> int {
     walk i in span 2 { b[i] = i * i; }
     s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
     s = s << 1;
-    tri s <=> 10 { - => print("less"), 0 => print("equal"), + => print("greater"), }
+    tri s <=> 10 { - => print("less"); 0 => print("equal"); + => print("greater"); }
     burn b;
     yield 0;
 }"#;
@@ -108,7 +108,7 @@ fn shadowing_does_not_clobber_outer_variable() {
 #[test]
 fn tri_and_logic() {
     let src = r#"
-proc sign(x: int) { tri x <=> 0 { - => print("-"), 0 => print("0"), + => print("+"), } }
+proc sign(x: int) { tri x <=> 0 { - => print("-"); 0 => print("0"); + => print("+"); } }
 proc main() { sign(-5); sign(0); sign(9); a: trit = +; b: trit = 0; print(a && b); print(a || b); print(!a); }"#;
     assert_eq!(out(src), "-0+01-1");
 }
@@ -118,7 +118,7 @@ fn walks() {
     assert_eq!(main_out("walk i in -2..2 { print(i); }"), "-2-1012");
     assert_eq!(main_out("walk i in span 1 { print(i); }"), "-101");
     assert_eq!(main_out("walk i in 3..1 { print(i); } print(\"empty\");"), "empty");
-    assert_eq!(main_out("walk i in 0..9 { tri i <=> 2 { - => continue, 0 => continue, + => {} } tri i <=> 5 { - => {} 0 => break, + => {} } print(i); }"), "34");
+    assert_eq!(main_out("walk i in 0..9 { tri i <=> 2 { - => continue; 0 => continue; + => {} } tri i <=> 5 { - => {} 0 => break; + => {} } print(i); }"), "34");
     // The loop compares before incrementing, so the top of the word range is fine.
     assert_eq!(main_out("walk i in 3812798742492..3812798742493 { print(\"x\"); }"), "xx");
 }
@@ -141,7 +141,7 @@ proc main() {
 
 #[test]
 fn recursion() {
-    let src = "proc fact(n: int) -> int { tri n <=> 1 { - => yield 1, 0 => yield 1, + => yield n * fact(n - 1), } }
+    let src = "proc fact(n: int) -> int { tri n <=> 1 { - => yield 1; 0 => yield 1; + => yield n * fact(n - 1); } }
                proc main() { print(fact(15)); print(\" \"); print(fact(16)); }";
     // 15! = 1307674368000 fits in a word; 16! = 20922789888000 overflows into NaT.
     assert_eq!(out(src), "1307674368000 NaT");
@@ -219,6 +219,29 @@ fn compound_assignment() {
     assert!(e.message.contains("is final"), "{}", e.message);
     let e = ksc::compile("proc main() { i := 0; x := i++; }").unwrap_err();
     assert!(e.message.contains("expected `;`"), "{}", e.message);
+}
+
+#[test]
+fn enums_and_match() {
+    let src = r#"enum Cor { Vermelho, Verde, Azul }
+        enum Http { Ok = 200, NotFound = 404, Teapot }
+        proc acao(c: Cor) -> text {
+            match c { Cor.Vermelho => yield "pare"; Cor.Verde => yield "siga"; Cor.Azul => yield "?"; }
+        }
+        proc tipo(c: tryte) -> text {
+            match c { 'a' | 'e' | 'i' | 'o' | 'u' => yield "vogal"; '0' | '1' => { yield "digito"; } else => yield "outro"; }
+        }
+        proc main() {
+            c: Cor = Cor.Verde;
+            printf("{c} %d %s/", (int) c, acao(Cor.Vermelho));
+            h := Http.Teapot;
+            printl(to_text(h) + " " + to_text((int) h));
+            printf("%s %s %s %d/", tipo('e'), tipo('1'), tipo('z'), c != Cor.Azul);
+            match 7 % 3 { 0 => print("div"); 1 | -1 => print("r1"); else => print("r2"); }
+        }"#;
+    assert_eq!(out(src), "Verde 1 pare/Teapot 405\nvogal digito outro 1/r1");
+    let e = ksc::compile("enum A { X, Y } proc main() { match A.X { A.X => print(1); } }").unwrap_err();
+    assert!(e.message.contains("does not cover A.Y"), "{}", e.message);
 }
 
 #[test]

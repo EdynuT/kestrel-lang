@@ -72,8 +72,11 @@ pub enum HStmtKind {
     Break,
     Continue,
     /// Arms in order `-`, `0`, `+`.
-    /// `from_if`: lowered from `if`/`else` (arms are else, trap, then).
-    Tri { head: HExpr, arms: Box<[HBlock; 3]>, from_if: bool },
+    /// `origin` says which statement this came from, for error messages:
+    /// `if`/`else` and `match` lower to a `tri` (arms: else, trap, then).
+    Tri { head: HExpr, arms: Box<[HBlock; 3]>, origin: Branch },
+    /// A nested block (used by `match`, which stores its value first).
+    Block(HBlock),
     /// `while cond { body }`: `-` leaves, `0` traps, `+` runs the body again.
     While { cond: HExpr, body: HBlock },
     /// Stop the program with a trap carrying this reason.
@@ -106,6 +109,13 @@ pub enum Builtin {
     Len,
     /// `to_text(x)`, `to_text(x, 't')`, `to_text(x, 'v')`
     ToText(Fmt),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Branch {
+    Tri,
+    If,
+    Match,
 }
 
 /// How one `print`/`printf` piece is written.
@@ -151,6 +161,7 @@ impl HBlock {
         self.stmts.last().is_some_and(|s| match &s.kind {
             HStmtKind::Yield(_) | HStmtKind::Break | HStmtKind::Continue | HStmtKind::Trap(_) => true,
             HStmtKind::Tri { arms, .. } => arms.iter().all(HBlock::diverges),
+            HStmtKind::Block(b) => b.diverges(),
             _ => false,
         })
     }

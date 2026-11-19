@@ -50,7 +50,7 @@ fn bug5_tri_arm_leaks_when_another_diverges() {
     // Prototype: with one diverging arm, only the first surviving arm was checked.
     let e = compile_error(
         "proc main() { a: own [int] = claim 3; t: trit = -;
-           tri t { - => { burn a; yield; } 0 => burn a, + => {} } }",
+           tri t { - => { burn a; yield; } 0 => burn a; + => {} } }",
     );
     assert!(e.contains("different states"), "{e}");
 }

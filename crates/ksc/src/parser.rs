@@ -93,7 +93,8 @@ impl Parser {
         match self.peek() {
             Tok::Proc => self.proc_decl().map(Item::Proc),
             Tok::Const => self.const_decl().map(Item::Const),
-            _ => Err(self.unexpected("`proc` or `const`")),
+            Tok::Enum => self.enum_decl().map(Item::Enum),
+            _ => Err(self.unexpected("`proc`, `const` or `enum`")),
         }
     }
 
@@ -139,10 +140,32 @@ impl Parser {
         Some(s)
     }
 
+    fn enum_decl(&mut self) -> PResult<EnumDecl> {
+        self.expect(Tok::Enum)?;
+        let name = self.ident()?;
+        self.expect(Tok::LBrace)?;
+        let mut variants = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            let v = self.ident()?;
+            let value = if self.eat(&Tok::Eq) { Some(self.expr()?) } else { None };
+            variants.push((v, value));
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RBrace)?;
+        Ok(EnumDecl { name, variants })
+    }
+
     fn type_expr(&mut self) -> PResult<TypeExpr> {
         let start = self.span();
         if let Some(s) = self.scalar() {
             return Ok(TypeExpr { ty: Type::Scalar(s), span: start });
+        }
+        if let Tok::Ident(name) = self.peek() {
+            let ty = Type::Enum(intern(name));
+            self.bump();
+            return Ok(TypeExpr { ty, span: start });
         }
         let ty = match self.peek() {
             Tok::Text => {
@@ -184,14 +207,13 @@ impl Parser {
 
     fn stmt(&mut self) -> PResult<Stmt> {
         let start = self.span();
-        let kind = self.stmt_kind(true)?;
+        let kind = self.stmt_kind()?;
         Ok(Stmt { kind, span: start.to(self.tokens[self.pos - 1].span) })
     }
 
-    /// Parses one statement. `with_semi` is false inside a `tri` arm,
-    /// where `- => print("x"),` ends with a comma instead.
-    fn stmt_kind(&mut self, with_semi: bool) -> PResult<StmtKind> {
-        let end = |p: &mut Parser| if with_semi { p.expect(Tok::Semi).map(|_| ()) } else { Ok(()) };
+    /// Parses one statement, including its `;` when it needs one.
+    fn stmt_kind(&mut self) -> PResult<StmtKind> {
+        let end = |p: &mut Parser| p.expect(Tok::Semi).map(|_| ());
         let kind = match self.peek().clone() {
             Tok::Burn => {
                 self.bump();
@@ -229,6 +251,7 @@ impl Parser {
             }
             Tok::Tri => return self.tri(),
             Tok::If => return self.if_stmt(),
+            Tok::Match => return self.match_stmt(),
             Tok::While => {
                 self.bump();
                 let cond = self.expr()?;
@@ -334,6 +357,42 @@ impl Parser {
         Ok(StmtKind::If { cond, then, otherwise })
     }
 
+    /// A `tri`/`match` arm body: `{ ... }` or one statement (with its `;`).
+    fn arm_body(&mut self) -> PResult<Block> {
+        if self.peek() == &Tok::LBrace {
+            return self.block();
+        }
+        let start = self.span();
+        let kind = self.stmt_kind()?;
+        let span = start.to(self.tokens[self.pos - 1].span);
+        Ok(Block { stmts: vec![Stmt { kind, span }], span })
+    }
+
+    fn match_stmt(&mut self) -> PResult<StmtKind> {
+        self.expect(Tok::Match)?;
+        let scrut = self.expr()?;
+        self.expect(Tok::LBrace)?;
+        let mut arms = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            let start = self.span();
+            let mut pats = Vec::new();
+            if !self.eat(&Tok::Else) {
+                loop {
+                    pats.push(self.expr()?);
+                    if !self.eat(&Tok::Pipe) {
+                        break;
+                    }
+                }
+            }
+            let span = start.to(self.tokens[self.pos - 1].span);
+            self.expect(Tok::FatArrow)?;
+            let body = self.arm_body()?;
+            arms.push(MatchArm { pats, body, span });
+        }
+        self.expect(Tok::RBrace)?;
+        Ok(StmtKind::Match { scrut, arms })
+    }
+
     fn tri(&mut self) -> PResult<StmtKind> {
         let tri_span = self.expect(Tok::Tri)?;
         let head = self.expr()?;
@@ -349,19 +408,7 @@ impl Parser {
             };
             self.bump();
             self.expect(Tok::FatArrow)?;
-            let body = if self.peek() == &Tok::LBrace {
-                let b = self.block()?;
-                self.eat(&Tok::Comma);
-                b
-            } else {
-                let start = self.span();
-                let kind = self.stmt_kind(false)?;
-                let span = start.to(self.tokens[self.pos - 1].span);
-                if self.peek() != &Tok::RBrace {
-                    self.expect(Tok::Comma)?;
-                }
-                Block { stmts: vec![Stmt { kind, span }], span }
-            };
+            let body = self.arm_body()?;
             if arms[slot].replace(body).is_some() {
                 return Err(Diagnostic::new(format!("the `{label}` arm appears twice"), label_span));
             }
@@ -490,13 +537,20 @@ impl Parser {
 
     fn postfix(&mut self) -> PResult<Expr> {
         let mut e = self.primary()?;
-        while self.eat(&Tok::LBracket) {
-            let idx = self.expr()?;
-            let close = self.expect(Tok::RBracket)?;
-            let span = e.span.to(close);
-            e = Expr { kind: ExprKind::Index(Box::new(e), Box::new(idx)), span };
+        loop {
+            if self.eat(&Tok::LBracket) {
+                let idx = self.expr()?;
+                let close = self.expect(Tok::RBracket)?;
+                let span = e.span.to(close);
+                e = Expr { kind: ExprKind::Index(Box::new(e), Box::new(idx)), span };
+            } else if self.eat(&Tok::Dot) {
+                let field = self.ident()?;
+                let span = e.span.to(field.span);
+                e = Expr { kind: ExprKind::Member(Box::new(e), field), span };
+            } else {
+                return Ok(e);
+            }
         }
-        Ok(e)
     }
 
     fn primary(&mut self) -> PResult<Expr> {
@@ -595,6 +649,7 @@ mod tests {
             ExprKind::Unary(UnOp::Not, a) => format!("(! {})", sx(a)),
             ExprKind::Binary(op, a, b) => format!("({} {} {})", op.symbol(), sx(a), sx(b)),
             ExprKind::Cast(a, s) => format!("(cast {s:?} {})", sx(a)),
+            ExprKind::Member(a, f) => format!("{}.{}", sx(a), f.name),
             ExprKind::Index(a, i) => format!("{}[{}]", sx(a), sx(i)),
             ExprKind::Call { name, args } => {
                 format!("{}({})", name.name, args.iter().map(sx).collect::<Vec<_>>().join(", "))
@@ -666,7 +721,7 @@ mod tests {
     #[test]
     fn tri_and_walk() {
         let stmts = body(
-            "tri s <=> 10 { + => print(\"big\"), - => { x = 1; } 0 => yield, }
+            "tri s <=> 10 { + => print(\"big\"); - => { x = 1; } 0 => yield; }
              walk i in span 2 { b[i] = i; }
              walk j in -1..k + 1 { break; }",
         );
@@ -697,12 +752,12 @@ mod tests {
         assert_eq!(d.message, "expected `;`, found `y`");
         assert_eq!(d.span.start, "proc main() { x := 1".len());
 
-        assert!(parse_err("proc main() { tri x { - => a, + => b, } }").message.contains("missing the 0 arm"));
-        assert!(parse_err("proc main() { tri x { - => a, - => b, 0 => c, + => d, } }").message.contains("appears twice"));
+        assert!(parse_err("proc main() { tri x { - => a; + => b; } }").message.contains("missing the 0 arm"));
+        assert!(parse_err("proc main() { tri x { - => a; - => b; 0 => c; + => d; } }").message.contains("appears twice"));
         assert!(parse_err("proc main() { x + 1 = 3; }").message.contains("cannot assign"));
         assert!(parse_err("proc main() { b: own [real] = claim 3; }").note.unwrap().contains("trytes or ints"));
         assert!(parse_err("proc main() { x := a <=> b <=> c; }").message.contains("cannot be chained"));
-        assert!(parse_err("x := 1;").message.contains("expected `proc` or `const`"));
+        assert!(parse_err("x := 1;").message.contains("expected `proc`, `const` or `enum`"));
         assert!(parse_err("proc main() { x := ; }").message.contains("expected an expression, found `;`"));
     }
 
@@ -725,9 +780,9 @@ proc main() -> int {
     s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
     s = s << 1;
     tri s <=> 10 {
-        - => print("less"),
-        0 => print("equal"),
-        + => print("greater"),
+        - => print("less");
+        0 => print("equal");
+        + => print("greater");
     }
     burn b;
     yield 0;

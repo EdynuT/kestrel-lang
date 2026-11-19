@@ -70,6 +70,10 @@ pub enum Tok {
     If,
     Else,
     While,
+    Enum,
+    Match,
+    Dot,
+    Pipe,
     PlusEq,
     MinusEq,
     StarEq,
@@ -115,6 +119,8 @@ const KEYWORDS: &[(&str, Tok)] = &[
     ("if", Tok::If),
     ("else", Tok::Else),
     ("while", Tok::While),
+    ("enum", Tok::Enum),
+    ("match", Tok::Match),
     ("walk", Tok::Walk),
     ("in", Tok::In),
     ("span", Tok::Span),
@@ -150,6 +156,7 @@ const OPERATORS: &[(&str, Tok)] = &[
     ("||", Tok::OrOr),
     (":=", Tok::ColonEq),
     ("..", Tok::DotDot),
+    (".", Tok::Dot),
     ("=>", Tok::FatArrow),
     ("->", Tok::Arrow),
     ("+", Tok::Plus),
@@ -164,6 +171,7 @@ const OPERATORS: &[(&str, Tok)] = &[
     (":", Tok::Colon),
     (",", Tok::Comma),
     (";", Tok::Semi),
+    ("|", Tok::Pipe),
     ("(", Tok::LParen),
     (")", Tok::RParen),
     ("{", Tok::LBrace),
@@ -264,7 +272,6 @@ impl Lexer<'_> {
                         let d = self.err(format!("unexpected character `{c}`"), start);
                         return Err(match c {
                             '~' => d.with_note("negate a trit with `!x`, a number with `-x`"),
-                            '.' => d.with_note("there are no methods yet (they come with classes): write `f(x)` instead of `x.f()`"),
                             '\\' => d.with_note("escapes like `\\n` only work inside quotes: `\"\\n\"`"),
                             _ => d,
                         });

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use kestrel_core::charset::char_to_tryte;
 use kestrel_core::word::{TRIT_MAX, TRYTE_MAX};
+use kestrel_core::Word;
 
 use crate::ast::{self, Expr, ExprKind, Item, Place, Program, Range, StmtKind, UnOp};
 use crate::diag::{Diagnostic, Span};
@@ -17,12 +18,30 @@ type R<T> = Result<T, Diagnostic>;
 const BUILTINS: [&str; 8] = ["print", "printl", "printf", "to_text", "emit", "input", "len", "dump"];
 
 pub fn check(program: &Program) -> R<Hir> {
-    let mut cx = Checker { sigs: Vec::new(), proc_ids: HashMap::new(), consts: HashMap::new(), f: FnCx::new(Type::Void) };
+    let mut cx = Checker {
+        sigs: Vec::new(),
+        proc_ids: HashMap::new(),
+        consts: HashMap::new(),
+        enums: HashMap::new(),
+        f: FnCx::new(Type::Void),
+    };
+    // Enums first, so types like `c: Cor` resolve anywhere. Each enum gets a
+    // hidden proc that turns a value into its name, for `print` and `to_text`.
+    let mut name_procs = Vec::new();
+    for item in &program.items {
+        if let Item::Enum(e) = item {
+            name_procs.push(cx.declare_enum(e)?);
+        }
+    }
     for item in &program.items {
         match item {
             Item::Const(c) => cx.declare_const(c)?,
             Item::Proc(p) => cx.declare_proc(p)?,
+            Item::Enum(_) => {}
         }
+    }
+    for p in &name_procs {
+        cx.declare_proc(p)?;
     }
     let entry = *cx
         .proc_ids
@@ -40,6 +59,9 @@ pub fn check(program: &Program) -> R<Hir> {
         if let Item::Proc(p) = item {
             procs.push(cx.check_proc(p)?);
         }
+    }
+    for p in &name_procs {
+        procs.push(cx.check_proc(p)?);
     }
     Ok(Hir { procs, entry })
 }
@@ -68,7 +90,15 @@ struct Checker {
     sigs: Vec<Sig>,
     proc_ids: HashMap<String, ProcId>,
     consts: HashMap<String, HExpr>,
+    enums: HashMap<String, EnumInfo>,
     f: FnCx,
+}
+
+struct EnumInfo {
+    name: &'static str,
+    variants: Vec<(String, i64)>,
+    /// Hidden proc `$name.E(v: int) -> text`.
+    name_proc: String,
 }
 
 fn err(msg: impl Into<String>, span: Span) -> Diagnostic {
@@ -115,6 +145,75 @@ impl Checker {
         Ok(())
     }
 
+    fn declare_enum(&mut self, e: &ast::EnumDecl) -> R<ast::ProcDecl> {
+        let name = &e.name.name;
+        if self.enums.contains_key(name) {
+            return Err(err(format!("enum `{name}` is defined twice"), e.name.span));
+        }
+        if e.variants.is_empty() {
+            return Err(err(format!("enum `{name}` needs at least one value"), e.name.span));
+        }
+        let mut variants: Vec<(String, i64)> = Vec::new();
+        let mut next = 0;
+        for (v, value) in &e.variants {
+            if variants.iter().any(|(n, _)| *n == v.name) {
+                return Err(err(format!("`{}` appears twice in enum `{name}`", v.name), v.span));
+            }
+            let k = match value {
+                None => next,
+                Some(x) => match self.expect(x, Type::Scalar(Scalar::Int))?.kind {
+                    HExprKind::Word(w) if !w.is_nat() => w.get().unwrap_or(0),
+                    _ => return Err(err("an enum value must be an integer literal", x.span)),
+                },
+            };
+            if let Some((other, _)) = variants.iter().find(|(_, val)| *val == k) {
+                return Err(err(format!("`{}` and `{other}` both have the value {k}", v.name), v.span));
+            }
+            variants.push((v.name.clone(), k));
+            next = k + 1;
+        }
+        // proc $name.E(v: int) -> text { if v == k0 { yield "A"; } ... yield "Last"; }
+        let sp = e.name.span;
+        let ex = |kind| Expr { kind, span: sp };
+        let st = |kind| ast::Stmt { kind, span: sp };
+        let (last, rest) = variants.split_last().expect("checked non-empty");
+        let mut stmts = Vec::new();
+        for (n, k) in rest {
+            let v = ex(ExprKind::Var("v".into()));
+            let cond = ex(ExprKind::Binary(BinOp::Eq, Box::new(v), Box::new(ex(ExprKind::Num(Word::new(*k))))));
+            let then = ast::Block { stmts: vec![st(StmtKind::Yield(Some(ex(ExprKind::Str(n.clone())))))], span: sp };
+            stmts.push(st(StmtKind::If { cond, then, otherwise: None }));
+        }
+        stmts.push(st(StmtKind::Yield(Some(ex(ExprKind::Str(last.0.clone()))))));
+        let name_proc = format!("$name.{name}");
+        let int = ast::TypeExpr { ty: Type::Scalar(Scalar::Int), span: sp };
+        let decl = ast::ProcDecl {
+            name: ast::Ident { name: name_proc.clone(), span: sp },
+            params: vec![ast::Param { name: ast::Ident { name: "v".into(), span: sp }, ty: int }],
+            ret: Some(ast::TypeExpr { ty: Type::Text, span: sp }),
+            body: ast::Block { stmts, span: sp },
+        };
+        self.enums.insert(name.clone(), EnumInfo { name: ast::intern(name), variants, name_proc });
+        Ok(decl)
+    }
+
+    /// Rejects enum types that were never declared.
+    fn known(&self, t: &ast::TypeExpr) -> R<()> {
+        match t.ty {
+            Type::Enum(n) if !self.enums.contains_key(n) => Err(err(format!("unknown type `{n}`"), t.span)
+                .with_note("types are trit, tryte, int, real, text, own/lent [T] or a declared enum")),
+            _ => Ok(()),
+        }
+    }
+
+    /// An enum value as its name (a call to the enum's hidden name proc).
+    fn named(&self, h: HExpr) -> HExpr {
+        let Type::Enum(n) = h.ty else { return h };
+        let id = self.proc_ids[&self.enums[n].name_proc];
+        let span = h.span;
+        hx(HExprKind::Call(id, vec![HExpr { ty: Type::Scalar(Scalar::Int), ..h }]), Type::Text, span)
+    }
+
     fn declare_proc(&mut self, p: &ast::ProcDecl) -> R<()> {
         let name = &p.name.name;
         if BUILTINS.contains(&name.as_str()) {
@@ -128,7 +227,11 @@ impl Checker {
             if params.iter().any(|(n, _)| *n == param.name.name) {
                 return Err(err(format!("parameter `{}` appears twice", param.name.name), param.name.span));
             }
+            self.known(&param.ty)?;
             params.push((param.name.name.clone(), param.ty.ty));
+        }
+        if let Some(t) = &p.ret {
+            self.known(t)?;
         }
         let ret = p.ret.map_or(Type::Void, |t| t.ty);
         if let (Type::Lent(_), Some(t)) = (ret, p.ret) {
@@ -200,6 +303,7 @@ impl Checker {
             StmtKind::Let { is_final, name, ty, value, on_nat } => {
                 let (value, lty) = match ty {
                     Some(t) => {
+                        self.known(t)?;
                         if let Type::Lent(_) = t.ty {
                             return Err(err("a variable cannot hold a lent buffer", t.span)
                                 .with_note("lent buffers exist only as proc parameters"));
@@ -287,7 +391,7 @@ impl Checker {
                 };
                 let trap = HStmt { kind: HStmtKind::Trap("if condition is 0 (unknown)".into()), span: cond.span };
                 let unknown = HBlock { stmts: vec![trap], scope: vec![], span: cond.span };
-                HStmtKind::Tri { head: h, arms: Box::new([otherwise, unknown, then]), from_if: true }
+                HStmtKind::Tri { head: h, arms: Box::new([otherwise, unknown, then]), origin: Branch::If }
             }
             StmtKind::Tri { head, neg, zero, pos } => {
                 let h = self.expr(head, Some(Type::Scalar(Scalar::Trit)))?;
@@ -296,8 +400,9 @@ impl Checker {
                         .with_note("compare first, e.g. `tri x <=> 0 { ... }`"));
                 }
                 let arms = [self.block(neg)?, self.block(zero)?, self.block(pos)?];
-                HStmtKind::Tri { head: h, arms: Box::new(arms), from_if: false }
+                HStmtKind::Tri { head: h, arms: Box::new(arms), origin: Branch::Tri }
             }
+            StmtKind::Match { scrut, arms } => self.match_stmt(scrut, arms, s.span)?,
             StmtKind::While { cond, body } => {
                 let h = self.expr(cond, Some(Type::Scalar(Scalar::Trit)))?;
                 if h.ty != Type::Scalar(Scalar::Trit) {
@@ -515,8 +620,25 @@ impl Checker {
                 }
             }
             ExprKind::Binary(op, a, b) => self.binary(*op, a, b, want, span)?,
+            ExprKind::Member(base, field) => {
+                let note = "`.` only works on enum names for now, like `Cor.Verde`";
+                let ExprKind::Var(tname) = &base.kind else {
+                    return Err(err("cannot use `.` here", span).with_note(note));
+                };
+                let Some(info) = self.enums.get(tname) else {
+                    return Err(err(format!("`{tname}` is not an enum"), base.span).with_note(note));
+                };
+                let Some((_, k)) = info.variants.iter().find(|(n, _)| *n == field.name) else {
+                    let names: Vec<&str> = info.variants.iter().map(|(n, _)| n.as_str()).collect();
+                    return Err(err(format!("enum `{tname}` has no value `{}`", field.name), field.span)
+                        .with_note(format!("its values are {}", names.join(", "))));
+                };
+                hx(HExprKind::Word(Word::new(*k)), Type::Enum(info.name), span)
+            }
             ExprKind::Cast(inner, s) => {
                 let h = self.expr(inner, None)?;
+                // An enum value is stored as its number: `(int) c` just reads it.
+                let h = if let Type::Enum(_) = h.ty { HExpr { ty: Type::Scalar(Scalar::Int), ..h } } else { h };
                 if !h.ty.is_numeric() {
                     return Err(err(format!("cannot cast {}", h.ty), inner.span));
                 }
@@ -574,6 +696,17 @@ impl Checker {
                 }
                 (ha, hb, trit)
             }
+            BinOp::Eq | BinOp::Ne if self.enum_type(a).or_else(|| self.enum_type(b)).is_some() => {
+                let t = self.enum_type(a).or_else(|| self.enum_type(b)).expect("checked by the guard");
+                let ha = self.expr(a, Some(t))?;
+                let hb = self.expr(b, Some(t))?;
+                for h in [&ha, &hb] {
+                    if h.ty != t {
+                        return Err(err(format!("cannot compare {t} with {}", h.ty), h.span));
+                    }
+                }
+                (ha, hb, trit)
+            }
             BinOp::Cmp3 | BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                 let (ha, hb, _) = self.numeric_pair(a, b, None)?;
                 (ha, hb, trit)
@@ -606,6 +739,94 @@ impl Checker {
             }
         };
         Ok(hx(HExprKind::Binary(op, Box::new(ha), Box::new(hb)), ty, span))
+    }
+
+    /// `match` becomes: store the value in a hidden local, then a chain of
+    /// `if tmp == a || tmp == b { arm } else { ... }`. An enum match without
+    /// `else` must list every value; its last arm then needs no test.
+    fn match_stmt(&mut self, scrut: &Expr, arms: &[ast::MatchArm], span: Span) -> R<HStmtKind> {
+        let h = self.expr(scrut, None)?;
+        let ty = h.ty;
+        if !(ty.is_int() || matches!(ty, Type::Enum(_))) {
+            return Err(err(format!("`match` works on integers and enums, found {ty}"), scrut.span));
+        }
+        let tmp = self.new_local("$match", ty, LocalKind::Hidden, scrut.span);
+        let mut seen: Vec<i64> = Vec::new();
+        let mut tests: Vec<(Vec<i64>, HBlock)> = Vec::new();
+        let mut otherwise = None;
+        for (i, arm) in arms.iter().enumerate() {
+            if arm.pats.is_empty() {
+                if i + 1 != arms.len() {
+                    return Err(err("the `else` arm must be the last one", arm.span));
+                }
+                otherwise = Some(self.block(&arm.body)?);
+                continue;
+            }
+            let mut vals = Vec::new();
+            for p in &arm.pats {
+                let hp = self.expect(p, ty)?;
+                let v = match hp.kind {
+                    HExprKind::Word(w) if !w.is_nat() => w.get().unwrap_or(0),
+                    _ => return Err(err("a `match` pattern must be a literal or an enum value", p.span)),
+                };
+                if seen.contains(&v) {
+                    return Err(err("this value already appears in an earlier arm", p.span));
+                }
+                seen.push(v);
+                vals.push(v);
+            }
+            tests.push((vals, self.block(&arm.body)?));
+        }
+        if otherwise.is_none() {
+            if let Type::Enum(n) = ty {
+                let missing: Vec<String> = self.enums[n]
+                    .variants
+                    .iter()
+                    .filter(|(_, v)| !seen.contains(v))
+                    .map(|(name, _)| format!("{n}.{name}"))
+                    .collect();
+                if !missing.is_empty() {
+                    return Err(err(format!("`match` does not cover {}", missing.join(", ")), scrut.span)
+                        .with_note("add an arm for each, or an `else` arm"));
+                }
+            } else {
+                return Err(err(format!("`match` on {ty} needs an `else` arm"), scrut.span)
+                    .with_note("integers have too many values to list them all"));
+            }
+        }
+        let trit = Type::Scalar(Scalar::Trit);
+        let local = || hx(HExprKind::Local(tmp), ty, scrut.span);
+        let mut chain = otherwise;
+        for (vals, body) in tests.into_iter().rev() {
+            chain = Some(match chain {
+                None => body, // last arm of a complete enum match
+                Some(rest) => {
+                    let cond = vals
+                        .iter()
+                        .map(|v| {
+                            let k = hx(HExprKind::Word(Word::new(*v)), ty, scrut.span);
+                            hx(HExprKind::Binary(BinOp::Eq, Box::new(local()), Box::new(k)), trit, scrut.span)
+                        })
+                        .reduce(|a, b| hx(HExprKind::Binary(BinOp::Or, Box::new(a), Box::new(b)), trit, scrut.span))
+                        .expect("an arm has at least one pattern");
+                    let trap = HStmt { kind: HStmtKind::Trap("match test is 0 (unknown)".into()), span: scrut.span };
+                    let unknown = HBlock { stmts: vec![trap], scope: vec![], span: scrut.span };
+                    let tri = HStmtKind::Tri { head: cond, arms: Box::new([rest, unknown, body]), origin: Branch::Match };
+                    HBlock { stmts: vec![HStmt { kind: tri, span }], scope: vec![], span }
+                }
+            });
+        }
+        let store = HStmt { kind: HStmtKind::Let { local: tmp, value: h, on_nat: None }, span: scrut.span };
+        let mut stmts = vec![store];
+        if let Some(c) = chain {
+            stmts.push(HStmt { kind: HStmtKind::Block(c), span });
+        }
+        Ok(HStmtKind::Block(HBlock { stmts, scope: vec![], span }))
+    }
+
+    /// The enum type of `e`, if it has one.
+    fn enum_type(&mut self, e: &Expr) -> Option<Type> {
+        self.expr(e, None).ok().map(|h| h.ty).filter(|t| matches!(t, Type::Enum(_)))
     }
 
     /// Like `expr`, but a buffer name is lent so `print`/`printf`/`to_text`
@@ -717,7 +938,8 @@ impl Checker {
                             .with_note("for expressions use `%` and pass them as arguments: `printf(\"%d\", a + b)`"));
                     }
                     let h = self.shown(&Expr { kind: ExprKind::Var(name.to_string()), span: pspan }, None)?;
-                    out.push(piece(spec, &label, h)?);
+                    let (f, h) = piece(spec, &label, h)?;
+                    out.push((f, self.named(h)));
                 }
                 '}' => return Err(err("`}` without a matching `{` in this format", cspan).with_note("write `}}` to print a `}`")),
                 '%' => {
@@ -742,7 +964,8 @@ impl Checker {
                     };
                     flush(&mut lit, &mut out)?;
                     let h = self.shown(a, Some(want))?;
-                    out.push(piece(spec, &label, h)?);
+                    let (f, h) = piece(spec, &label, h)?;
+                    out.push((f, self.named(h)));
                 }
                 _ => lit.push(c),
             }
@@ -773,10 +996,10 @@ impl Checker {
                         pieces.extend(texts.into_iter().map(|h| (Fmt::Plain, h)));
                     } else {
                         let a = self.shown(&args[0], None)?;
-                        if !matches!(a.ty, Type::Scalar(_) | Type::Text | Type::Lent(_)) {
+                        if !matches!(a.ty, Type::Scalar(_) | Type::Text | Type::Lent(_) | Type::Enum(_)) {
                             return Err(err(format!("`{}` prints numbers and text, found {}", name.name, a.ty), a.span));
                         }
-                        pieces.push((Fmt::Plain, a));
+                        pieces.push((Fmt::Plain, self.named(a)));
                     }
                 }
                 if name.name == "printl" {
@@ -828,6 +1051,9 @@ impl Checker {
                     }
                 };
                 let a = self.shown(x, None)?;
+                if fmt == Fmt::Plain && matches!(a.ty, Type::Enum(_)) {
+                    return Ok(self.named(a));
+                }
                 let ok = match fmt {
                     Fmt::Plain => matches!(a.ty, Type::Scalar(_) | Type::Lent(_)),
                     _ => a.ty.is_int() || matches!(a.ty, Type::Lent(_)),
@@ -912,9 +1138,9 @@ fn piece(spec: char, label: &str, h: HExpr) -> R<(Fmt, HExpr)> {
     let ok = match spec {
         'd' | 'i' | 't' | 'v' => ty.is_int() || buffer,
         'f' | 'r' => ty == Type::Scalar(Scalar::Real),
-        's' => ty == Type::Text,
+        's' => matches!(ty, Type::Text | Type::Enum(_)),
         'c' => matches!(ty, Type::Scalar(Scalar::Tryte | Scalar::Trit) | Type::Lent(Elem::Tryte)),
-        _ => matches!(ty, Type::Scalar(_) | Type::Text) || buffer,
+        _ => matches!(ty, Type::Scalar(_) | Type::Text | Type::Enum(_)) || buffer,
     };
     if !ok {
         let wants = match spec {
@@ -931,6 +1157,7 @@ fn piece(spec: char, label: &str, h: HExpr) -> R<(Fmt, HExpr)> {
         let d = err(format!("`{label}` prints {wants}, found {found}"), h.span);
         return Err(match spec {
             'c' if ty.is_int() => d.with_note("cast it: `(tryte) x`"),
+            'd' | 'i' | 't' | 'v' if matches!(ty, Type::Enum(_)) => d.with_note("cast it to read the number: `(int) x`"),
             'd' | 'i' if ty == Type::Scalar(Scalar::Real) => d.with_note("use `%f` for reals, or cast: `(int) x`"),
             'f' | 'r' if ty.is_int() => d.with_note("use `%d` for integers, or cast: `(real) x`"),
             _ => d,
@@ -987,9 +1214,9 @@ proc main() -> int {
     s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
     s = s << 1;
     tri s <=> 10 {
-        - => print("less"),
-        0 => print("equal"),
-        + => print("greater"),
+        - => print("less");
+        0 => print("equal");
+        + => print("greater");
     }
     burn b;
     yield 0;
@@ -1031,15 +1258,15 @@ proc main() -> int {
     fn logic_and_tri() {
         assert!(err_in("x := 1; y := x && x;").contains("`&&` works on trits, found int"));
         ok("a: trit = +; b: trit = 0; c := a && b || -;");
-        assert!(err_in("x := 5; tri x { - => yield, 0 => yield, + => yield, }").contains("`tri` needs a trit"));
-        ok("x := 5; tri x <=> 0 { - => yield, 0 => yield, + => yield, }");
+        assert!(err_in("x := 5; tri x { - => yield; 0 => yield; + => yield; }").contains("`tri` needs a trit"));
+        ok("x := 5; tri x <=> 0 { - => yield; 0 => yield; + => yield; }");
     }
 
     #[test]
     fn names_and_scopes() {
         assert_eq!(err_in("y = 1;"), "unknown name `y`");
         // An inner `x` shadows the outer one only inside its block.
-        let hir = ok("x := 1; t: trit = +; tri t { - => { x := 2; } 0 => yield, + => yield, } x = 3;");
+        let hir = ok("x := 1; t: trit = +; tri t { - => { x := 2; } 0 => yield; + => yield; } x = 3;");
         assert_eq!(hir.procs[0].locals.len(), 3);
         let HStmtKind::Assign { local, .. } = &hir.procs[0].body.stmts[3].kind else { panic!() };
         assert_eq!(*local, 0);
@@ -1097,6 +1324,24 @@ proc main() -> int {
     }
 
     #[test]
+    fn enum_checks() {
+        let e = |src: &str| err_of(src);
+        assert!(e("enum A { X, Y } proc main() { a := A.Z; }").contains("has no value `Z`"));
+        assert!(e("enum A { X, Y = 0 } proc main() {}").contains("both have the value 0"));
+        assert!(e("enum A { X } enum A { Y } proc main() {}").contains("defined twice"));
+        assert!(e("proc main() { c: Cor = 1; }").contains("unknown type `Cor`"));
+        assert!(e("enum A { X } proc main() { a: A = 0; }").contains("expected A, found int"));
+        assert!(e("enum A { X } enum B { Y } proc main() { t: trit = A.X == B.Y; }").contains("cannot compare A with B"));
+        assert!(e("enum A { X } proc main() { printf(\"%d\", A.X); }").contains("cast it"));
+        assert!(e("proc main() { x := 1; y := x.z; }").contains("`x` is not an enum"));
+        assert!(e("proc main() { match 5 { 1 => print(1); } }").contains("needs an `else` arm"));
+        assert!(e("proc main() { match 5 { else => print(1); 1 => print(2); } }").contains("must be the last"));
+        assert!(e("proc main() { match 5 { 1 | 1 => print(1); else => {} } }").contains("already appears"));
+        assert!(e("proc main() { x := 2; match 5 { x => print(1); else => {} } }").contains("must be a literal or an enum value"));
+        assert!(check_src("enum A { X, Y } proc f(a: A) -> A { yield a; } proc main() { b := f(A.Y); print(b); }").is_ok());
+    }
+
+    #[test]
     fn if_checks() {
         ok("x := 1; if x > 0 { print(x); } else if x == 0 { } else { print(-x); }");
         assert!(err_in("x := 1; if x { }").contains("`if` needs a trit, found int"));
@@ -1118,7 +1363,7 @@ proc main() -> int {
     fn final_locals() {
         ok("final x: int = input(); final y := x + 1; print(y);");
         ok("final b: own [int] = claim 3; b[0] = 5; burn b;");
-        ok("final x := 1; tri x <=> 0 { - => {}, 0 => {}, + => { x := 2; print(x); } }");
+        ok("final x := 1; tri x <=> 0 { - => {} 0 => {} + => { x := 2; print(x); } }");
         assert!(err_in("final x := 1; x = 2;").contains("`x` is final and cannot change"));
         assert!(err_in("final x := 1; x += 2;").contains("is final"));
         assert!(err_in("final x := 1; x := 2;").contains("cannot be declared again"));

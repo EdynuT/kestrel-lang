@@ -27,6 +27,7 @@
 | `int` | 27 trits (t27) | −3.812.798.742.493 .. +3.812.798.742.493 |
 | `real` | 27 trits (t27) | ≈ ±10¹⁷⁴, com cerca de 10 dígitos decimais de precisão (§1.5) |
 | `text` | referência | String literal imutável (§1.6) |
+| enum declarado (`Cor`) | 27 trits (t27) | Um dos valores listados na declaração (§8.7) |
 
 Neste documento, `t6` e `t27` indicam larguras. No código-fonte, os tipos se escrevem `tryte` e `int`.
 
@@ -256,14 +257,14 @@ proc main() {
 
 ```
 tri s <=> 10 {
-    - => print("less"),
-    0 => print("equal"),
+    - => print("less");
+    0 => print("equal");
     + => { print("greater"); print(s); }
 }
 ```
 
 - A expressão é do tipo `trit`. Os três ramos são obrigatórios e cada um aparece uma única vez.
-- Um ramo é um comando seguido de `,` ou um bloco `{ }`.
+- Um ramo é um comando terminado em `;` (como qualquer comando) ou um bloco `{ }`.
 - Se a expressão for NaT, ocorre **Trap**.
 
 ### 8.3.1 `if` / `else`
@@ -351,10 +352,10 @@ O formato aceita duas formas de colocar valores, que podem ser misturadas:
 
 | Forma | Imprime | Aceita |
 |---|---|---|
-| `{x}` | Valor normal (decimal ou texto) | número ou `text` |
+| `{x}` | Valor normal (decimal, texto ou nome do enum) | número, `text` ou enum |
 | `%d` ou `%i` | Inteiro em decimal | `trit`, `tryte`, `int` |
 | `%f` ou `%r` | Real | `real` |
-| `%s` | Texto | `text` |
+| `%s` | Texto (ou o nome de um enum) | `text`, enum |
 | `{x:t}` / `%t` | Ternário sem zeros à esquerda: `-5` → `0t-++` | `trit`, `tryte`, `int` |
 | `{x:v}` / `%v` | Heptavintimal sem zeros à esquerda: `100` → `0vDh` | `trit`, `tryte`, `int` |
 | `{x:c}` / `%c` | Caractere (tabela §4) | `trit`, `tryte` (um `int` precisa de cast: `(tryte) x`) |
@@ -363,6 +364,47 @@ O formato aceita duas formas de colocar valores, que podem ser misturadas:
 
 - Tudo é verificado **na compilação**: tipo errado, `%` sem argumento, argumento sobrando ou nome desconhecido é **erro**.
 - `{{`, `}}` e `%%` imprimem `{`, `}` e `%`. Fora do `printf`, esses caracteres são impressos normalmente.
+
+### 8.7 `enum`
+
+```
+enum Cor { Vermelho, Verde, Azul }                 // 0, 1, 2
+enum Http { Ok = 200, NotFound = 404, Teapot }     // 200, 404, 405
+
+c: Cor = Cor.Verde;
+print(c);            // Verde
+print((int) c);      // 1
+if c == Cor.Azul { ... }
+```
+
+- É declarado fora dos `proc`, como o `const`. O valor é escrito `Tipo.Nome`, como em Java.
+- Os números começam em 0 e sobem de 1 em 1. Um valor explícito (`= 200`) reinicia a contagem a partir dele. Dois nomes com o mesmo número são erro.
+- Um valor de enum é guardado como o seu número: não ocupa heap e não precisa de `burn`.
+- Aceita só `==` e `!=` com outro valor do **mesmo** enum. Contas e `<`/`>` são erro de tipo. `(int) c` lê o número.
+- `print(c)`, `{c}`, `%s` e `to_text(c)` mostram o **nome**. Por dentro, cada enum ganha uma função escondida que converte número em nome.
+
+### 8.8 `match`
+
+```
+match c {
+    Cor.Vermelho => print("pare");
+    Cor.Verde => print("siga");
+    Cor.Azul => print("?");
+}
+
+match letra {
+    'a' | 'e' | 'i' | 'o' | 'u' => print("vogal");
+    '0' | '1' => { print("dígito"); }
+    else => print("outro");
+}
+```
+
+- Funciona com inteiros (`trit`, `tryte`, `int`) e enums. Os padrões são literais ou valores de enum; `|` junta vários num braço.
+- Um braço é um comando terminado em `;` ou um bloco `{ }`, como no `tri` e no `switch` com seta do Java 14 (`case 2 -> x = 1;`). Só o primeiro braço que bater executa (não há *fall-through* como no `switch` do C).
+- `else` pega o que sobrar e precisa ser o último braço.
+- Um `match` de enum sem `else` precisa listar **todos** os valores; se faltar algum, é erro de compilação. Um `match` de inteiro sempre precisa de `else`.
+- Repetir um valor em dois braços é erro. Um `match` sobre NaT dispara Trap.
+- Por dentro, vira uma cadeia de `if`/`else`, então as regras de posse são as mesmas.
 
 ## 9. BET-VM
 
@@ -419,11 +461,12 @@ Os saltos usam um **offset absoluto em bytes** (`u32`) dentro do código da pró
 ## 11. Gramática (EBNF)
 
 ```ebnf
-program    = { const_decl | proc_decl } ;
+program    = { const_decl | proc_decl | enum_decl } ;
+enum_decl  = "enum" IDENT "{" [ IDENT [ "=" expr ] { "," IDENT [ "=" expr ] } [ "," ] ] "}" ;
 const_decl = "const" IDENT ":" scalar "=" expr ";" ;
 proc_decl  = "proc" IDENT "(" [ param { "," param } ] ")" [ "->" type ] block ;
 param      = IDENT ":" type ;
-type       = scalar | "text" | ( "own" | "lent" ) "[" elem "]" ;
+type       = scalar | "text" | ( "own" | "lent" ) "[" elem "]" | IDENT ;
 scalar     = "trit" | "tryte" | "int" | "real" ;
 elem       = "tryte" | "int" ;
 
@@ -439,12 +482,13 @@ stmt       = [ "final" ] IDENT ":" type "=" expr [ on_nat ] ";"
            | "if" expr block [ "else" ( block | if_stmt ) ]
            | "walk" IDENT "in" range block
            | "while" expr block
+           | "match" expr "{" { match_arm } "}"
            | io ";"
            | expr ";" ;
 on_nat     = "on" "NaT" block ;
 place      = IDENT [ "[" expr "]" ] ;
 tri_head   = expr ;
-arm        = ( "-" | "0" | "+" ) "=>" ( block | stmt_noterm "," ) ;
+arm        = ( "-" | "0" | "+" ) "=>" ( block | stmt ) ;
 range      = expr ".." expr | "span" expr ;
 io         = "print" "(" expr ")" | "printl" "(" [ expr ] ")" | "emit" "(" expr ")"
            | "printf" "(" STRING { "," expr } ")" | "dump" "(" STRING ")" ;
@@ -458,13 +502,13 @@ mul_expr   = sh_expr  { ( "*" | "/" | "%" ) sh_expr } ;
 sh_expr    = unary { ( "<<" | ">>" ) unary } ;
 unary      = ( "!" | "-" | "(" scalar ")" ) unary | power ;
 power      = postfix [ "**" unary ] ;
-postfix    = primary [ "[" expr "]" ] ;
+postfix    = primary { "[" expr "]" | "." IDENT } ;
+match_arm  = ( expr { "|" expr } | "else" ) "=>" ( block | stmt ) ;
 primary    = literal | IDENT | IDENT "(" [ arg { "," arg } ] ")"
            | "claim" expr | "input" "(" ")" | "len" "(" expr ")" | "(" expr ")" ;
 arg        = [ "give" | "lend" ] expr ;
 ```
 
-`stmt_noterm` é um `stmt` sem o `;` final.
 
 ### Exemplo
 
@@ -487,9 +531,9 @@ proc main() -> int {
     s = s << 1;                    // s = s * 3
 
     tri s <=> 10 {
-        - => print("less"),
-        0 => print("equal"),
-        + => print("greater"),
+        - => print("less");
+        0 => print("equal");
+        + => print("greater");
     }
     burn b;
     yield 0;

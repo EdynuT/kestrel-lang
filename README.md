@@ -24,9 +24,9 @@ proc main() -> int {
     s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
 
     tri s <=> 10 {                 // three-way branch
-        - => print("less"),
-        0 => print("equal"),
-        + => print("greater"),
+        - => print("less");
+        0 => print("equal");
+        + => print("greater");
     }
     burn b;                        // zero the memory and free it, exactly once
     yield 0;

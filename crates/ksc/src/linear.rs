@@ -188,10 +188,15 @@ impl Checker<'_> {
                 self.outer_unchanged(&l.entry, &st, &l.inner, s.span)?;
                 return Ok(None);
             }
-            HStmtKind::Tri { head, arms, from_if } => {
+            HStmtKind::Block(b) => return self.block(b, st),
+            HStmtKind::Tri { head, arms, origin } => {
                 self.expr(head, &mut st)?;
                 let mut ends: Vec<(&str, State)> = Vec::new();
-                let labels = if *from_if { ["`else` branch", "", "`if` branch"] } else { ["`-` arm", "`0` arm", "`+` arm"] };
+                let labels = match origin {
+                    Branch::Tri => ["`-` arm", "`0` arm", "`+` arm"],
+                    Branch::If => ["`else` branch", "", "`if` branch"],
+                    Branch::Match => ["a later arm", "", "this arm"],
+                };
                 for (label, arm) in labels.into_iter().zip(arms.iter()) {
                     if let Some(end) = self.block(arm, st.clone())? {
                         ends.push((label, end));
@@ -204,7 +209,11 @@ impl Checker<'_> {
                     if let Some(id) = (0..first.len()).find(|&i| !first[i].agrees(other[i])) {
                         let detail: Vec<String> =
                             ends.iter().map(|(label, s)| format!("{label}: {}", s[id].describe())).collect();
-                        let what = if *from_if { "the branches of this `if`" } else { "the arms of this `tri`" };
+                        let what = match origin {
+                            Branch::Tri => "the arms of this `tri`",
+                            Branch::If => "the branches of this `if`",
+                            Branch::Match => "the arms of this `match`",
+                        };
                         return Err(Diagnostic::new(
                             format!("{what} leave `{}` in different states", self.name(id)),
                             s.span,
@@ -348,7 +357,7 @@ proc main() -> int {
     walk i in span 2 { b[i] = i * i; }
     s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
     s = s << 1;
-    tri s <=> 10 { - => print("less"), 0 => print("equal"), + => print("greater"), }
+    tri s <=> 10 { - => print("less"); 0 => print("equal"); + => print("greater"); }
     burn b;
     yield 0;
 }"#;
@@ -392,14 +401,14 @@ proc main() -> int {
 
     #[test]
     fn tri_symmetry() {
-        ok("b: own [int] = claim 3; t: trit = +; tri t { - => burn b, 0 => burn b, + => take(give b), }");
-        assert!(err("b: own [int] = claim 3; t: trit = +; tri t { - => burn b, 0 => burn b, + => take(give b), } b = claim 1; burn b;")
+        ok("b: own [int] = claim 3; t: trit = +; tri t { - => burn b; 0 => burn b; + => take(give b); }");
+        assert!(err("b: own [int] = claim 3; t: trit = +; tri t { - => burn b; 0 => burn b; + => take(give b); } b = claim 1; burn b;")
             .contains("only be reused after `burn`"));
         ok("b: own [int] = claim 3; t: trit = +; tri t { - => { burn b; yield; } 0 => {} + => {} } burn b;");
-        let e = err("b: own [int] = claim 3; t: trit = +; tri t { - => burn b, 0 => {} + => burn b, }");
+        let e = err("b: own [int] = claim 3; t: trit = +; tri t { - => burn b; 0 => {} + => burn b; }");
         assert!(e.contains("leave `b` in different states"), "{e}");
         assert!(e.contains("`-` arm: burned, `0` arm: still owned, `+` arm: burned"), "{e}");
-        assert!(err("b: own [int] = claim 3; t: trit = +; tri t { - => yield, 0 => burn b, + => burn b, }").contains("when the proc yields"));
+        assert!(err("b: own [int] = claim 3; t: trit = +; tri t { - => yield; 0 => burn b; + => burn b; }").contains("when the proc yields"));
     }
 
     #[test]

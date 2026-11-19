@@ -13,6 +13,14 @@ pub struct Program {
 pub enum Item {
     Const(ConstDecl),
     Proc(ProcDecl),
+    Enum(EnumDecl),
+}
+
+/// `enum Name { A, B = 5, C }`: values count up from 0, or from the last explicit one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnumDecl {
+    pub name: Ident,
+    pub variants: Vec<(Ident, Option<Expr>)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -63,9 +71,17 @@ pub enum Type {
     Text,
     Own(Elem),
     Lent(Elem),
+    /// A declared enum, by name (interned: types stay `Copy`).
+    Enum(&'static str),
     /// No value: the result of `print(...)` or of a proc without `->`.
     /// Only produced by the checker, never by the parser.
     Void,
+}
+
+/// Leaks `s` so it can live in a `Copy` type. The compiler runs once per
+/// process, so the few enum names it leaks do not matter.
+pub fn intern(s: &str) -> &'static str {
+    Box::leak(s.to_string().into_boxed_str())
 }
 
 impl Scalar {
@@ -120,6 +136,7 @@ impl std::fmt::Display for Type {
             Type::Text => f.write_str("text"),
             Type::Own(e) => write!(f, "own [{}]", e.scalar()),
             Type::Lent(e) => write!(f, "lent [{}]", e.scalar()),
+            Type::Enum(name) => f.write_str(name),
             Type::Void => f.write_str("no value"),
         }
     }
@@ -128,6 +145,14 @@ impl std::fmt::Display for Type {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TypeExpr {
     pub ty: Type,
+    pub span: Span,
+}
+
+/// One `match` arm; no patterns means `else`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MatchArm {
+    pub pats: Vec<Expr>,
+    pub body: Block,
     pub span: Span,
 }
 
@@ -165,6 +190,8 @@ pub enum StmtKind {
     /// `if cond { } else { }`; `else if` is an `else` block holding one `If`.
     If { cond: Expr, then: Block, otherwise: Option<Block> },
     Walk { var: Ident, range: Range, body: Block },
+    /// `match e { A | B => ..., else => ... }`
+    Match { scrut: Expr, arms: Vec<MatchArm> },
     /// `while cond { }`
     While { cond: Expr, body: Block },
     Expr(Expr),
@@ -205,6 +232,8 @@ pub enum ExprKind {
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Cast(Box<Expr>, Scalar),
     Index(Box<Expr>, Box<Expr>),
+    /// `base.name`: for now only enum values, `Cor.Verde`.
+    Member(Box<Expr>, Ident),
     Call { name: Ident, args: Vec<Expr> },
     Claim(Box<Expr>),
     Give(Ident),

@@ -521,7 +521,23 @@ impl Parser {
     fn for_stmt(&mut self) -> PResult<StmtKind> {
         self.expect(Tok::For)?;
         let start = self.span();
-        let init = if self.at_declaration() { self.let_stmt()? } else { self.expr_or_assign()? };
+        // The counter is always declared here, with its type, so it lives only
+        // inside the loop: `for i: int = 0; ...`.
+        let typed = matches!((self.peek(), self.peek_at(1)), (Tok::Ident(_), Tok::Colon));
+        if !typed {
+            let note = match (self.peek(), self.peek_at(1)) {
+                (_, Tok::ColonEq) => "`:=` is not allowed here: write the type, as in `for i: int = 0; ...`".to_string(),
+                (_, Tok::Eq) => {
+                    "a `for` cannot reuse an outside variable: declare a new one, as in `for i: int = 0; ...`".to_string()
+                }
+                (Tok::Ident(n), Tok::Semi) => {
+                    format!("`{n}` alone declares nothing; to start from its value: `for i: int = {n}; ...`")
+                }
+                _ => "e.g. `for i: int = 0; i < 10; i++ { ... }`".to_string(),
+            };
+            return Err(Diagnostic::new("`for` must start by declaring its counter with a type", start).with_note(note));
+        }
+        let init = self.let_stmt()?;
         let init = Stmt { kind: init, span: start.to(self.tokens[self.pos - 1].span) };
         self.expect(Tok::Semi)?;
         let cond = self.head_expr()?;

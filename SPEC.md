@@ -34,14 +34,17 @@ Neste documento, `t6` e `t27` indicam larguras. No código-fonte, os tipos se es
 ### 1.3 NaT (veneno)
 
 - O NaT vale para a **palavra inteira**. Basta um trit `?` para a palavra toda ser NaT.
-- Qualquer operação com um operando NaT produz NaT.
+- **Uma conta que falha para o programa (Trap)**, com uma mensagem que diz o motivo: overflow, divisão por zero, cast fora do intervalo, `to_int` de texto inválido. Como uma exceção não tratada no Java.
+- **Exceto numa linha com `on NaT`** (§8.5). Ali a conta que falha produz NaT, qualquer operação com NaT também produz NaT (o veneno se espalha), e o bloco do `on NaT` trata o erro. Isso vale só para as contas escritas na própria linha: um proc chamado dela continua parando o programa.
+- Um proc pode avisar que falhou de propósito com `yield NaT;`, como retornar `null`. Quem chama trata com `on NaT`.
+- Usar um valor NaT numa conta fora de uma linha com `on NaT` também dispara Trap.
 - Na fonte, o NaT se escreve com a palavra-chave `NaT` ou com qualquer literal que contenha `?`.
 
 ### 1.4 Conversões
 
 - A **ampliação** `trit → t6 → t27` é implícita e não perde informação.
-- O **estreitamento** exige um *cast* no estilo C: `(tryte) x`, `(trit) x`. Um valor fora do intervalo vira **NaT**.
-- A conversão entre `int` e `real` é **sempre explícita**. `(real) x` arredonda para o valor mais próximo, e `(int) r` trunca em direção a zero (fora do intervalo vira NaT).
+- O **estreitamento** exige um *cast* no estilo C: `(tryte) x`, `(trit) x`. Um valor fora do intervalo é uma conta que falha (§1.3).
+- A conversão entre `int` e `real` é **sempre explícita**. `(real) x` arredonda para o valor mais próximo, e `(int) r` trunca em direção a zero (fora do intervalo, falha).
 
 ### 1.5 `real` (ponto flutuante ternário)
 
@@ -53,7 +56,7 @@ valor = (mantissa / 3²⁰) × 3^expoente
 - A mantissa é **normalizada**: o trit mais significativo é sempre `-` ou `+`, exceto no zero. Não há trit de sinal, porque o sinal está na própria mantissa.
 - O expoente é um `tryte`, de −364 a +364.
 - O arredondamento é sempre para o valor mais próximo, que é o efeito natural de descartar trits.
-- Overflow e divisão por zero produzem **NaT**. **Não existe infinito.** Um underflow vira 0.
+- Overflow e divisão por zero são contas que falham (§1.3). **Não existe infinito.** Um underflow vira 0.
 - Frações de 3 são exatas: `1.0 / 3.0` não tem erro de arredondamento.
 
 ### 1.6 `text` (string)
@@ -64,7 +67,7 @@ valor = (mantissa / 3²⁰) × 3^expoente
 - `a + b` cria um texto novo: `saudacao := "Olá, " + nome + "!";`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo** (use `to_text(5)`).
 - `a == b` e `a != b` comparam caractere por caractere. `<` e `>` não valem para textos.
 - `sub(s, início, fim)` devolve os caracteres de `início` até `fim - 1`, como o `substring` do Java: `sub("Kestrel", 0, 3)` é `"Kes"`. Fora de `0 ≤ início ≤ fim ≤ len(s)` dispara **Trap**.
-- `to_int(s)` e `to_real(s)` leem um número (`"123"`, `"-7"`, `"0t+0-"`, `"2.5"`). Texto inválido vira **NaT**.
+- `to_int(s)` e `to_real(s)` leem um número (`"123"`, `"-7"`, `"0t+0-"`, `"2.5"`). Texto inválido é uma conta que falha (§1.3): use `on NaT` para tratar.
 - `is_digit(c)`, `is_letter(c)`, `is_upper(c)`, `is_lower(c)` e `is_space(c)` dizem (`+`/`-`) se um `tryte` é dígito, letra (com acentos), maiúscula, minúscula ou espaço (`' '`, `\n`, `\t`).
 - Cada caractere precisa existir na tabela §4. Um caractere fora dela, como `&` ou `ñ`, é **erro de compilação**.
 - `to_text(x)` cria um texto novo a partir de um número (§8.6). Todo texto criado com o programa rodando (`+`, `sub`, `to_text`) dura até o fim do programa (limite de 2²⁴ caracteres no total). Para montar texto caractere por caractere, use um array de `tryte`, como um array de `char` em C.
@@ -105,7 +108,7 @@ Em ordem de precedência, da menor para a maior:
 | 7 | `!` `-` (unário), `(T)` | Negação lógica (`trit`), negação numérica e cast |
 | 8 | `**` | Potência, associativa à direita (`2 ** 3 ** 2 = 2 ** 9`) |
 
-Regras:
+Regras (onde se lê "produz NaT", fora de uma linha com `on NaT` a conta para o programa: §1.3):
 
 - **Overflow** além da largura do tipo resultante produz **NaT**. Não existe wrap-around.
 - **`/`** trunca em direção a zero. Divisão por zero produz NaT.
@@ -113,7 +116,7 @@ Regras:
 - **`>>`** descarta os trits inferiores, o que equivale a arredondar para o inteiro mais próximo. Exemplo: `2 >> 1 = 1`, enquanto `2 / 3 = 0`.
 - **`<<`** produz NaT se algum trit não nulo passar da largura do tipo. Com `k ≥ 27`, o resultado é `0` se o operando for 0 e NaT caso contrário. Com `k < 0` ou `k` NaT, o resultado é NaT.
 - **`!x`** inverte um `trit` (`!+ = −`, `!0 = 0`). Sobre números é erro de tipo; use `-x`. Os dois compilam para o mesmo opcode `NEG`, porque em ternário balanceado negar é inverter cada trit.
-- As **comparações** aceitam números do mesmo tipo (`int` com `real` exige cast). Se um lado for NaT, o resultado é NaT. Comparar textos chega na 0.4.
+- As **comparações** aceitam números do mesmo tipo (`int` com `real` exige cast). Se um lado for NaT, o resultado é NaT. Textos aceitam só `==` e `!=`.
 - **`**`** aceita `int ** int` e `real ** int`. O expoente é sempre `int`. Um expoente negativo em `int` produz NaT, e `0 ** 0 = 1`. Como em Python, `-2 ** 2 = -(2 ** 2) = -4`.
 - **`real`** aceita `+ - * / **`, as comparações e o `-` unário. Os operadores `%`, `<<`, `>>`, `&&` e `||` sobre `real` são **erro de tipo**, assim como misturar `int` e `real` numa conta sem cast. Não há promoção automática como no C: escreva `(real) a / (real) b`.
 - **`&&`** e **`||`** têm **curto-circuito**, como em Java: o lado direito só é avaliado se puder mudar o resultado. `- && x` é `−` e `+ || x` é `+` sem avaliar `x`, então `- && NaT = −`. Com `0` ou NaT à esquerda, o lado direito é avaliado (`NaT && x = NaT`). Os operandos são do tipo `trit`. Usar `tryte` ou `int` é **erro de tipo**; compare primeiro (`x > 0 && y > 0`).
@@ -142,11 +145,12 @@ Regras:
 | −27 .. −53 | `\n` `\t` `.` `,` `:` `;` `!` `?` `-` `+` `/` `_` `=` `(` `)` `[` `]` `*` `<` `>` `@` `#` `%` `{` `}` `"` `'` |
 | +54 .. +65 | `Á` `À` `Â` `Ã` `É` `Ê` `Í` `Ó` `Ô` `Õ` `Ú` `Ç` |
 | −54 .. −65 | `á` `à` `â` `ã` `é` `ê` `í` `ó` `ô` `õ` `ú` `ç` (`-'Á' == 'á'`) |
+| −66 .. −72 | `\|` `&` `\` `~` `^` `` ` `` `$` |
 | demais | reservados. `emit` imprime `�` |
 
-Atribuição exata da faixa de pontuação: −27 `\n`, −28 `\t`, −29 `.`, −30 `,`, −31 `:`, −32 `;`, −33 `!`, −34 `?`, −35 `-`, −36 `+`, −37 `/`, −38 `_`, −39 `=`, −40 `(`, −41 `)`, −42 `[`, −43 `]`, −44 `*`, −45 `<`, −46 `>`, −47 `@`, −48 `#`, −49 `%`, −50 `{`, −51 `}`, −52 `"`, −53 `'`.
+Atribuição exata da faixa de pontuação: −27 `\n`, −28 `\t`, −29 `.`, −30 `,`, −31 `:`, −32 `;`, −33 `!`, −34 `?`, −35 `-`, −36 `+`, −37 `/`, −38 `_`, −39 `=`, −40 `(`, −41 `)`, −42 `[`, −43 `]`, −44 `*`, −45 `<`, −46 `>`, −47 `@`, −48 `#`, −49 `%`, −50 `{`, −51 `}`, −52 `"`, −53 `'`; e −66 `|`, −67 `&`, −68 `\`, −69 `~`, −70 `^`, −71 `` ` ``, −72 `$`.
 
-Dentro de textos e caracteres, `"` e `'` são escritos como `\"` e `\'`. Os escapes aceitos são `\n`, `\t`, `\"` e `\'`.
+Dentro de textos e caracteres, `"` e `'` são escritos como `\"` e `\'`. Os escapes aceitos são `\n`, `\t`, `\"`, `\'` e `\\` (a própria barra).
 
 ---
 
@@ -224,7 +228,7 @@ Erros de compilação:
 
 | Classe | Causas | Efeito |
 |---|---|---|
-| **NaT** (dado) | Overflow, divisão por zero, cast fora do intervalo, `input` inválido | O valor vira NaT e pode ser interceptado por `on NaT` |
+| **Conta que falha** | Overflow, divisão por zero, cast fora do intervalo, `to_int`/`to_real`/`input` inválido, conta com NaT | Trap com o motivo. Numa linha com `on NaT`, o valor vira NaT e o bloco trata |
 | **Trap** (estrutura) | `claim` inválido, índice fora dos limites, `tri`/`if`/`while` sobre NaT, `if`/`while` sobre `0`, limite de `walk` NaT, ponteiro inválido, `burn` duplo | A VM **zera todo o heap e os registradores** e aborta com código ≠ 0 |
 
 ## 8. Sintaxe
@@ -338,15 +342,16 @@ while + { ... }            // laço infinito; saia com `break` ou `yield`
 ### 8.4.2 `for`
 
 ```
-for i := 0; i < len(arr); i++ {     // começo; condição; passo
+for i: int = 0; i < len(arr); i++ {     // começo; condição; passo
     print(arr[i]);
 }
-for i := -1; i <= 1; i++ { ... }     // array sym
-for i := 10; i > 0; i -= 2 { ... }   // passo de -2
+for i: int = -1; i <= 1; i++ { ... }     // array sym
+for i: int = 10; i > 0; i -= 2 { ... }   // passo de -2
 ```
 
 - É o `for` do Java sem os parênteses, como o do Go. As três partes são separadas por `;`.
-- **Começo:** declara (`i := 0`) ou atribui (`i = 0`) uma variável. Uma variável declarada aqui só existe dentro do laço.
+- **Começo:** sempre declara o contador com o tipo escrito (`i: int = 0`). `:=` e reaproveitar uma variável de fora (`i = 0`) são erros.
+- **Escopo:** o contador e tudo o que é declarado no corpo só existem dentro do laço, como em qualquer bloco `{ }`.
 - **Condição:** um `trit`, testado antes de cada volta, com as regras do `while` (`0` e NaT disparam Trap).
 - **Passo:** muda uma variável (`i++`, `i += 2`, `i = i * 3`). Roda depois do corpo e também no `continue`.
 - `walk` continua existindo para intervalos simples (`walk i in 0..9`).
@@ -357,8 +362,10 @@ for i := 10; i > 0; i -= 2 { ... }   // passo de -2
 s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
 ```
 
+- É o `try/catch` do Kestrel, preso a uma linha. Enquanto a expressão é calculada, uma conta que falha produz NaT em vez de parar o programa.
 - Se a expressão não for NaT, `s` recebe o valor.
 - Caso contrário, executa o bloco, que precisa divergir (`yield`, `break` ou `continue`).
+- Só as contas da própria linha são tratadas. Se um proc chamado nela falhar, o programa para; para avisar quem chamou, o proc usa `yield NaT;`.
 - Depois do `;`, `s` com certeza não é NaT.
 
 ### 8.6 E/S
@@ -373,8 +380,16 @@ s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
 | `to_text(x)` | Converte um número em `text`, em decimal: `to_text(-5)` → `"-5"`, `to_text(1.5)` → `"1.5"`. Com um buffer, gera `"[-8 -1 0 1 8]"` |
 | `to_text(x, 't')` / `to_text(x, 'v')` | Converte um inteiro em `text` ternário (`"0t-++"`) ou heptavintimal (`"0ve"`), como o `Integer.toString(x, base)` do Java |
 | `emit(c)` | Imprime um `tryte` como caractere (tabela §4) |
-| `input()` | Lê um `int` (decimal, `0t` ou `0v`). Entrada inválida vira NaT |
+| `input()` | Lê um `int` (decimal, `0t` ou `0v`). Entrada inválida é uma conta que falha |
 | `dump("label")` | Mostra os registradores e o heap |
+| `read_file(caminho)` | O arquivo inteiro como `text`. Se não puder ler, **Trap** |
+| `file_exists(caminho)` | `+` se o arquivo existe e pode ser lido |
+| `write_file(caminho, texto)` | Grava o texto (UTF-8), substituindo o arquivo |
+| `write_bytes(caminho, arr)` | Grava cada célula de um array como um byte. Célula fora de `0..255` dispara **Trap** |
+| `read_line()` | Uma linha da entrada padrão, sem o `\n`. No fim da entrada, devolve `""` |
+| `eof()` | `+` se a entrada padrão acabou |
+| `arg_count()` / `arg(i)` | Argumentos do programa: `ksvm prog.ksb a b c` dá `arg(0) == "a"` |
+| `exit(código)` | Encerra o programa com esse código de saída. É um comando que não volta, como `yield`: um `proc` pode terminar nele |
 
 #### 8.6.1 `printf`
 
@@ -473,9 +488,10 @@ Todos os limites são potências de 3. Os de parâmetros e variáveis também ca
 | ALU (real) | `FADD`, `FSUB`, `FMUL`, `FDIV`, `FPOW`, `FNEG`, `FCMP3` |
 | Texto | `PUSHS k`, `TLEN`, `TIDX`, `TSTR`, `TSTRT`, `TSTRV` (número → texto), `TCAT`, `TEQ`, `TSUB`, `TTOI`, `TTOF`, `CHARIS k` |
 | Largura | `NARROW6`, `NARROW1`, `ITOF`, `FTOI` (overflow vira NaT) |
+| Modo das falhas | `SOFT` (contas que falham produzem NaT; emitido antes do valor de uma linha com `on NaT`), `HARD` (volta ao padrão: Trap). Cada proc começa em `HARD` |
 | Memória | `ALLOC` (sym), `ALLOCZ` (a partir de 0), `PACK n sym` (literal `{...}`), `LDIDX`, `STIDX`, `PURGE s` |
 | Fluxo | `JMP a`, `JNAT a`, `BR3 a- a0 a+`, `CALL f n`, `RET`, `TRAP str` |
-| E/S | `INPUT`, `EMIT`, `PRINT`, `SHOW`, `SHOWT` (`0t`), `SHOWV` (`0v`), `DUMP str` |
+| E/S | `INPUT`, `EMIT`, `PRINT`, `SHOW`, `SHOWT` (`0t`), `SHOWV` (`0v`), `DUMP str`, `READF`, `FEXISTS`, `WRITEF`, `WRITEB`, `READLN`, `EOF`, `ARGC`, `ARG`, `EXIT` |
 
 **Codificação:** cada instrução tem 1 byte de opcode seguido de operandos de tamanho fixo, em little-endian. Os tipos são `k`, `f` e `a` (`u32`), `s` (`u16`) e `n` (`u8`). As faixas são: pilha `0x0_`, ALU inteira `0x1_`, ALU real `0x2_`, texto e conversão `0x3_`, memória `0x4_`, fluxo `0x5_` e E/S `0x6_`. A tabela completa está em `crates/kestrel-core/src/isa.rs`.
 
@@ -535,7 +551,7 @@ stmt       = [ "final" ] IDENT ":" type "=" expr [ on_nat ] ";"
            | "if" expr block [ "else" ( block | if_stmt ) ]
            | "walk" IDENT "in" range block
            | "while" expr block
-           | "for" ( decl | assign ) ";" expr ";" assign block
+           | "for" IDENT ":" type "=" expr ";" expr ";" assign block
            | "match" expr "{" { match_arm } "}"
            | io ";"
            | expr ";" ;

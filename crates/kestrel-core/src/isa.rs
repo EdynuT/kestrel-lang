@@ -42,6 +42,10 @@ pub enum Op {
     /// Turns a `cmp3` result into a trit: bit 0/1/2 of the mask is the answer
     /// for `-`/`0`/`+` (set = `+`, clear = `-`). NaT stays NaT.
     Test(u8),
+    /// Inside an `on NaT` line: failed arithmetic gives NaT instead of a trap.
+    Soft,
+    /// Back to the default: failed arithmetic traps.
+    Hard,
 
     // Real ALU
     FAdd,
@@ -113,6 +117,25 @@ pub enum Op {
     ShowV,
     /// Print registers and heap, labeled with string `k`.
     Dump(u32),
+    // Files, standard input and arguments
+    /// Pop a path, push the file's contents as text (Trap if it cannot be read).
+    ReadFile,
+    /// Pop a path, push `+` if it is a readable file.
+    FileExists,
+    /// Pop text, path: write the text (UTF-8) to the file.
+    WriteFile,
+    /// Pop array, path: write each cell (0..255) as one byte.
+    WriteBytes,
+    /// Push one line of standard input, without its newline (empty at the end).
+    ReadLine,
+    /// Push `+` if standard input has nothing left.
+    Eof,
+    /// Push the number of program arguments.
+    ArgCount,
+    /// Pop i, push argument i as text.
+    Arg,
+    /// Pop a code and stop the program with it.
+    Exit,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -158,6 +181,8 @@ impl Op {
             KAnd => 0x1a,
             KOr => 0x1b,
             Test(_) => 0x1c,
+            Soft => 0x1d,
+            Hard => 0x1e,
 
             FAdd => 0x20,
             FSub => 0x21,
@@ -204,6 +229,15 @@ impl Op {
             Dump(_) => 0x64,
             ShowT => 0x65,
             ShowV => 0x66,
+            ReadFile => 0x67,
+            FileExists => 0x68,
+            WriteFile => 0x69,
+            WriteBytes => 0x6a,
+            ReadLine => 0x6b,
+            Eof => 0x6c,
+            ArgCount => 0x6d,
+            Arg => 0x6e,
+            Exit => 0x6f,
         }
     }
 
@@ -231,6 +265,8 @@ impl Op {
             KAnd => "kand",
             KOr => "kor",
             Test(_) => "test",
+            Soft => "soft",
+            Hard => "hard",
             FAdd => "fadd",
             FSub => "fsub",
             FMul => "fmul",
@@ -271,6 +307,15 @@ impl Op {
             Show => "show",
             ShowT => "showt",
             ShowV => "showv",
+            ReadFile => "readf",
+            FileExists => "fexists",
+            WriteFile => "writef",
+            WriteBytes => "writeb",
+            ReadLine => "readln",
+            Eof => "eof",
+            ArgCount => "argc",
+            Arg => "arg",
+            Exit => "exit",
             Dump(_) => "dump",
         }
     }
@@ -343,6 +388,8 @@ impl Op {
                 m @ 0..=7 => Test(m),
                 _ => return Err(DecodeError::BadOpcode { at, byte }),
             },
+            0x1d => Soft,
+            0x1e => Hard,
             0x20 => FAdd,
             0x21 => FSub,
             0x22 => FMul,
@@ -394,6 +441,15 @@ impl Op {
             0x64 => Dump(r.u32()?),
             0x65 => ShowT,
             0x66 => ShowV,
+            0x67 => ReadFile,
+            0x68 => FileExists,
+            0x69 => WriteFile,
+            0x6a => WriteBytes,
+            0x6b => ReadLine,
+            0x6c => Eof,
+            0x6d => ArgCount,
+            0x6e => Arg,
+            0x6f => Exit,
             _ => return Err(DecodeError::BadOpcode { at, byte }),
         };
         Ok((op, r.pos - at))
@@ -476,12 +532,13 @@ mod tests {
         use Op::*;
         vec![
             PushC(7), PushR(70_000), PushS(0), Load(4), Store(9), Move(0), Pop,
-            Add, Sub, Mul, Div, Mod, Pow, Neg, Shl3, Shr3, Cmp3, KAnd, KOr, Test(0b101), Trap(4),
+            Add, Sub, Mul, Div, Mod, Pow, Neg, Shl3, Shr3, Cmp3, KAnd, KOr, Test(0b101), Soft, Hard, Trap(4),
             FAdd, FSub, FMul, FDiv, FPow, FNeg, FCmp3,
             TLen, TIdx, Narrow6, Narrow1, IToF, FToI, TStr, TStrT, TStrV, TCat, TEq, TSub, TToI, TToF, CharIs(2),
             Alloc, LdIdx, StIdx, Purge(8), AllocZ, Pack { n: 3, sym: true },
             Jmp(12), JNat(u32::MAX), Br3 { neg: 1, zero: 2, pos: 3 }, Call { f: 2, argc: 3 }, Ret,
             Input, Emit, Print, Show, Dump(5), ShowT, ShowV,
+            ReadFile, FileExists, WriteFile, WriteBytes, ReadLine, Eof, ArgCount, Arg, Exit,
         ]
     }
 

@@ -178,6 +178,11 @@ impl Checker<'_> {
             }
             // A trap zeroes the heap, so buffers still alive here are fine.
             HStmtKind::Trap(_) => return Ok(None),
+            // The program ends: arrays still alive are freed with it.
+            HStmtKind::Exit(code) => {
+                self.expr(code, &mut st)?;
+                return Ok(None);
+            }
             HStmtKind::Break | HStmtKind::Continue => {
                 let word = if s.kind == HStmtKind::Break { "break" } else { "continue" };
                 let l = self.loops.last().expect("sema rejects break outside walk");

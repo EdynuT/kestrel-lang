@@ -64,7 +64,7 @@ proc main() {
     print("\n");
 
     arr[]: int = {1, 2, 3, 4};
-    for i := 0; i < len(arr); i++ {
+    for i: int = 0; i < len(arr); i++ {
         printf("%d ", arr[i]);
     }
     burn arr;

@@ -19,7 +19,7 @@ hoje:  programa.ks ──[ksc em Rust]──────────────
 | 0.4 | **Textos e E/S:** comparar, cortar, montar e converter textos, classificar caracteres, ler arquivo e stdin, escrever bytes, argumentos de linha de comando, `exit` | |
 | 0.5 | **Dados:** `struct` (só dados), buffers de structs, buffer que cresce | |
 | 0.6 | **Classes:** `class` com métodos, `private`/`public`, interfaces (sem herança), anotações (`@impl`, `@test`, `@deprecated`) | |
-| 0.7 | **Ferramentas:** módulos (`use`), traceback com linha do `.ks`, `assert`, biblioteca padrão escrita em Kestrel (lista, hash map, hash set, funções de texto) | |
+| 0.7 | **Ferramentas:** módulos (`use`), traceback com linha do `.ks`, `assert`, biblioteca padrão mínima escrita em Kestrel (lista, hash map, hash set, funções de texto) | |
 | 0.8 | `ksc.ks`: lexer e parser | |
 | 0.9 | `ksc.ks`: verificação de tipos e de posse, gerador de código e escrita do `.ksb` | |
 | **1.0** | Bootstrap: o teste abaixo passa | |
@@ -37,6 +37,11 @@ A biblioteca padrão da 0.7 e o `ksc.ks` (0.8 e 0.9) são escritos como **aulas*
 - **Sem toques de assembly** (removidos na 0.3: `@R`, `add d, s;`, `tri cmp3`), porque eram só outra forma de escrever. Se um dia for preciso acesso real às instruções da ksvm, a ideia é um bloco `asm { }` isolado, depois da 1.0.
 - **Dois tipos de array** (0.3): `x[]: int` com índices `0..N-1` e `sym x[]: int` com índices `-k..+k`. Os colchetes ficam no nome; `{1, 2, 3}` é o literal; parâmetros usam `lent`/`own` como modificador.
 - **Hash map e hash set** são biblioteca escrita em Kestrel, não parte da linguagem.
+- **Primitivas × biblioteca:** só vira instrução da ksvm o que a linguagem não consegue fazer sozinha (arquivos, stdin, argumentos, hora, número aleatório). Todo o resto (math, logging, lista, hash map, funções de texto) é biblioteca escrita em Kestrel.
+- **A biblioteca padrão é feita em duas fases:**
+  - **Antes da 1.0:** só o que o `ksc.ks` usa: lista que cresce, hash map, montar textos, ler arquivo, erros com mensagem.
+  - **Depois da 1.0:** math completo, logging, data e hora, números aleatórios e o que mais aparecer.
+- **Erros:** uma conta que falha (overflow, divisão por zero, `to_int` inválido) dispara Trap com o motivo, e `on NaT` trata o erro na própria linha. `try`/`catch` completo, com o erro subindo de um proc para quem chamou, fica para depois da 1.0, se ainda fizer falta.
 - **Orientação a dados:** a árvore do compilador fica num buffer de nós ligados por índice, sem ponteiros dentro de dados.
 
 ## Como cada parte do `ksc.ks` é validada
@@ -51,6 +56,12 @@ Cada parte é comparada com o `ksc` em Rust, que serve de referência. Para os m
 4. `ksc2.ksb` e `ksc3.ksb` são **idênticos byte a byte**.
 
 Depois da 1.0, o `ksc` em Rust continua no repositório como referência e para iniciar o bootstrap numa máquina nova.
+
+## Depois da 1.0
+
+- Biblioteca padrão completa: math, logging, data e hora, números aleatórios.
+- `try`/`catch` completo, se o `on NaT` não bastar.
+- Bloco `asm { }` para acesso direto às instruções da ksvm.
 
 ## Versões e tags
 

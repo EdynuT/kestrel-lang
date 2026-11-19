@@ -82,6 +82,8 @@ pub enum HStmtKind {
     While { cond: HExpr, body: HBlock, step: Option<HBlock> },
     /// Stop the program with a trap carrying this reason.
     Trap(String),
+    /// `exit(code);`: stop the program normally with this exit code.
+    Exit(HExpr),
     /// `walk var in start..end`. Bounds are evaluated once into hidden locals;
     /// for `span k`, `k` is first stored in `span_tmp`.
     Walk {
@@ -116,6 +118,14 @@ pub enum Builtin {
     ToReal,
     /// `is_digit(c)` etc.: index into `charset::Class::ALL`.
     CharIs(u8),
+    ReadFile,
+    FileExists,
+    WriteFile,
+    WriteBytes,
+    ReadLine,
+    Eof,
+    ArgCount,
+    Arg,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,7 +179,7 @@ impl HBlock {
     /// True if control never reaches the end of the block.
     pub fn diverges(&self) -> bool {
         self.stmts.last().is_some_and(|s| match &s.kind {
-            HStmtKind::Yield(_) | HStmtKind::Break | HStmtKind::Continue | HStmtKind::Trap(_) => true,
+            HStmtKind::Yield(_) | HStmtKind::Break | HStmtKind::Continue | HStmtKind::Trap(_) | HStmtKind::Exit(_) => true,
             HStmtKind::Tri { arms, .. } => arms.iter().all(HBlock::diverges),
             HStmtKind::Block(b) => b.diverges(),
             _ => false,

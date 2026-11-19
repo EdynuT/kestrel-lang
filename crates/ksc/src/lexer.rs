@@ -354,9 +354,10 @@ impl Lexer<'_> {
                 Some('t') => '\t',
                 Some('"') => '"',
                 Some('\'') => '\'',
+                Some('\\') => '\\',
                 other => {
                     let shown = other.map_or(String::new(), |c| c.to_string());
-                    return Err(self.err(format!("unknown escape `\\{shown}`"), c_start).with_note("escapes are `\\n`, `\\t`, `\\\"` and `\\'`"));
+                    return Err(self.err(format!("unknown escape `\\{shown}`"), c_start).with_note("escapes are `\\n`, `\\t`, `\\\"`, `\\'` and `\\\\`"));
                 }
             },
             Some(c) => c,
@@ -364,7 +365,7 @@ impl Lexer<'_> {
         if char_to_tryte(c).is_none() {
             return Err(self
                 .err(format!("character {c:?} is not in the Kestrel character table"), c_start)
-                .with_note("allowed: letters (with á à â ã é ê í ó ô õ ú ç), digits, space, \\n, \\t and . , : ; ! ? - + / _ = ( ) [ ] * < > @ # % { } \" '"));
+                .with_note("allowed: letters (with á à â ã é ê í ó ô õ ú ç), digits, space, \\n, \\t and . , : ; ! ? - + / _ = ( ) [ ] * < > @ # % { } \" ' | & \\ ~ ^ ` $"));
         }
         Ok(Some(c))
     }
@@ -456,7 +457,8 @@ mod tests {
         assert!(err("0t").contains("no digits"));
         assert!(err("12abc").contains("right after a number"));
         assert!(err("x: int @R0 = 1;").contains("unexpected character `@`"));
-        assert!(err(r#""a & b""#).contains("'&' is not in the Kestrel character table"));
+        assert!(err(r#""a € b""#).contains("'€' is not in the Kestrel character table"));
+        assert_eq!(toks(r#""a | b \\ c""#)[0], Tok::Str("a | b \\ c".into()));
         assert!(err(r#""niño""#).contains("'ñ'"));
         assert!(err(r#""open"#).contains("unterminated string"));
         assert!(err("'ab'").contains("exactly one character"));

@@ -29,6 +29,18 @@ pub enum Value {
     Ptr(Ptr),
 }
 
+impl From<Word> for Value {
+    fn from(w: Word) -> Value {
+        Value::Word(w)
+    }
+}
+
+impl From<Real> for Value {
+    fn from(r: Real) -> Value {
+        Value::Real(r)
+    }
+}
+
 impl Value {
     pub const NAT: Value = Value::Word(Word::NAT);
 
@@ -76,6 +88,8 @@ struct Frame {
     func: usize,
     pc: usize,
     locals: Vec<Value>,
+    /// Set by `soft` (an `on NaT` line): failed arithmetic gives NaT instead of trapping.
+    soft: bool,
 }
 
 pub struct Vm<'m, R, W> {
@@ -84,6 +98,10 @@ pub struct Vm<'m, R, W> {
     texts: Vec<Vec<char>>,
     /// Characters in texts made at run time (they live until the program ends).
     made_chars: usize,
+    /// Program arguments (`ksvm prog.ksb a b c` gives `a`, `b`, `c`).
+    args: Vec<String>,
+    /// Instructions left before a Trap, if limited (see [`Vm::with_fuel`]).
+    fuel: Option<u64>,
     stack: Vec<Value>,
     frames: Vec<Frame>,
     heap: Vec<Block>,
@@ -102,6 +120,8 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             module,
             texts: module.strings.iter().map(|s| s.chars().collect()).collect(),
             made_chars: 0,
+            args: Vec::new(),
+            fuel: None,
             stack: Vec::new(),
             frames: Vec::new(),
             heap: Vec::new(),
@@ -113,6 +133,19 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
     }
 
     /// Runs `main` to completion and returns its result.
+    /// Sets the program arguments read by `arg_count()` and `arg(i)`.
+    pub fn with_args(mut self, args: Vec<String>) -> Self {
+        self.args = args;
+        self
+    }
+
+    /// Limits how many instructions may run; past it the program traps with
+    /// "out of fuel". Used by tests so an accidental infinite loop still ends.
+    pub fn with_fuel(mut self, steps: u64) -> Self {
+        self.fuel = Some(steps);
+        self
+    }
+
     pub fn run(&mut self) -> Result<Value, Trap> {
         let entry = self.module.entry as usize;
         let result = self.enter(entry, Vec::new()).and_then(|()| loop {
@@ -150,11 +183,17 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         let f = &self.module.functions[func];
         let mut locals = vec![Value::Word(Word::ZERO); usize::from(f.locals)];
         locals[..args.len()].copy_from_slice(&args);
-        self.frames.push(Frame { func, pc: 0, locals });
+        self.frames.push(Frame { func, pc: 0, locals, soft: false });
         Ok(())
     }
 
     fn step(&mut self) -> Step {
+        if let Some(f) = &mut self.fuel {
+            if *f == 0 {
+                return Err("out of fuel".into());
+            }
+            *f -= 1;
+        }
         let frame = self.frames.last_mut().expect("a frame is active while running");
         let code = &self.module.functions[frame.func].code;
         if frame.pc >= code.len() {
@@ -185,33 +224,39 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 self.pop()?;
             }
 
-            Op::Add => self.int2(|a, b| a + b)?,
-            Op::Sub => self.int2(|a, b| a - b)?,
-            Op::Mul => self.int2(|a, b| a * b)?,
-            Op::Div => self.int2(|a, b| a / b)?,
-            Op::Mod => self.int2(|a, b| a % b)?,
-            Op::Pow => self.int2(Word::pow)?,
-            Op::Shl3 => self.int2(Word::shl3)?,
-            Op::Shr3 => self.int2(Word::shr3)?,
+            Op::Soft => self.frame().soft = true,
+            Op::Hard => self.frame().soft = false,
+
+            Op::Add => self.arith2("+", |a, b| a + b)?,
+            Op::Sub => self.arith2("-", |a, b| a - b)?,
+            Op::Mul => self.arith2("*", |a, b| a * b)?,
+            Op::Div => self.arith2("/", |a, b| a / b)?,
+            Op::Mod => self.arith2("%", |a, b| a % b)?,
+            Op::Pow => self.arith2("**", Word::pow)?,
+            Op::Shl3 => self.arith2("<<", Word::shl3)?,
+            Op::Shr3 => self.arith2(">>", Word::shr3)?,
             Op::Cmp3 => self.int2(Word::cmp3)?,
             Op::KAnd => self.int2(Word::kand)?,
             Op::KOr => self.int2(Word::kor)?,
-            Op::Neg => self.int1(|a| -a)?,
-            Op::Narrow6 => self.int1(Word::narrow_tryte)?,
-            Op::Narrow1 => self.int1(Word::narrow_trit)?,
+            Op::Neg => {
+                let a = self.pop_word()?;
+                self.check(-a, a.is_nat(), || "negation".into())?;
+            }
+            Op::Narrow6 => self.narrow("tryte", "-364..364", Word::narrow_tryte)?,
+            Op::Narrow1 => self.narrow("trit", "-1..1", Word::narrow_trit)?,
 
-            Op::FAdd => self.real2(|a, b| a + b)?,
-            Op::FSub => self.real2(|a, b| a - b)?,
-            Op::FMul => self.real2(|a, b| a * b)?,
-            Op::FDiv => self.real2(|a, b| a / b)?,
+            Op::FAdd => self.real2("+", |a, b| a + b)?,
+            Op::FSub => self.real2("-", |a, b| a - b)?,
+            Op::FMul => self.real2("*", |a, b| a * b)?,
+            Op::FDiv => self.real2("/", |a, b| a / b)?,
             Op::FNeg => {
                 let a = self.pop_real()?;
-                self.push(Value::Real(-a));
+                self.check(-a, a.is_nat(), || "negation".into())?;
             }
             Op::FPow => {
                 let e = self.pop_word()?;
                 let a = self.pop_real()?;
-                self.push(Value::Real(a.pow(e)));
+                self.check(a.pow(e), a.is_nat() || e.is_nat(), || format!("overflow: {a} ** {e} does not fit in a real"))?;
             }
             Op::FCmp3 => {
                 let b = self.pop_real()?;
@@ -220,11 +265,11 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             }
             Op::IToF => {
                 let a = self.pop_word()?;
-                self.push(Value::Real(Real::from_word(a)));
+                self.check(Real::from_word(a), a.is_nat(), || format!("(real) {a}: does not fit in a real"))?;
             }
             Op::FToI => {
                 let a = self.pop_real()?;
-                self.push(Value::Word(a.to_word()));
+                self.check(a.to_word(), a.is_nat(), || format!("(int) {a}: does not fit in an int"))?;
             }
 
             Op::TLen => {
@@ -352,11 +397,64 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 self.push(v);
             }
 
+            Op::ReadFile => {
+                let path = self.pop_string()?;
+                let s = std::fs::read_to_string(&path).map_err(|e| format!("cannot read file {path:?}: {e}"))?;
+                self.make_text(s.chars().collect())?;
+            }
+            Op::FileExists => {
+                let path = self.pop_string()?;
+                let ok = std::path::Path::new(&path).is_file();
+                self.push(Value::Word(if ok { Word::ONE } else { Word::NEG_ONE }));
+            }
+            Op::WriteFile => {
+                let text = self.pop_string()?;
+                let path = self.pop_string()?;
+                std::fs::write(&path, text).map_err(|e| format!("cannot write file {path:?}: {e}"))?;
+            }
+            Op::WriteBytes => {
+                let p = self.pop_ptr()?;
+                let path = self.pop_string()?;
+                let mut bytes = Vec::new();
+                for (i, w) in self.cells(p)?.iter().enumerate() {
+                    match w.get() {
+                        Some(v @ 0..=255) => bytes.push(v as u8),
+                        _ => return Err(format!("write_bytes: cell {i} is {w}, not a byte (0..255)")),
+                    }
+                }
+                std::fs::write(&path, bytes).map_err(|e| format!("cannot write file {path:?}: {e}"))?;
+            }
+            Op::ReadLine => {
+                self.output.flush().map_err(io_err)?;
+                let mut line = String::new();
+                self.input.read_line(&mut line).map_err(io_err)?;
+                let line = line.strip_suffix('\n').unwrap_or(&line);
+                let line = line.strip_suffix('\r').unwrap_or(line);
+                let chars = line.chars().collect();
+                self.make_text(chars)?;
+            }
+            Op::Eof => {
+                let done = self.input.fill_buf().map_err(io_err)?.is_empty();
+                self.push(Value::Word(if done { Word::ONE } else { Word::NEG_ONE }));
+            }
+            Op::ArgCount => self.push(Value::Word(Word::new(self.args.len() as i64))),
+            Op::Arg => {
+                let i = self.pop_word()?.get().ok_or("arg: the index is NaT")?;
+                let n = self.args.len();
+                let a = usize::try_from(i).ok().and_then(|i| self.args.get(i)).ok_or_else(|| format!("arg({i}): there are {n} arguments"))?;
+                let chars = a.chars().collect();
+                self.make_text(chars)?;
+            }
+            Op::Exit => {
+                let code = self.pop_word()?;
+                return Ok(Some(Value::Word(code)));
+            }
             Op::Input => {
                 self.output.flush().map_err(io_err)?;
                 let mut line = String::new();
                 self.input.read_line(&mut line).map_err(io_err)?;
-                self.push(Value::Word(parse_input(line.trim())));
+                let line = line.trim();
+                self.check(parse_input(line), false, || format!("input: \"{line}\" is not an integer"))?;
             }
             Op::Emit => {
                 // A tryte buffer prints as the characters of its cells.
@@ -408,12 +506,12 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             Op::TToI => {
                 let t = self.pop_text()?;
                 let s: String = self.texts[t].iter().collect();
-                self.push(Value::Word(parse_input(&s)));
+                self.check(parse_input(&s), false, || format!("to_int(\"{s}\"): not an integer"))?;
             }
             Op::TToF => {
                 let t = self.pop_text()?;
                 let s: String = self.texts[t].iter().collect();
-                self.push(Value::Real(parse_real(&s)));
+                self.check(parse_real(&s), false, || format!("to_real(\"{s}\"): not a number"))?;
             }
             Op::CharIs(k) => {
                 let w = self.pop_word()?;
@@ -488,6 +586,11 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         }
     }
 
+    fn pop_string(&mut self) -> Result<String, String> {
+        let t = self.pop_text()?;
+        Ok(self.texts[t].iter().collect())
+    }
+
     fn pop_text(&mut self) -> Result<usize, String> {
         match self.pop()? {
             Value::Text(t) => Ok(t as usize),
@@ -503,12 +606,6 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         }
     }
 
-    fn int1(&mut self, f: impl FnOnce(Word) -> Word) -> Result<(), String> {
-        let a = self.pop_word()?;
-        self.push(Value::Word(f(a)));
-        Ok(())
-    }
-
     fn int2(&mut self, f: impl FnOnce(Word, Word) -> Word) -> Result<(), String> {
         let b = self.pop_word()?;
         let a = self.pop_word()?;
@@ -516,11 +613,42 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         Ok(())
     }
 
-    fn real2(&mut self, f: impl FnOnce(Real, Real) -> Real) -> Result<(), String> {
+    /// Pushes `v`. A NaT result traps, unless this line has `on NaT` (soft
+    /// mode). `nat_in` says an operand was already NaT; otherwise `why`
+    /// explains what went wrong.
+    fn check(&mut self, v: impl Into<Value>, nat_in: bool, why: impl FnOnce() -> String) -> Result<(), String> {
+        let v = v.into();
+        if v.is_nat() && !self.frames.last().is_some_and(|f| f.soft) {
+            let what = if nat_in { "an operation got a NaT value".to_string() } else { why() };
+            return Err(format!("{what} (handle it with `on NaT`)"));
+        }
+        self.push(v);
+        Ok(())
+    }
+
+    fn arith2(&mut self, op: &str, f: impl FnOnce(Word, Word) -> Word) -> Result<(), String> {
+        let b = self.pop_word()?;
+        let a = self.pop_word()?;
+        self.check(f(a, b), a.is_nat() || b.is_nat(), || match op {
+            "/" if b == Word::ZERO => "division by zero".into(),
+            "%" if b == Word::ZERO => "remainder of a division by zero".into(),
+            "**" if b.get().is_some_and(|e| e < 0) => format!("{a} ** {b}: the exponent cannot be negative"),
+            _ => format!("overflow: {a} {op} {b} does not fit in an int"),
+        })
+    }
+
+    fn narrow(&mut self, ty: &str, range: &str, f: impl FnOnce(Word) -> Word) -> Result<(), String> {
+        let a = self.pop_word()?;
+        self.check(f(a), a.is_nat(), || format!("overflow: {a} does not fit in a {ty} ({range})"))
+    }
+
+    fn real2(&mut self, op: &str, f: impl FnOnce(Real, Real) -> Real) -> Result<(), String> {
         let b = self.pop_real()?;
         let a = self.pop_real()?;
-        self.push(Value::Real(f(a, b)));
-        Ok(())
+        self.check(f(a, b), a.is_nat() || b.is_nat(), || match op {
+            "/" if b.is_zero() => "division by zero".into(),
+            _ => format!("overflow: {a} {op} {b} does not fit in a real"),
+        })
     }
 
     fn alloc(&mut self, cells: Vec<Word>, sym: bool) -> Ptr {
@@ -780,7 +908,10 @@ mod tests {
         );
         assert!(trap_reason(&stale).contains("stale pointer"));
 
-        let tri_nat = module(vec![func("main", 0, 0, &[c(1), c(0), Op::Div, Op::Br3 { neg: 0, zero: 0, pos: 0 }])], &[]);
+        let div0 = module(vec![func("main", 0, 0, &[c(1), c(0), Op::Div, c(0), Op::Ret])], &[]);
+        assert_eq!(trap_reason(&div0), "division by zero (handle it with `on NaT`)");
+
+        let tri_nat = module(vec![func("main", 0, 0, &[Op::Soft, c(1), c(0), Op::Div, Op::Br3 { neg: 0, zero: 0, pos: 0 }])], &[]);
         assert_eq!(trap_reason(&tri_nat), "tri/if/while condition is NaT");
 
         let moved = module(vec![func("main", 0, 2, &[c(1), Op::Alloc, Op::Store(0), Op::Move(0), Op::Store(1), Op::Load(0), c(0), Op::LdIdx, c(0), Op::Ret])], &[]);
@@ -806,17 +937,20 @@ mod tests {
 
     #[test]
     fn nat_guard_and_input() {
-        // x = input(); on NaT { print "bad"; yield -1 }; print(x)
-        // Input(1) + JNat(5) + Show(1) + PushC(5) + Ret(1): the handler starts at byte 13.
+        // x = input() on NaT { print "bad"; yield -1 }; print(x)
+        // Soft, Input, Hard (1 each) + JNat(5) + Show(1) + PushC(5) + Ret(1): the handler starts at byte 15.
         let m = module(
             vec![func(
                 "main",
                 0,
                 0,
-                &[Op::Input, Op::JNat(13), Op::Show, c(0), Op::Ret, Op::PushS(0), Op::Print, c(-1), Op::Ret],
+                &[Op::Soft, Op::Input, Op::Hard, Op::JNat(15), Op::Show, c(0), Op::Ret, Op::PushS(0), Op::Print, c(-1), Op::Ret],
             )],
             &["bad"],
         );
+        let hard = module(vec![func("main", 0, 0, &[Op::Input, Op::Show, c(0), Op::Ret])], &[]);
+        assert!(run(&hard, "banana
+").0.unwrap_err().reason.contains("\"banana\" is not an integer"));
         assert_eq!(run(&m, "42\n").1, "42");
         assert_eq!(run(&m, "0t+0-\n").1, "8");
         assert_eq!(run(&m, "0vAm\n").1, "14");

@@ -11,10 +11,11 @@ use ksvm::{Value, Vm};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let [_, path] = args.as_slice() else {
-        eprintln!("usage: ksvm <program.ksb>");
+    let Some(path) = args.get(1) else {
+        eprintln!("usage: ksvm <program.ksb> [arguments for the program...]");
         return ExitCode::from(2);
     };
+    let program_args = args[2..].to_vec();
 
     let module = match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| {
         Module::from_bytes(&b).map_err(|e| e.to_string())
@@ -28,7 +29,7 @@ fn main() -> ExitCode {
 
     let stdin = io::stdin().lock();
     let stdout = BufWriter::new(io::stdout().lock());
-    match Vm::new(&module, stdin, stdout).run() {
+    match Vm::new(&module, stdin, stdout).with_args(program_args).run() {
         Ok(Value::Word(w)) => match w.get() {
             Some(v) => ExitCode::from(v.rem_euclid(256) as u8),
             None => {

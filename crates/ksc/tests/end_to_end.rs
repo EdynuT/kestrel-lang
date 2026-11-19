@@ -27,6 +27,12 @@ fn main_out(body: &str) -> String {
     out(&format!("proc main() {{ {body} }}"))
 }
 
+/// Runs `main` with `body`, expects a trap, returns its reason.
+fn main_trap(body: &str) -> String {
+    let (r, o) = run_with(&format!("proc main() {{ {body} }}"), "");
+    r.err().unwrap_or_else(|| panic!("expected a trap, got output {o:?}")).reason
+}
+
 #[test]
 fn printf_formats() {
     let body = r#"n: int = -5; t: tryte = 'A'; name: text = "Ana";
@@ -88,15 +94,40 @@ proc main() -> int {
 fn arithmetic_and_overflow() {
     assert_eq!(main_out(r#"print(1 + 2 * 3); print(" "); print(-2 ** 2); print(" "); print(2 ** 3 ** 2); print(" "); print(7 / 2); print(" "); print(-7 % 2);"#), "7 -4 512 3 -1");
     assert_eq!(main_out(r#"print(0t+0-); print(" "); print(0vAm); print(" "); print(2 >> 1); print(" "); print(2 / 3);"#), "8 14 1 0");
-    // A tryte overflows into NaT at 364, a word only at 3.8 trillion.
-    assert_eq!(main_out(r#"t: tryte = 300; t = t + 100; print(t); print(" "); w: int = 300; w = w + 100; print(w);"#), "NaT 400");
-    assert_eq!(main_out("x: int = 3812798742493; print(x + 1); print(\" \"); print(1 / 0);"), "NaT NaT");
+    // A tryte overflows at 364, a word only at 3.8 trillion. Both trap...
+    assert_eq!(main_out("w: int = 300; w = w + 100; print(w);"), "400");
+    assert!(main_trap("t: tryte = 300; t = t + 100;").contains("overflow: 400 does not fit in a tryte"));
+    assert!(main_trap("x: int = 3812798742493; print(x + 1);").contains("overflow: 3812798742493 + 1 does not fit in an int"));
+    assert!(main_trap("print(1 / 0);").contains("division by zero"));
+    assert!(main_trap("print(1 % 0);").contains("remainder of a division by zero"));
+    assert!(main_trap("print(2 ** -1);").contains("exponent cannot be negative"));
+    let why = main_trap("x: int = NaT; print(x + 1);");
+    assert!(why.contains("got a NaT value") && why.contains("handle it with `on NaT`"), "{why}");
+    // ...unless the line has `on NaT`: then the whole line gives NaT to the handler.
+    let body = r#"for d: int = -1; d <= 1; d++ {
+            q := (10 + 2) / d * 3 on NaT { print("[/0]"); continue; };
+            printf("%d ", q);
+        }
+        t: tryte = 300;
+        u: tryte = t + 100 on NaT { print(" tryte"); yield; };"#;
+    assert_eq!(main_out(body), "-36 [/0]36  tryte");
+    // Soft mode covers only that line, not the procs it calls.
+    let src = "proc div(a: int, b: int) -> int { yield a / b; }
+               proc main() { x := div(1, 0) on NaT { print(\"caught\"); yield; }; }";
+    assert!(run_with(src, "").0.unwrap_err().reason.contains("division by zero"));
+    // A proc can still report failure on purpose by yielding NaT.
+    let src = "proc safe(a: int, b: int) -> int { if b == 0 { yield NaT; } yield a / b; }
+               proc main() { x := safe(1, 0) on NaT { print(\"no result\"); yield; }; print(x); }";
+    assert_eq!(out(src), "no result");
 }
 
 #[test]
 fn reals_and_conversions() {
     assert_eq!(main_out(r#"print(0.2 + 0.1); print(" "); print(1.0 / 3.0); print(" "); print(2.0 ** 10);"#), "0.3 0.333333333 1024.0");
-    assert_eq!(main_out(r#"print((int) 6.9); print(" "); print((int) -6.9); print(" "); print((real) 7 / 2.0); print(" "); print((tryte) 500);"#), "6 -6 3.5 NaT");
+    assert_eq!(main_out(r#"print((int) 6.9); print(" "); print((int) -6.9); print(" "); print((real) 7 / 2.0);"#), "6 -6 3.5");
+    assert!(main_trap("print((tryte) 500);").contains("500 does not fit in a tryte (-364..364)"));
+    assert!(main_trap("print(1.0 / 0.0);").contains("division by zero"));
+    assert_eq!(main_out(r#"r := 1.0 / 0.0 on NaT { print("caught"); yield; };"#), "caught");
 }
 
 #[test]
@@ -142,9 +173,11 @@ proc main() {
 #[test]
 fn recursion() {
     let src = "proc fact(n: int) -> int { tri n <=> 1 { - => yield 1; 0 => yield 1; + => yield n * fact(n - 1); } }
-               proc main() { print(fact(15)); print(\" \"); print(fact(16)); }";
-    // 15! = 1307674368000 fits in a word; 16! = 20922789888000 overflows into NaT.
-    assert_eq!(out(src), "1307674368000 NaT");
+               proc main() { print(fact(15)); f := fact(16) on NaT { print(\" big\"); yield; }; print(f); }";
+    // 15! = 1307674368000 fits in a word; 16! = 20922789888000 overflows.
+    let (r, o) = run_with(src, "");
+    assert_eq!(o, "1307674368000");
+    assert!(r.unwrap_err().reason.contains("overflow: 16 * 1307674368000"));
 }
 
 #[test]
@@ -245,15 +278,60 @@ fn enums_and_match() {
 }
 
 #[test]
+fn files_args_stdin_exit() {
+    let dir = std::env::temp_dir().join(format!("kestrel-io-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("in.txt");
+    std::fs::write(&input, "a | b\nc & d\n").unwrap();
+    let src = r#"proc main() -> int {
+        if !file_exists(arg(0)) { exit(3); }
+        s := read_file(arg(0));
+        n := 0;
+        for i: int = 0; i < len(s); i++ { if s[i] == '|' || s[i] == '&' { n++; } }
+        write_file(arg(1), "n=" + to_text(n));
+        b[]: int = {75, 51, 66, 1};
+        write_bytes(arg(1) + ".bin", b);
+        burn b;
+        printf("{n} %s %s %d", read_line(), read_line(), eof());
+        yield arg_count();
+    }"#;
+    let m = build(src);
+    let out_path = dir.join("out.txt");
+    let args = vec![input.display().to_string(), out_path.display().to_string()];
+    let mut printed = Vec::new();
+    let r = Vm::new(&m, "um\ndois\n".as_bytes(), &mut printed).with_args(args).run();
+    assert_eq!(r, Ok(Value::Word(Word::new(2))));
+    assert_eq!(String::from_utf8(printed).unwrap(), "2 um dois 1");
+    assert_eq!(std::fs::read_to_string(&out_path).unwrap(), "n=2");
+    assert_eq!(std::fs::read(dir.join("out.txt.bin")).unwrap(), b"K3B\x01");
+    // a missing file: exit(3) when checked, Trap when read directly
+    let r = Vm::new(&m, "".as_bytes(), Vec::new()).with_args(vec!["/no/such/file".into(), "x".into()]).run();
+    assert_eq!(r, Ok(Value::Word(Word::new(3))));
+    let (r, _) = run_with(r#"proc main() { s := read_file("/no/such/file"); }"#, "");
+    assert!(r.unwrap_err().reason.contains("cannot read file"));
+    let (r, _) = run_with("proc main() { b[]: int = {300}; write_bytes(\"x\", b); burn b; }", "");
+    assert!(r.unwrap_err().reason.contains("not a byte"));
+    let (r, _) = run_with("proc main() { a := arg(0); }", "");
+    assert!(r.unwrap_err().reason.contains("there are 0 arguments"));
+    // exit ends a proc like yield does
+    assert_eq!(out("proc f() -> int { exit(0); } proc main() { print(f()); }"), "");
+    let e = ksc::compile("proc main() { x := exit(1); }").unwrap_err();
+    assert!(e.message.contains("is a statement"), "{}", e.message);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn text_operations() {
     let body = r#"nome := "Edynu"; printl("Olá, " + nome + "!");
         s := "Kestrel";
         printf("[%s][%s][%s] %d %d\n", sub(s, 0, 3), sub(s, 3, 7), sub(s, 2, 2), s == "Kestrel", s != "kestrel");
-        printf("%d %d %d ", to_int("123") + to_int("-7"), to_int("12a"), to_int("0t+0-"));
-        printf("%f %f %f\n", to_real("2.5") * 2.0, to_real("-0.75"), to_real("abc"));
+        printf("%d %d ", to_int("123") + to_int("-7"), to_int("0t+0-"));
+        printf("%f %f\n", to_real("2.5") * 2.0, to_real("-0.75"));
         printf("%d%d%d%d%d %d%d\n", is_digit('7'), is_letter('ç'), is_upper('Á'), is_lower('a'), is_space('\n'), is_digit('a'), is_letter(' '));
-        acc := ""; for i := 0; i < 3; i++ { acc = acc + to_text(i) + ","; } print(acc);"#;
-    assert_eq!(main_out(body), "Olá, Edynu!\n[Kes][trel][] 1 1\n116 NaT 8 5.0 -0.75 NaT\n11111 -1-1\n0,1,2,");
+        acc := ""; for i: int = 0; i < 3; i++ { acc = acc + to_text(i) + ","; } print(acc);"#;
+    assert_eq!(main_out(body), "Olá, Edynu!\n[Kes][trel][] 1 1\n116 8 5.0 -0.75\n11111 -1-1\n0,1,2,");
+    assert!(main_trap(r#"x := to_int("12a");"#).contains(r#"to_int("12a"): not an integer"#));
+    assert!(main_trap(r#"x := to_real("abc");"#).contains(r#"to_real("abc"): not a number"#));
     let (r, _) = run_with(r#"proc main() { x := sub("abc", 2, 1); }"#, "");
     assert!(r.unwrap_err().reason.contains("needs 0 <= start <= end <= 3"));
     let e = ksc::compile(r#"proc main() { x := "a" + 1; }"#).unwrap_err();
@@ -289,18 +367,25 @@ fn limits_and_messages() {
 #[test]
 fn for_loops() {
     let body = r#"arr[]: int = {10, 20, 30, 40};
-        for i := 0; i < len(arr); i++ { printf("%d ", arr[i]); }
+        for i: int = 0; i < len(arr); i++ { printf("%d ", arr[i]); }
         sym s[]: int = {-8, 0, 8};
-        for i := -1; i <= 1; i++ { printf("%d ", s[i]); }
-        for i := 10; i > 0; i -= 3 { printf("%d ", i); }
-        for i := 0; i < 10; i++ { if i % 2 == 0 { continue; } if i > 7 { break; } printf("%d ", i); }
-        j := 0; for j = 5; j < 7; j++ { } print(j);
+        for i: int = -1; i <= 1; i++ { printf("%d ", s[i]); }
+        for i: int = 10; i > 0; i -= 3 { printf("%d ", i); }
+        for i: int = 0; i < 10; i++ { if i % 2 == 0 { continue; } if i > 7 { break; } printf("%d ", i); }
         burn arr; burn s;"#;
-    assert_eq!(main_out(body), "10 20 30 40 -8 0 8 10 7 4 1 1 3 5 7 7");
-    let e = ksc::compile("proc main() { for i := 0; i < 3; i++ { } print(i); }").unwrap_err();
+    assert_eq!(main_out(body), "10 20 30 40 -8 0 8 10 7 4 1 1 3 5 7 ");
+    let e = ksc::compile("proc main() { for i: int = 0; i < 3; i++ { } print(i); }").unwrap_err();
     assert!(e.message.contains("unknown name `i`"), "{}", e.message);
-    let e = ksc::compile("proc main() { for i := 0; i < 3; j := 1 { } }").unwrap_err();
+    let e = ksc::compile("proc main() { for i: int = 0; i < 3; j := 1 { } }").unwrap_err();
     assert!(e.message.contains("must change a variable"), "{}", e.message);
+    for (src, note) in [("i := 0", "`:=` is not allowed"), ("j = 0", "cannot reuse"), ("i++", "e.g."), ("j", "`j` alone declares nothing")] {
+        let e = ksc::compile(&format!("proc main() {{ j := 0; for {src}; j < 3; j++ {{ }} }}")).unwrap_err();
+        assert!(e.message.contains("declaring its counter"), "{}", e.message);
+        assert!(e.note.as_deref().unwrap_or("").contains(note), "{src}: {:?}", e.note);
+    }
+    // anything declared in the body is gone after the loop, too
+    let e = ksc::compile("proc main() { for i: int = 0; i < 3; i++ { t: int = i; } print(t); }").unwrap_err();
+    assert!(e.message.contains("unknown name `t`"), "{}", e.message);
 }
 
 #[test]

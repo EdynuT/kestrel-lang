@@ -222,7 +222,15 @@ impl<'a> ProcGen<'a> {
     fn stmt(&mut self, s: &HStmt) -> R<()> {
         match &s.kind {
             HStmtKind::Let { local, value, on_nat } => {
+                // With `on NaT`, failed arithmetic on this line gives NaT for
+                // the handler instead of trapping.
+                if on_nat.is_some() {
+                    self.emit(Op::Soft);
+                }
                 self.expr(value)?;
+                if on_nat.is_some() {
+                    self.emit(Op::Hard);
+                }
                 match on_nat {
                     None => {
                         self.emit(Op::Store(self.slot(*local)));
@@ -269,6 +277,10 @@ impl<'a> ProcGen<'a> {
                 self.loops.last_mut().expect("continue inside walk").continues.push(at);
             }
             HStmtKind::Block(b) => self.block(b)?,
+            HStmtKind::Exit(code) => {
+                self.expr(code)?;
+                self.emit(Op::Exit);
+            }
             HStmtKind::Trap(reason) => {
                 let k = self.pools.string(reason);
                 self.emit(Op::Trap(k));
@@ -537,6 +549,14 @@ impl<'a> ProcGen<'a> {
                     Builtin::ToInt => Op::TToI,
                     Builtin::ToReal => Op::TToF,
                     Builtin::CharIs(k) => Op::CharIs(*k),
+                    Builtin::ReadFile => Op::ReadFile,
+                    Builtin::FileExists => Op::FileExists,
+                    Builtin::WriteFile => Op::WriteFile,
+                    Builtin::WriteBytes => Op::WriteBytes,
+                    Builtin::ReadLine => Op::ReadLine,
+                    Builtin::Eof => Op::Eof,
+                    Builtin::ArgCount => Op::ArgCount,
+                    Builtin::Arg => Op::Arg,
                     Builtin::ToText(Fmt::Trits) => Op::TStrT,
                     Builtin::ToText(Fmt::Hepta) => Op::TStrV,
                     Builtin::ToText(_) => Op::TStr,

@@ -15,9 +15,10 @@ use crate::hir::*;
 
 type R<T> = Result<T, Diagnostic>;
 
-const BUILTINS: [&str; 16] = [
+const BUILTINS: [&str; 25] = [
     "print", "printl", "printf", "to_text", "emit", "input", "len", "dump", "sub", "to_int", "to_real", "is_digit",
-    "is_letter", "is_upper", "is_lower", "is_space",
+    "is_letter", "is_upper", "is_lower", "is_space", "read_file", "file_exists", "write_file", "write_bytes",
+    "read_line", "eof", "arg_count", "arg", "exit",
 ];
 /// Names of the `is_*` built-ins, in `charset::Class::ALL` order.
 const CHAR_CLASSES: [&str; 5] = ["is_digit", "is_letter", "is_upper", "is_lower", "is_space"];
@@ -484,6 +485,15 @@ impl Checker {
                 HStmtKind::Walk { var: v, span_tmp, start, end, end_tmp, body: body? }
             }
             StmtKind::Expr(e) => {
+                if let ExprKind::Call { name, args } = &e.kind
+                    && name.name == "exit"
+                {
+                    let [code] = args.as_slice() else {
+                        return Err(err("`exit` takes 1 argument: the exit code", e.span));
+                    };
+                    let h = self.expect(code, Type::Scalar(Scalar::Int))?;
+                    return Ok(HStmt { kind: HStmtKind::Exit(h), span: s.span });
+                }
                 if let ExprKind::Call { name, args } = &e.kind
                     && name.name == "dump"
                 {
@@ -1218,7 +1228,48 @@ impl Checker {
                 }
                 return Ok(builtin(Builtin::Len, vec![a], Type::Scalar(Scalar::Int)));
             }
-            "dump" => return Err(err("`dump(...)` is a statement, not a value", span)),
+            "dump" | "exit" => return Err(err(format!("`{}(...)` is a statement, not a value", name.name), span)),
+            "read_file" | "file_exists" => {
+                arity(1)?;
+                let p = self.expect(&args[0], text)?;
+                return Ok(if name.name == "read_file" {
+                    builtin(Builtin::ReadFile, vec![p], text)
+                } else {
+                    builtin(Builtin::FileExists, vec![p], Type::Scalar(Scalar::Trit))
+                });
+            }
+            "write_file" => {
+                arity(2)?;
+                let p = self.expect(&args[0], text)?;
+                let t = self.expect(&args[1], text)?;
+                return Ok(builtin(Builtin::WriteFile, vec![p, t], Type::Void));
+            }
+            "write_bytes" => {
+                arity(2)?;
+                let p = self.expect(&args[0], text)?;
+                let a = self.shown(&args[1], None)?;
+                if !matches!(a.ty, Type::Lent(_)) {
+                    return Err(err(format!("`write_bytes` takes an array of bytes (0..255), found {}", a.ty), a.span));
+                }
+                return Ok(builtin(Builtin::WriteBytes, vec![p, a], Type::Void));
+            }
+            "read_line" => {
+                arity(0)?;
+                return Ok(builtin(Builtin::ReadLine, vec![], text));
+            }
+            "eof" => {
+                arity(0)?;
+                return Ok(builtin(Builtin::Eof, vec![], Type::Scalar(Scalar::Trit)));
+            }
+            "arg_count" => {
+                arity(0)?;
+                return Ok(builtin(Builtin::ArgCount, vec![], Type::Scalar(Scalar::Int)));
+            }
+            "arg" => {
+                arity(1)?;
+                let i = self.expect(&args[0], Type::Scalar(Scalar::Int))?;
+                return Ok(builtin(Builtin::Arg, vec![i], text));
+            }
             _ => {}
         }
         let Some(&id) = self.proc_ids.get(&name.name) else {

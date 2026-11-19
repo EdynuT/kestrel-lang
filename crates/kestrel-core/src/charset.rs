@@ -8,6 +8,9 @@ const PUNCT: [char; 27] = [
     '*', '<', '>', '@', '#', '%', '{', '}', '"', '\'',
 ];
 
+/// More symbols, so source code of common languages can be read as text.
+const PUNCT2: [char; 7] = ['|', '&', '\\', '~', '^', '`', '$'];
+
 /// Accented letters: upper case at +54.., lower case at -54.., so negation
 /// still swaps the case.
 const ACCENT_UPPER: [char; 12] = ['Á', 'À', 'Â', 'Ã', 'É', 'Ê', 'Í', 'Ó', 'Ô', 'Õ', 'Ú', 'Ç'];
@@ -23,6 +26,7 @@ pub fn tryte_to_char(v: i64) -> Option<char> {
         -53..=-27 => Some(PUNCT[(-v - 27) as usize]),
         54..=65 => Some(ACCENT_UPPER[(v - 54) as usize]),
         -65..=-54 => Some(ACCENT_LOWER[(-v - 54) as usize]),
+        -72..=-66 => Some(PUNCT2[(-v - 66) as usize]),
         _ => None,
     }
 }
@@ -66,6 +70,7 @@ pub fn char_to_tryte(c: char) -> Option<i64> {
                 .map(|i| -i - 27)
                 .or_else(|| find(&ACCENT_UPPER).map(|i| i + 54))
                 .or_else(|| find(&ACCENT_LOWER).map(|i| -i - 54))
+                .or_else(|| find(&PUNCT2).map(|i| -i - 66))
         }
     }
 }
@@ -88,11 +93,12 @@ mod tests {
         assert_eq!(char_to_tryte('\''), Some(-53));
         assert_eq!(char_to_tryte('Á'), Some(54));
         assert_eq!(char_to_tryte('ç'), Some(-65));
-        assert_eq!(char_to_tryte('&'), None);
+        assert_eq!(char_to_tryte('|'), Some(-66));
+        assert_eq!(char_to_tryte('$'), Some(-72));
         assert_eq!(char_to_tryte('ñ'), None);
         assert_eq!(tryte_to_char(37), None);
         assert_eq!(tryte_to_char(-54), Some('á'));
-        assert_eq!(tryte_to_char(-66), None);
+        assert_eq!(tryte_to_char(-73), None);
     }
 
     #[test]
@@ -112,6 +118,6 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 1 + 26 + 26 + 10 + 27 + 12 + 12);
+        assert_eq!(count, 1 + 26 + 26 + 10 + 27 + 12 + 12 + 7);
     }
 }

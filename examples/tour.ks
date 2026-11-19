@@ -42,8 +42,10 @@ proc main() -> int {
     printl();
 
     t: tryte = 360;
-    t = t + 10;                    // past 364: overflow becomes NaT, never wraps
-    print("360 + 10 as a tryte = "); printl(t);
+    // Past 364 a tryte overflows. That stops the program, unless the line
+    // has `on NaT`: then the handler runs instead.
+    u: tryte = t + 10 on NaT { printl("360 + 10 does not fit in a tryte"); burn b; yield 1; };
+    printl(u);
 
     dump("before burn");
     burn b;

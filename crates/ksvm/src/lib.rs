@@ -8,7 +8,7 @@ use std::fmt;
 use std::io::{BufRead, Write};
 
 use kestrel_core::bet::{parse_hepta, parse_trits};
-use kestrel_core::charset::{char_to_tryte, tryte_to_char};
+use kestrel_core::charset::{Class, char_to_tryte, tryte_to_char};
 use kestrel_core::isa::{Op, slot_name};
 use kestrel_core::{Module, Real, Word, Word27};
 
@@ -380,12 +380,50 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             Op::TStr | Op::TStrT | Op::TStrV => {
                 let v = self.pop()?;
                 let s: Vec<char> = self.render(v, op)?.chars().collect();
-                self.made_chars += s.len();
-                if self.made_chars > MAX_TEXT_CHARS {
-                    return Err(format!("to_text: out of text memory (limit {MAX_TEXT_CHARS} characters)"));
+                self.make_text(s)?;
+            }
+            Op::TCat => {
+                let b = self.pop_text()?;
+                let a = self.pop_text()?;
+                let s: Vec<char> = self.texts[a].iter().chain(&self.texts[b]).copied().collect();
+                self.make_text(s)?;
+            }
+            Op::TEq => {
+                let b = self.pop_text()?;
+                let a = self.pop_text()?;
+                let eq = self.texts[a] == self.texts[b];
+                self.push(Value::Word(if eq { Word::ONE } else { Word::NEG_ONE }));
+            }
+            Op::TSub => {
+                let end = self.pop_word()?.get().ok_or("sub: an index is NaT")?;
+                let start = self.pop_word()?.get().ok_or("sub: an index is NaT")?;
+                let t = self.pop_text()?;
+                let len = self.texts[t].len() as i64;
+                if !(0 <= start && start <= end && end <= len) {
+                    return Err(format!("sub(s, {start}, {end}): needs 0 <= start <= end <= {len}"));
                 }
-                self.texts.push(s);
-                self.push(Value::Text((self.texts.len() - 1) as u32));
+                let s = self.texts[t][start as usize..end as usize].to_vec();
+                self.make_text(s)?;
+            }
+            Op::TToI => {
+                let t = self.pop_text()?;
+                let s: String = self.texts[t].iter().collect();
+                self.push(Value::Word(parse_input(&s)));
+            }
+            Op::TToF => {
+                let t = self.pop_text()?;
+                let s: String = self.texts[t].iter().collect();
+                self.push(Value::Real(parse_real(&s)));
+            }
+            Op::CharIs(k) => {
+                let w = self.pop_word()?;
+                let class = Class::ALL[usize::from(k)];
+                let r = match w.get() {
+                    None => Word::NAT,
+                    Some(v) if class.contains(v) => Word::ONE,
+                    Some(_) => Word::NEG_ONE,
+                };
+                self.push(Value::Word(r));
             }
             Op::Dump(k) => self.dump(k).map_err(io_err)?,
         }
@@ -402,6 +440,18 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
 
     fn pop(&mut self) -> Result<Value, String> {
         self.stack.pop().ok_or_else(|| "stack underflow".to_string())
+    }
+
+    /// Stores a text made at run time and pushes it. Such texts live until
+    /// the program ends, so their total size is capped.
+    fn make_text(&mut self, s: Vec<char>) -> Result<(), String> {
+        self.made_chars += s.len();
+        if self.made_chars > MAX_TEXT_CHARS {
+            return Err(format!("out of text memory (limit {MAX_TEXT_CHARS} characters made at run time)"));
+        }
+        self.texts.push(s);
+        self.push(Value::Text((self.texts.len() - 1) as u32));
+        Ok(())
     }
 
     /// A value as `print`/`to_text` writes it; the `T`/`V` ops take integers only.
@@ -575,6 +625,23 @@ fn parse_input(s: &str) -> Word {
         s.parse::<i64>().ok().map(Word::new)
     };
     parsed.unwrap_or(Word::NAT)
+}
+
+/// `to_real`: `[-]digits[.digits]`. Anything else is NaT.
+fn parse_real(s: &str) -> Real {
+    let (neg, body) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    let (int, frac) = body.split_once('.').unwrap_or((body, ""));
+    if int.is_empty() {
+        return Real::NAT;
+    }
+    match Real::from_decimal(int, frac) {
+        Some(r) if neg => -r,
+        Some(r) => r,
+        None => Real::NAT,
+    }
 }
 
 fn io_err(e: std::io::Error) -> String {

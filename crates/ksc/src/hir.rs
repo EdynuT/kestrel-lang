@@ -110,6 +110,12 @@ pub enum Builtin {
     Len,
     /// `to_text(x)`, `to_text(x, 't')`, `to_text(x, 'v')`
     ToText(Fmt),
+    /// `sub(s, start, end)`: characters `start..end-1`, like Java's `substring`.
+    Sub,
+    ToInt,
+    ToReal,
+    /// `is_digit(c)` etc.: index into `charset::Class::ALL`.
+    CharIs(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

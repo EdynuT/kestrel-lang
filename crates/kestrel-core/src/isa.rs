@@ -58,6 +58,17 @@ pub enum Op {
     TStr,
     TStrT,
     TStrV,
+    /// Pop b, a (texts), push the new text `a + b`.
+    TCat,
+    /// Pop b, a (texts), push `+` if equal, `-` if not.
+    TEq,
+    /// Pop end, start, text; push the new text of characters `start..end-1`.
+    TSub,
+    /// Text to int / real (decimal; ints also `0t`/`0v`). Invalid text gives NaT.
+    TToI,
+    TToF,
+    /// Pop a tryte, push `+`/`-`: is it in character class `k` (see `charset::Class`)?
+    CharIs(u8),
     TIdx,
     Narrow6,
     Narrow1,
@@ -165,6 +176,12 @@ impl Op {
             TStr => 0x36,
             TStrT => 0x37,
             TStrV => 0x38,
+            TCat => 0x39,
+            TEq => 0x3a,
+            TSub => 0x3b,
+            TToI => 0x3c,
+            TToF => 0x3d,
+            CharIs(_) => 0x3e,
 
             Alloc => 0x40,
             LdIdx => 0x41,
@@ -225,6 +242,12 @@ impl Op {
             TStr => "tstr",
             TStrT => "tstrt",
             TStrV => "tstrv",
+            TCat => "tcat",
+            TEq => "teq",
+            TSub => "tsub",
+            TToI => "ttoi",
+            TToF => "ttof",
+            CharIs(_) => "charis",
             TIdx => "tidx",
             Narrow6 => "narrow6",
             Narrow1 => "narrow1",
@@ -257,7 +280,7 @@ impl Op {
         use Op::*;
         1 + match self {
             PushC(_) | PushR(_) | PushS(_) | Jmp(_) | JNat(_) | Dump(_) | Trap(_) => 4,
-            Test(_) => 1,
+            Test(_) | CharIs(_) => 1,
             Load(_) | Store(_) | Move(_) | Purge(_) => 2,
             Br3 { .. } => 12,
             Call { .. } | Pack { .. } => 5,
@@ -272,7 +295,7 @@ impl Op {
             PushC(k) | PushR(k) | PushS(k) | Jmp(k) | JNat(k) | Dump(k) | Trap(k) => {
                 out.extend_from_slice(&k.to_le_bytes())
             }
-            Test(m) => out.push(m),
+            Test(m) | CharIs(m) => out.push(m),
             Load(s) | Store(s) | Move(s) | Purge(s) => out.extend_from_slice(&s.to_le_bytes()),
             Br3 { neg, zero, pos } => {
                 for a in [neg, zero, pos] {
@@ -336,6 +359,15 @@ impl Op {
             0x36 => TStr,
             0x37 => TStrT,
             0x38 => TStrV,
+            0x39 => TCat,
+            0x3a => TEq,
+            0x3b => TSub,
+            0x3c => TToI,
+            0x3d => TToF,
+            0x3e => match r.u8()? {
+                k @ 0..=4 => CharIs(k),
+                _ => return Err(DecodeError::BadOpcode { at, byte }),
+            },
             0x40 => Alloc,
             0x44 => AllocZ,
             0x45 => {
@@ -374,6 +406,7 @@ impl fmt::Display for Op {
         let m = self.mnemonic();
         match *self {
             PushC(k) | PushR(k) | PushS(k) | Dump(k) | Trap(k) => write!(f, "{m:<7} #{k}"),
+            CharIs(k) => write!(f, "{m:<7} {}", ["digit", "letter", "upper", "lower", "space"].get(usize::from(k)).unwrap_or(&"?")),
             Test(mask) => {
                 let name = match mask {
                     0b001 => "lt",
@@ -445,7 +478,7 @@ mod tests {
             PushC(7), PushR(70_000), PushS(0), Load(4), Store(9), Move(0), Pop,
             Add, Sub, Mul, Div, Mod, Pow, Neg, Shl3, Shr3, Cmp3, KAnd, KOr, Test(0b101), Trap(4),
             FAdd, FSub, FMul, FDiv, FPow, FNeg, FCmp3,
-            TLen, TIdx, Narrow6, Narrow1, IToF, FToI, TStr, TStrT, TStrV,
+            TLen, TIdx, Narrow6, Narrow1, IToF, FToI, TStr, TStrT, TStrV, TCat, TEq, TSub, TToI, TToF, CharIs(2),
             Alloc, LdIdx, StIdx, Purge(8), AllocZ, Pack { n: 3, sym: true },
             Jmp(12), JNat(u32::MAX), Br3 { neg: 1, zero: 2, pos: 3 }, Call { f: 2, argc: 3 }, Ret,
             Input, Emit, Print, Show, Dump(5), ShowT, ShowV,

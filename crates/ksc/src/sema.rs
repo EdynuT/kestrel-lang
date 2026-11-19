@@ -15,7 +15,12 @@ use crate::hir::*;
 
 type R<T> = Result<T, Diagnostic>;
 
-const BUILTINS: [&str; 8] = ["print", "printl", "printf", "to_text", "emit", "input", "len", "dump"];
+const BUILTINS: [&str; 16] = [
+    "print", "printl", "printf", "to_text", "emit", "input", "len", "dump", "sub", "to_int", "to_real", "is_digit",
+    "is_letter", "is_upper", "is_lower", "is_space",
+];
+/// Names of the `is_*` built-ins, in `charset::Class::ALL` order.
+const CHAR_CLASSES: [&str; 5] = ["is_digit", "is_letter", "is_upper", "is_lower", "is_space"];
 
 pub fn check(program: &Program) -> R<Hir> {
     let mut cx = Checker {
@@ -609,7 +614,11 @@ impl Checker {
     }
 
     fn numeric(&self, h: &HExpr) -> R<()> {
-        if h.ty.is_numeric() { Ok(()) } else { Err(err(format!("expected a number, found {}", h.ty), h.span)) }
+        if h.ty.is_numeric() {
+            return Ok(());
+        }
+        let d = err(format!("expected a number, found {}", h.ty), h.span);
+        Err(if h.ty == Type::Text { d.with_note("texts work with `+`, `==` and `!=`; `to_int(s)` reads a number") } else { d })
     }
 
     /// Checks both operands of an arithmetic or comparison operator and
@@ -792,6 +801,20 @@ impl Checker {
                 }
                 (ha, hb, trit)
             }
+            // Text: `a + b` makes a new text, `==`/`!=` compare characters.
+            BinOp::Add | BinOp::Eq | BinOp::Ne if self.is_text(a) || self.is_text(b) => {
+                let text = Type::Text;
+                let ha = self.expr(a, Some(text))?;
+                let hb = self.expr(b, Some(text))?;
+                for h in [&ha, &hb] {
+                    if h.ty != text {
+                        let what = if op == BinOp::Add { "`+` joins text with text only" } else { "a text can only be compared with text" };
+                        return Err(err(format!("{what}, found {}", h.ty), h.span).with_note("convert it first: `to_text(x)`"));
+                    }
+                }
+                let ty = if op == BinOp::Add { text } else { trit };
+                (ha, hb, ty)
+            }
             BinOp::Eq | BinOp::Ne if self.enum_type(a).or_else(|| self.enum_type(b)).is_some() => {
                 let t = self.enum_type(a).or_else(|| self.enum_type(b)).expect("checked by the guard");
                 let ha = self.expr(a, Some(t))?;
@@ -821,13 +844,7 @@ impl Checker {
                 (ha, hb, ty)
             }
             _ => {
-                let (ha, hb, ty) = self.numeric_pair(a, b, want).map_err(|d| {
-                    if op == BinOp::Add && d.message.ends_with("found text") {
-                        d.with_note("text can be joined with `+` only inside `print`")
-                    } else {
-                        d
-                    }
-                })?;
+                let (ha, hb, ty) = self.numeric_pair(a, b, want)?;
                 if op == BinOp::Mod && ty == Type::Scalar(Scalar::Real) {
                     return Err(err("`%` works on integers, not reals", span));
                 }
@@ -918,6 +935,11 @@ impl Checker {
             stmts.push(HStmt { kind: HStmtKind::Block(c), span });
         }
         Ok(HStmtKind::Block(HBlock { stmts, scope: vec![], span }))
+    }
+
+    /// Whether `e` is a text (checked without reporting errors).
+    fn is_text(&mut self, e: &Expr) -> bool {
+        self.expr(e, None).is_ok_and(|h| h.ty == Type::Text)
     }
 
     /// The enum type of `e`, if it has one.
@@ -1159,6 +1181,25 @@ impl Checker {
                     return Err(err(format!("`to_text` takes {wants}, found {}", a.ty), a.span));
                 }
                 return Ok(builtin(Builtin::ToText(fmt), vec![a], text));
+            }
+            "sub" => {
+                arity(3)?;
+                let s = self.expect(&args[0], text)?;
+                let a = self.expect(&args[1], Type::Scalar(Scalar::Int))?;
+                let b = self.expect(&args[2], Type::Scalar(Scalar::Int))?;
+                return Ok(builtin(Builtin::Sub, vec![s, a, b], text));
+            }
+            "to_int" | "to_real" => {
+                arity(1)?;
+                let s = self.expect(&args[0], text)?;
+                let (b, ty) = if name.name == "to_int" { (Builtin::ToInt, Scalar::Int) } else { (Builtin::ToReal, Scalar::Real) };
+                return Ok(builtin(b, vec![s], Type::Scalar(ty)));
+            }
+            n if CHAR_CLASSES.contains(&n) => {
+                arity(1)?;
+                let c = self.expect(&args[0], Type::Scalar(Scalar::Tryte))?;
+                let k = CHAR_CLASSES.iter().position(|&x| x == n).expect("checked by the guard") as u8;
+                return Ok(builtin(Builtin::CharIs(k), vec![c], Type::Scalar(Scalar::Trit)));
             }
             "emit" => {
                 arity(1)?;
@@ -1460,7 +1501,7 @@ proc main() -> int {
         assert!(err_in("x := 1; y := !x;").contains("`!` works on trits"));
         assert!(err_in("x := 1; while x { }").contains("`while` needs a trit, found int"));
         ok("i := 0; while i < 3 { i = i + 1; }");
-        assert!(err_in("x := 1; t: trit = x == \"a\";").contains("found text"));
+        assert!(err_in("x := 1; t: trit = x == \"a\";").contains("compared with text, found int"));
         assert!(err_in("x := 1.5; t: trit = x < 2;").contains("integer literal where a real is expected"));
     }
 
@@ -1494,7 +1535,7 @@ proc main() -> int {
     fn text_concat() {
         ok("name: text = \"Ana\"; print(\"hi \" + name + \"!\\n\");");
         assert!(err_in("x := 5; print(\"x = \" + x);").contains("joins text with text only, found int"));
-        assert!(err_in("t := \"a\" + \"b\";").contains("only inside `print`"));
+        ok("t := \"a\" + \"b\"; u: text = t + t; same: trit = t == u;");
         assert!(err_in("print(\"a\" + 1.5);").contains("found real"));
     }
 

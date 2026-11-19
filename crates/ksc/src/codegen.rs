@@ -421,6 +421,18 @@ impl<'a> ProcGen<'a> {
                 self.emit(if real(a.ty) { Op::FNeg } else { Op::Neg });
             }
             HExprKind::Binary(op @ (BinOp::And | BinOp::Or), a, b) => self.short_circuit(*op, a, b)?,
+            HExprKind::Binary(op, a, b) if a.ty == Type::Text => {
+                self.expr(a)?;
+                self.expr(b)?;
+                match op {
+                    BinOp::Add => self.emit(Op::TCat),
+                    BinOp::Eq => self.emit(Op::TEq),
+                    _ => {
+                        self.emit(Op::TEq);
+                        self.emit(Op::Neg) // !=
+                    }
+                };
+            }
             HExprKind::Binary(op, a, b) if op.is_comparison() => {
                 self.expr(a)?;
                 self.expr(b)?;
@@ -521,6 +533,10 @@ impl<'a> ProcGen<'a> {
                     Builtin::Emit => Op::Emit,
                     Builtin::Input => Op::Input,
                     Builtin::Len => Op::TLen,
+                    Builtin::Sub => Op::TSub,
+                    Builtin::ToInt => Op::TToI,
+                    Builtin::ToReal => Op::TToF,
+                    Builtin::CharIs(k) => Op::CharIs(*k),
                     Builtin::ToText(Fmt::Trits) => Op::TStrT,
                     Builtin::ToText(Fmt::Hepta) => Op::TStrV,
                     Builtin::ToText(_) => Op::TStr,

@@ -245,6 +245,24 @@ fn enums_and_match() {
 }
 
 #[test]
+fn text_operations() {
+    let body = r#"nome := "Edynu"; printl("Olá, " + nome + "!");
+        s := "Kestrel";
+        printf("[%s][%s][%s] %d %d\n", sub(s, 0, 3), sub(s, 3, 7), sub(s, 2, 2), s == "Kestrel", s != "kestrel");
+        printf("%d %d %d ", to_int("123") + to_int("-7"), to_int("12a"), to_int("0t+0-"));
+        printf("%f %f %f\n", to_real("2.5") * 2.0, to_real("-0.75"), to_real("abc"));
+        printf("%d%d%d%d%d %d%d\n", is_digit('7'), is_letter('ç'), is_upper('Á'), is_lower('a'), is_space('\n'), is_digit('a'), is_letter(' '));
+        acc := ""; for i := 0; i < 3; i++ { acc = acc + to_text(i) + ","; } print(acc);"#;
+    assert_eq!(main_out(body), "Olá, Edynu!\n[Kes][trel][] 1 1\n116 NaT 8 5.0 -0.75 NaT\n11111 -1-1\n0,1,2,");
+    let (r, _) = run_with(r#"proc main() { x := sub("abc", 2, 1); }"#, "");
+    assert!(r.unwrap_err().reason.contains("needs 0 <= start <= end <= 3"));
+    let e = ksc::compile(r#"proc main() { x := "a" + 1; }"#).unwrap_err();
+    assert!(e.message.contains("joins text with text only"), "{}", e.message);
+    let e = ksc::compile(r#"proc main() { t: trit = "a" < "b"; }"#).unwrap_err();
+    assert!(e.note.unwrap().contains("`==` and `!=`"));
+}
+
+#[test]
 fn limits_and_messages() {
     // deep nesting is an error, not a compiler crash
     let deep = format!("proc main() {{ x := {}1{}; }}", "(".repeat(5000), ")".repeat(5000));

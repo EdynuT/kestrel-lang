@@ -27,6 +27,32 @@ pub fn tryte_to_char(v: i64) -> Option<char> {
     }
 }
 
+/// Character classes for `is_digit` and friends (by tryte value).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Class {
+    Digit,
+    Letter,
+    Upper,
+    Lower,
+    Space,
+}
+
+impl Class {
+    pub const ALL: [Class; 5] = [Class::Digit, Class::Letter, Class::Upper, Class::Lower, Class::Space];
+
+    pub fn contains(self, v: i64) -> bool {
+        let upper = (1..=26).contains(&v) || (54..=65).contains(&v);
+        let lower = (-26..=-1).contains(&v) || (-65..=-54).contains(&v);
+        match self {
+            Class::Digit => (27..=36).contains(&v),
+            Class::Letter => upper || lower,
+            Class::Upper => upper,
+            Class::Lower => lower,
+            Class::Space => v == 0 || v == -27 || v == -28, // ' ', '\n', '\t'
+        }
+    }
+}
+
 /// Tryte value for a character, or `None` if it is not in the table.
 pub fn char_to_tryte(c: char) -> Option<i64> {
     match c {

@@ -61,9 +61,13 @@ valor = (mantissa / 3²⁰) × 3^expoente
 - É um literal imutável guardado no pool de strings do `.ksb`, como o `const char*` do C. É copiável e **não precisa de `burn`**.
 - `s[i]` devolve o `tryte` da posição `i`. **O índice começa em 0**, como em C (como os arrays sem `sym`). Índice fora de `0 .. len(s)-1` dispara **Trap**.
 - `len(s)` devolve o tamanho como `int`.
-- `print(s)` imprime o texto. Dentro do `print`, `+` junta textos: `print("Olá, " + nome + "\n")`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo**. Fora do `print`, `+` com texto também é erro (o texto não pode ser criado em tempo de execução).
+- `a + b` cria um texto novo: `saudacao := "Olá, " + nome + "!";`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo** (use `to_text(5)`).
+- `a == b` e `a != b` comparam caractere por caractere. `<` e `>` não valem para textos.
+- `sub(s, início, fim)` devolve os caracteres de `início` até `fim - 1`, como o `substring` do Java: `sub("Kestrel", 0, 3)` é `"Kes"`. Fora de `0 ≤ início ≤ fim ≤ len(s)` dispara **Trap**.
+- `to_int(s)` e `to_real(s)` leem um número (`"123"`, `"-7"`, `"0t+0-"`, `"2.5"`). Texto inválido vira **NaT**.
+- `is_digit(c)`, `is_letter(c)`, `is_upper(c)`, `is_lower(c)` e `is_space(c)` dizem (`+`/`-`) se um `tryte` é dígito, letra (com acentos), maiúscula, minúscula ou espaço (`' '`, `\n`, `\t`).
 - Cada caractere precisa existir na tabela §4. Um caractere fora dela, como `&` ou `ñ`, é **erro de compilação**.
-- `to_text(x)` cria um texto novo a partir de um número (§8.6). Os textos criados assim duram até o fim do programa (limite de 2²⁴ caracteres no total). Para montar texto caractere por caractere, use um array de `tryte`, como um array de `char` em C.
+- `to_text(x)` cria um texto novo a partir de um número (§8.6). Todo texto criado com o programa rodando (`+`, `sub`, `to_text`) dura até o fim do programa (limite de 2²⁴ caracteres no total). Para montar texto caractere por caractere, use um array de `tryte`, como um array de `char` em C.
 
 ---
 
@@ -467,7 +471,7 @@ Todos os limites são potências de 3. Os de parâmetros e variáveis também ca
 | Pilha e locais | `PUSHC k` (int), `PUSHR k` (real), `LOAD s`, `STORE s`, `MOVE s`, `POP` |
 | ALU (inteira) | `ADD`, `SUB`, `MUL`, `DIV`, `MOD`, `POW`, `NEG`, `SHL3`, `SHR3`, `CMP3`, `KAND`, `KOR`, `TEST m` (resultado de `CMP3` → `trit`; os bits 0/1/2 de `m` dizem se −/0/+ vira `+`) |
 | ALU (real) | `FADD`, `FSUB`, `FMUL`, `FDIV`, `FPOW`, `FNEG`, `FCMP3` |
-| Texto | `PUSHS k`, `TLEN`, `TIDX`, `TSTR`, `TSTRT`, `TSTRV` (número → texto) |
+| Texto | `PUSHS k`, `TLEN`, `TIDX`, `TSTR`, `TSTRT`, `TSTRV` (número → texto), `TCAT`, `TEQ`, `TSUB`, `TTOI`, `TTOF`, `CHARIS k` |
 | Largura | `NARROW6`, `NARROW1`, `ITOF`, `FTOI` (overflow vira NaT) |
 | Memória | `ALLOC` (sym), `ALLOCZ` (a partir de 0), `PACK n sym` (literal `{...}`), `LDIDX`, `STIDX`, `PURGE s` |
 | Fluxo | `JMP a`, `JNAT a`, `BR3 a- a0 a+`, `CALL f n`, `RET`, `TRAP str` |

@@ -435,6 +435,9 @@ impl<'a> ProcGen<'a> {
                     Builtin::Emit => Op::Emit,
                     Builtin::Input => Op::Input,
                     Builtin::Len => Op::TLen,
+                    Builtin::ToText(Fmt::Trits) => Op::TStrT,
+                    Builtin::ToText(Fmt::Hepta) => Op::TStrV,
+                    Builtin::ToText(_) => Op::TStr,
                 });
             }
             HExprKind::Claim(n) => {

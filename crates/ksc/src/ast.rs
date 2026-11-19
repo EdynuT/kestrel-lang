@@ -145,8 +145,9 @@ pub struct Stmt {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum StmtKind {
-    /// `x: T @R0 = e on NaT { ... };` or `x := e;`
+    /// `x: T @R0 = e on NaT { ... };` or `x := e;`, optionally after `final`.
     Let {
+        is_final: bool,
         name: Ident,
         ty: Option<TypeExpr>,
         reg: Option<(i8, Span)>,

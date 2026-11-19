@@ -46,6 +46,8 @@ pub struct Local {
     pub reg: Option<i8>,
     pub kind: LocalKind,
     pub span: Span,
+    /// Declared with `final`: it can never be assigned again.
+    pub is_final: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -99,6 +101,8 @@ pub enum Builtin {
     Emit,
     Input,
     Len,
+    /// `to_text(x)`, `to_text(x, 't')`, `to_text(x, 'v')`
+    ToText(Fmt),
 }
 
 /// How one `print`/`printf` piece is written.

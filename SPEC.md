@@ -62,7 +62,7 @@ valor = (mantissa / 3²⁰) × 3^expoente
 - `len(s)` devolve o tamanho como `int`.
 - `print(s)` imprime o texto. Dentro do `print`, `+` junta textos: `print("Olá, " + nome + "\n")`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo**. Fora do `print`, `+` com texto também é erro (o texto não pode ser criado em tempo de execução).
 - Cada caractere precisa existir na tabela §4. Um caractere fora dela, como `&` ou `ñ`, é **erro de compilação**.
-- Para montar texto em tempo de execução, use um `own [tryte]`, como um array de `char` em C.
+- `to_text(x)` cria um texto novo a partir de um número (§8.8). Os textos criados assim duram até o fim do programa (limite de 2²⁴ caracteres no total). Para montar texto caractere por caractere, use um `own [tryte]`, como um array de `char` em C.
 
 ---
 
@@ -224,6 +224,27 @@ x = x + 1;            // atribuição
 
 Cada declaração ocupa um slot próprio, então um `x` declarado num bloco interno não sobrescreve o `x` de fora.
 
+**`const` × `final`:**
+
+| | `const` | `final` |
+|---|---|---|
+| Onde | Fora dos `proc` | Dentro dos `proc` |
+| Valor | Fixo, conhecido na compilação (literais e contas com eles) | Qualquer expressão, até `input()` |
+| Equivalente | `static final` do Java, `const` do Rust | `final` local do Java, `let` do Rust |
+
+```
+const MAX: int = 100;
+
+proc main() {
+    final idade: int = input();
+    idade = 5;            // erro: `idade` is final and cannot change
+    idade := 6;           // erro: não pode ser declarada de novo no mesmo bloco
+}
+```
+
+- Num buffer `final`, as **células** continuam mudando (`b[0] = 5`), como num array `final` do Java. O que fica fixo é o nome. O `burn` continua obrigatório.
+- Um bloco interno pode declarar outro `x`, que é uma variável nova.
+
 ### 8.3 Registrador fixo `@R` (assembly)
 
 ```
@@ -291,6 +312,8 @@ s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
 | `printl(x)` | Igual ao `print`, seguido de quebra de linha. `printl()` só quebra a linha |
 | `printf(fmt, args...)` | Imprime texto formatado (§8.8.1) |
 | `len(s)` | Tamanho de um `text` |
+| `to_text(x)` | Converte um número em `text`, em decimal: `to_text(-5)` → `"-5"`, `to_text(1.5)` → `"1.5"` |
+| `to_text(x, 't')` / `to_text(x, 'v')` | Converte um inteiro em `text` ternário (`"0t-++"`) ou heptavintimal (`"0ve"`), como o `Integer.toString(x, base)` do Java |
 | `emit(c)` | Imprime um `tryte` como caractere (tabela §4) |
 | `input()` | Lê um `int` (decimal, `0t` ou `0v`). Entrada inválida vira NaT |
 | `dump("label")` | Mostra os registradores e o heap |
@@ -336,7 +359,7 @@ O formato aceita duas formas de colocar valores, que podem ser misturadas:
 | Pilha e locais | `PUSHC k` (int), `PUSHR k` (real), `LOAD s`, `STORE s`, `MOVE s`, `POP` |
 | ALU (inteira) | `ADD`, `SUB`, `MUL`, `DIV`, `MOD`, `POW`, `NEG`, `SHL3`, `SHR3`, `CMP3`, `KAND`, `KOR` |
 | ALU (real) | `FADD`, `FSUB`, `FMUL`, `FDIV`, `FPOW`, `FNEG`, `FCMP3` |
-| Texto | `PUSHS k`, `TLEN`, `TIDX` |
+| Texto | `PUSHS k`, `TLEN`, `TIDX`, `TSTR`, `TSTRT`, `TSTRV` (número → texto) |
 | Largura | `NARROW6`, `NARROW1`, `ITOF`, `FTOI` (overflow vira NaT) |
 | Memória | `ALLOC`, `LDIDX`, `STIDX`, `PURGE s` |
 | Fluxo | `JMP a`, `JNAT a`, `BR3 a- a0 a+`, `CALL f n`, `RET` |
@@ -387,8 +410,8 @@ elem       = "tryte" | "int" ;
 REG        = "R-4" | "R-3" | "R-2" | "R-1" | "R0" | "R+1" | "R+2" | "R+3" | "R+4" ;
 
 block      = "{" { stmt } "}" ;
-stmt       = IDENT ":" type [ "@" REG ] "=" expr [ on_nat ] ";"
-           | IDENT ":=" expr [ on_nat ] ";"
+stmt       = [ "final" ] IDENT ":" type [ "@" REG ] "=" expr [ on_nat ] ";"
+           | [ "final" ] IDENT ":=" expr [ on_nat ] ";"
            | place "=" expr ";"
            | instr ";"
            | "burn" IDENT ";"

@@ -16,6 +16,8 @@ use kestrel_core::{Module, Real, Word, Word27};
 pub const MAX_DEPTH: usize = 4096;
 /// Largest buffer `claim` may create, in cells.
 pub const MAX_CELLS: i64 = 1 << 24;
+/// Limit on characters of texts made at run time by `to_text`.
+pub const MAX_TEXT_CHARS: usize = 1 << 24;
 
 /// A value on the stack or in a register.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +81,8 @@ pub struct Vm<'m, R, W> {
     module: &'m Module,
     /// String pool split into chars, for `len` and `s[i]`.
     texts: Vec<Vec<char>>,
+    /// Characters in texts made at run time (they live until the program ends).
+    made_chars: usize,
     stack: Vec<Value>,
     frames: Vec<Frame>,
     heap: Vec<Block>,
@@ -96,6 +100,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         Vm {
             module,
             texts: module.strings.iter().map(|s| s.chars().collect()).collect(),
+            made_chars: 0,
             stack: Vec::new(),
             frames: Vec::new(),
             heap: Vec::new(),
@@ -325,24 +330,20 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 let s: String = self.texts[t].iter().collect();
                 self.output.write_all(s.as_bytes()).map_err(io_err)?;
             }
-            Op::Show => {
+            Op::Show | Op::ShowT | Op::ShowV => {
                 let v = self.pop()?;
-                let s = match v {
-                    Value::Word(w) => w.to_string(),
-                    Value::Real(r) => r.to_string(),
-                    Value::Text(t) => self.texts[t as usize].iter().collect(),
-                    Value::Ptr(_) => "<buffer>".to_string(),
-                };
+                let s = self.render(v, op)?;
                 self.output.write_all(s.as_bytes()).map_err(io_err)?;
             }
-            Op::ShowT | Op::ShowV => {
-                let w = self.pop_word()?;
-                let s = match (w.is_nat(), op) {
-                    (true, _) => "NaT".to_string(),
-                    (false, Op::ShowT) => Word27::from(w).to_trits_short(),
-                    (false, _) => Word27::from(w).to_hepta_short(),
-                };
-                self.output.write_all(s.as_bytes()).map_err(io_err)?;
+            Op::TStr | Op::TStrT | Op::TStrV => {
+                let v = self.pop()?;
+                let s: Vec<char> = self.render(v, op)?.chars().collect();
+                self.made_chars += s.len();
+                if self.made_chars > MAX_TEXT_CHARS {
+                    return Err(format!("to_text: out of text memory (limit {MAX_TEXT_CHARS} characters)"));
+                }
+                self.texts.push(s);
+                self.push(Value::Text((self.texts.len() - 1) as u32));
             }
             Op::Dump(k) => self.dump(k).map_err(io_err)?,
         }
@@ -359,6 +360,25 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
 
     fn pop(&mut self) -> Result<Value, String> {
         self.stack.pop().ok_or_else(|| "stack underflow".to_string())
+    }
+
+    /// A value as `print`/`to_text` writes it; the `T`/`V` ops take integers only.
+    fn render(&self, v: Value, op: Op) -> Result<String, String> {
+        let base = match op {
+            Op::ShowT | Op::TStrT => Some(true),
+            Op::ShowV | Op::TStrV => Some(false),
+            _ => None,
+        };
+        Ok(match (v, base) {
+            (Value::Word(w), _) if w.is_nat() => "NaT".to_string(),
+            (Value::Word(w), None) => w.to_string(),
+            (Value::Word(w), Some(true)) => Word27::from(w).to_trits_short(),
+            (Value::Word(w), Some(false)) => Word27::from(w).to_hepta_short(),
+            (Value::Real(r), None) => r.to_string(),
+            (Value::Text(t), None) => self.texts[t as usize].iter().collect(),
+            (Value::Ptr(_), None) => "<buffer>".to_string(),
+            (other, Some(_)) => return Err(format!("expected an int, found {other:?}")),
+        })
     }
 
     fn pop_word(&mut self) -> Result<Word, String> {

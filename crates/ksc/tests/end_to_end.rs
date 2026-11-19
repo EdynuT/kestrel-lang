@@ -39,6 +39,13 @@ fn printf_formats() {
 }
 
 #[test]
+fn to_text_values() {
+    let body = r#"n: int = -5; t := to_text(n, 't'); printl("n = " + to_text(n) + " = " + t + " = " + to_text(n, 'v'));
+        print(len(t)); print(" "); emit(t[2]); print(" " + to_text(1.0 / 4.0) + " " + to_text(NaT));"#;
+    assert_eq!(main_out(body), "n = -5 = 0t-++ = 0ve\n5 - 0.25 NaT");
+}
+
+#[test]
 fn print_concatenation() {
     assert_eq!(main_out(r#"name: text = "Kestrel"; print("Hello, " + name + "!" + "\n");"#), "Hello, Kestrel!\n");
 }

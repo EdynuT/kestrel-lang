@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use kestrel_core::charset::char_to_tryte;
 use kestrel_core::word::{TRIT_MAX, TRYTE_MAX};
 
 use crate::ast::{self, Expr, ExprKind, InstrOp, Item, Place, Program, Range, StmtKind, UnOp};
@@ -13,7 +14,7 @@ use crate::hir::*;
 
 type R<T> = Result<T, Diagnostic>;
 
-const BUILTINS: [&str; 7] = ["print", "printl", "printf", "emit", "input", "len", "dump"];
+const BUILTINS: [&str; 8] = ["print", "printl", "printf", "to_text", "emit", "input", "len", "dump"];
 
 pub fn check(program: &Program) -> R<Hir> {
     let mut cx = Checker { sigs: Vec::new(), proc_ids: HashMap::new(), consts: HashMap::new(), f: FnCx::new(Type::Void) };
@@ -158,7 +159,7 @@ impl Checker {
 
     fn new_local(&mut self, name: &str, ty: Type, reg: Option<i8>, kind: LocalKind, span: Span) -> LocalId {
         let id = self.f.locals.len();
-        self.f.locals.push(Local { name: name.to_string(), ty, reg, kind, span });
+        self.f.locals.push(Local { name: name.to_string(), ty, reg, kind, span, is_final: false });
         if kind != LocalKind::Hidden {
             self.f.scopes.last_mut().expect("a scope is open").push((name.to_string(), id));
         }
@@ -197,7 +198,7 @@ impl Checker {
 
     fn stmt(&mut self, s: &ast::Stmt) -> R<HStmt> {
         let kind = match &s.kind {
-            StmtKind::Let { name, ty, reg, value, on_nat } => {
+            StmtKind::Let { is_final, name, ty, reg, value, on_nat } => {
                 let (value, lty) = match ty {
                     Some(t) => {
                         if let Type::Lent(_) = t.ty {
@@ -240,7 +241,15 @@ impl Checker {
                     }
                     None => None,
                 };
+                let in_scope = self.f.scopes.last().and_then(|s| s.iter().rev().find(|(n, _)| *n == name.name));
+                if let Some(&(_, prev)) = in_scope
+                    && self.f.locals[prev].is_final
+                {
+                    return Err(err(format!("`{}` is final and cannot be declared again", name.name), name.span)
+                        .with_note("pick another name, or declare the first one without `final`"));
+                }
                 let local = self.new_local(&name.name, lty, reg.map(|(r, _)| r), LocalKind::Let, name.span);
+                self.f.locals[local].is_final = *is_final;
                 HStmtKind::Let { local, value, on_nat }
             }
             StmtKind::Assign { place, value } => self.assign(place, value)?,
@@ -365,6 +374,10 @@ impl Checker {
         let local = &self.f.locals[id];
         if local.kind == LocalKind::WalkVar {
             return Err(err(format!("`{name}` is the walk variable and is read-only"), place.name.span));
+        }
+        if local.is_final && place.index.is_none() {
+            return Err(err(format!("`{name}` is final and cannot change"), place.name.span)
+                .with_note("declare it without `final` if it needs to change"));
         }
         match (&place.index, local.ty) {
             (Some(idx), Type::Own(e) | Type::Lent(e)) => {
@@ -793,6 +806,32 @@ impl Checker {
                 }
                 return Ok(hx(HExprKind::Print(pieces), Type::Void, span));
             }
+            "to_text" => {
+                let (x, base) = match args {
+                    [x] => (x, None),
+                    [x, b] => (x, Some(b)),
+                    _ => return Err(err(format!("`to_text` takes 1 or 2 arguments, found {}", args.len()), span)),
+                };
+                let fmt = match base.map(|b| &b.kind) {
+                    None => Fmt::Plain,
+                    Some(ExprKind::Char(c)) if char_to_tryte('t') == Some(*c) => Fmt::Trits,
+                    Some(ExprKind::Char(c)) if char_to_tryte('v') == Some(*c) => Fmt::Hepta,
+                    Some(_) => {
+                        return Err(err("the base of `to_text` must be 't' (ternary) or 'v' (heptavintimal)", base.map_or(span, |b| b.span))
+                            .with_note("leave it out for decimal: `to_text(x)`"));
+                    }
+                };
+                let a = self.expr(x, None)?;
+                let ok = match fmt {
+                    Fmt::Plain => matches!(a.ty, Type::Scalar(_)),
+                    _ => a.ty.is_int(),
+                };
+                if !ok {
+                    let wants = if fmt == Fmt::Plain { "a number" } else { "an integer" };
+                    return Err(err(format!("`to_text` takes {wants}, found {}", a.ty), a.span));
+                }
+                return Ok(builtin(Builtin::ToText(fmt), vec![a], text));
+            }
             "emit" => {
                 arity(1)?;
                 let a = self.expect(&args[0], Type::Scalar(Scalar::Tryte))?;
@@ -1047,6 +1086,25 @@ proc main() -> int {
         assert!(err_in("f: text = \"x\"; printf(f, 1);").contains("has no `%`"));
         ok("f: text = \"t\"; n: int = 1; printf(\"a \" + f + \" = %t {n}\" + \"!\", n);");
         assert!(err_in("n: int = 1; printf(\"a\" + n);").contains("joins text only, found int"));
+    }
+
+    #[test]
+    fn final_locals() {
+        ok("final x: int = input(); final y := x + 1; print(y);");
+        ok("final b: own [int] = claim 3; b[0] = 5; burn b;");
+        ok("final x := 1; tri x <=> 0 { - => {}, 0 => {}, + => { x := 2; print(x); } }");
+        assert!(err_in("final x := 1; x = 2;").contains("`x` is final and cannot change"));
+        assert!(err_in("final x := 1; add x, 2;").contains("is final"));
+        assert!(err_in("final x := 1; x := 2;").contains("cannot be declared again"));
+    }
+
+    #[test]
+    fn to_text_checks() {
+        ok("n: int = 5; a := to_text(n); b: text = to_text(n, 't'); c := to_text(1.5); print(\"x\" + to_text(n, 'v'));");
+        assert!(err_in("x := to_text(1.5, 't');").contains("takes an integer, found real"));
+        assert!(err_in("x := to_text(\"a\");").contains("takes a number, found text"));
+        assert!(err_in("x := to_text(5, 'x');").contains("must be 't' (ternary) or 'v'"));
+        assert!(err_in("x := to_text();").contains("1 or 2 arguments"));
     }
 
     #[test]

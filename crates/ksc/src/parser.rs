@@ -215,6 +215,18 @@ impl Parser {
                 end(self)?;
                 StmtKind::Continue
             }
+            Tok::Final => {
+                self.bump();
+                if !matches!((self.peek(), self.peek_at(1)), (Tok::Ident(_), Tok::Colon | Tok::ColonEq)) {
+                    return Err(self.unexpected("a variable declaration after `final`, like `final x: int = 5;`"));
+                }
+                let mut kind = self.let_stmt()?;
+                if let StmtKind::Let { is_final, .. } = &mut kind {
+                    *is_final = true;
+                }
+                end(self)?;
+                kind
+            }
             Tok::Tri => return self.tri(),
             Tok::Walk => return self.walk(),
             Tok::Ident(name) => match self.peek_at(1) {
@@ -268,7 +280,7 @@ impl Parser {
         } else {
             None
         };
-        Ok(StmtKind::Let { name, ty, reg, value, on_nat })
+        Ok(StmtKind::Let { is_final: false, name, ty, reg, value, on_nat })
     }
 
     fn instr(&mut self) -> PResult<StmtKind> {
@@ -691,6 +703,7 @@ mod tests {
 
     #[test]
     fn errors() {
+        assert!(parse_err("proc main() { final 5; }").message.contains("after `final`"));
         let d = parse_err("proc main() { x := 1\n y := 2; }");
         assert_eq!(d.message, "expected `;`, found `y`");
         assert_eq!(d.span.start, "proc main() { x := 1".len());

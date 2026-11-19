@@ -11,7 +11,7 @@ proc main() {
     printf("\n%i\n", variavel1);
 
     // operações
-    variavel2: int = 2;
+    final variavel2: int = 2;
     printl(variavel2 + 2);
     printl(variavel2 - 2);
     printl(variavel2 * 2);
@@ -24,5 +24,5 @@ proc main() {
     variavel3: int = variavel2 * variavel1;
     printl(variavel3);
     variavel3: real = (real) variavel2 / (real) variavel1;
-    printl(variavel3);
+    printl(variavel3.to_text());
 }

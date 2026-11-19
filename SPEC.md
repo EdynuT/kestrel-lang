@@ -36,7 +36,7 @@ Neste documento, `t6` e `t27` indicam larguras. No código-fonte, os tipos se es
 - O NaT vale para a **palavra inteira**. Basta um trit `?` para a palavra toda ser NaT.
 - **Uma conta que falha para o programa (Trap)**, com uma mensagem que diz o motivo: overflow, divisão por zero, cast fora do intervalo, `toInt` de texto inválido. Como uma exceção não tratada no Java.
 - **Exceto numa linha com `on NaT`** (§8.5). Ali a conta que falha produz NaT, qualquer operação com NaT também produz NaT (o veneno se espalha), e o bloco do `on NaT` trata o erro. Isso vale só para as contas escritas na própria linha: um proc chamado dela continua parando o programa.
-- Um proc pode avisar que falhou de propósito com `yield NaT;`, como retornar `null`. Quem chama trata com `on NaT`.
+- Um proc pode avisar que falhou de propósito com `return NaT;`, como retornar `null`. Quem chama trata com `on NaT`.
 - Usar um valor NaT numa conta fora de uma linha com `on NaT` também dispara Trap.
 - Na fonte, o NaT se escreve com a palavra-chave `NaT` ou com qualquer literal que contenha `?`.
 
@@ -171,7 +171,10 @@ Há dois tipos de array, e o tipo decide como os índices funcionam:
 | `x[]: T` | `0 .. N-1`, como em Java e C | Qualquer `N ≥ 0` | Listas, pilhas, texto em construção |
 | `sym x[]: T` | `-k .. +k`, com o `0` no meio | Ímpar, `N = 2k+1` | Coisas centradas: deslocamentos, coordenadas, tabelas de 3ᵏ posições |
 
-- `T` é `tryte` ou `int`. Os colchetes ficam no **nome**, como em `int x[]` do C. `sym` vem antes, como o `final`: `final sym x[]: int = ...`.
+- `T` é qualquer tipo que não seja array: `trit`, `tryte`, `int`, `real`, `text`, um enum ou um struct. Os colchetes ficam no **nome**, como em `int x[]` do C. `sym` vem antes, como o `final`: `final sym x[]: int = ...`.
+- `claim N` preenche com o zero do tipo: `0`, `0.0`, `""`, o número 0 num enum (que imprime `0` se não for um valor do enum) e, num struct, cada campo zerado.
+- Num array de struct, `v[i]` é uma cópia do elemento, `v[i].x` lê um campo e `v[i].x = 5` muda só esse campo.
+- `print(v)`, `{v}` e `toText(v)` mostram o array inteiro (`[1, 2, 3]`, `["Ana", "Bia"]`) só quando os elementos são números ou textos. Arrays de enum ou struct são impressos elemento por elemento.
 - `{a, b, c}` cria um array já preenchido, como o inicializador do Java. Com `sym`, a quantidade de valores precisa ser ímpar.
 - `claim N` com `N` negativo, `N` NaT ou (com `sym`) `N` par dispara **Trap**. Índice fora dos limites também.
 - Quando o tamanho e o índice são conhecidos na compilação (array criado com `{...}` ou `claim 5`, índice literal), um índice fora dos limites é **erro de compilação**, como no Rust.
@@ -183,7 +186,7 @@ Há dois tipos de array, e o tipo decide como os índices funcionam:
 
 | Tipo | Natureza | Pode |
 |---|---|---|
-| `x[]: T` (variável) / `own x[]: T` (parâmetro) | Linear, dono único, não copiável | Ler, escrever, `give`, `burn`, `yield` |
+| `x[]: T` (variável) / `own x[]: T` (parâmetro) | Linear, dono único, não copiável | Ler, escrever, `give`, `burn`, `return` |
 | `lent x[]: T` (só parâmetro) | Empréstimo, **segunda classe** | Ler e escrever |
 
 Toda variável que guarda um array é dona dele. Não existe aritmética de ponteiros.
@@ -205,12 +208,12 @@ Toda variável que guarda um array é dona dele. Não existe aritmética de pont
 
 ### 6.2 Regras do `own`
 
-Cada `own` deve ser consumido **exatamente uma vez** em todo caminho de execução, por `burn x`, `give x` ou `yield x`.
+Cada `own` deve ser consumido **exatamente uma vez** em todo caminho de execução, por `burn x`, `give x` ou `return x`.
 
 Erros de compilação:
 
 - Usar a variável depois de `give` ou `burn`.
-- Chegar a `}` ou `yield` com um `own` vivo (vazamento).
+- Chegar a `}` ou `return` com um `own` vivo (vazamento).
 - Copiar sem `give` (`sym c[]: int = b;`).
 - Guardar `claim` ou `{...}` em uma variável que não seja array.
 - Atribuir a um `own` que ainda está vivo.
@@ -220,7 +223,7 @@ Erros de compilação:
 
 ### 6.3 Fluxo e linearidade
 
-- **`tri`**: todos os ramos que não divergem devem terminar com o **mesmo** estado linear. Um ramo que diverge (`yield`, `break`, `continue`) precisa ter consumido o que for exigido naquele ponto de saída.
+- **`tri`**: todos os ramos que não divergem devem terminar com o **mesmo** estado linear. Um ramo que diverge (`return`, `break`, `continue`) precisa ter consumido o que for exigido naquele ponto de saída.
 - **`walk`**: o corpo não pode consumir um `own` declarado fora do laço. Antes de `break` ou `continue`, todo `own` declarado dentro do corpo deve estar consumido.
 - **`on NaT`**: o bloco é obrigado a divergir (§8.5).
 
@@ -237,14 +240,14 @@ A sintaxe segue o estilo C/Java/Rust. O que é próprio do Kestrel vem do terná
 
 **Convenção de nomes** (a mesma do Java): procs, variáveis e campos em `camelCase` (`readFile`, `idadeMinima`); tipos (`struct`, `enum`) em `PascalCase` (`TokenKind`); `const` em `MAIÚSCULAS` (`MAX_SIZE`). Os built-ins seguem essa convenção. O compilador não obriga, mas a biblioteca padrão e o `ksc.ks` seguem.
 
-### 8.1 `proc` e `yield`
+### 8.1 `proc` e `return`
 
 ```
-proc sum(lent sym v[]: int, k: int) -> int { ... yield acc; }
-proc main() -> int { ... yield 0; }
+proc sum(lent sym v[]: int, k: int) -> int { ... return acc; }
+proc main() -> int { ... return 0; }
 ```
 
-O ponto de entrada é `main`. Um `proc` sem `-> T` usa `yield;` sem valor.
+O ponto de entrada é `main`. Um `proc` sem `-> T` usa `return;` sem valor.
 
 ### 8.2 Declaração e atribuição
 
@@ -334,7 +337,7 @@ while i < 10 {
     print(i);
     i = i + 1;
 }
-while + { ... }            // laço infinito; saia com `break` ou `yield`
+while + { ... }            // laço infinito; saia com `break` ou `return`
 ```
 
 - A condição é um `trit`, reavaliada antes de cada volta. `+` executa o corpo, `−` sai do laço. **`0` e NaT disparam Trap**, como no `if`.
@@ -361,25 +364,25 @@ for i: int = 10; i > 0; i -= 2 { ... }   // passo de -2
 ### 8.5 `on NaT` (barreira de veneno)
 
 ```
-s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
+s: int = sum(lend b, 2) on NaT { burn b; return -1; };
 ```
 
 - É o `try/catch` do Kestrel, preso a uma linha. Enquanto a expressão é calculada, uma conta que falha produz NaT em vez de parar o programa.
 - Se a expressão não for NaT, `s` recebe o valor.
-- Caso contrário, executa o bloco, que precisa divergir (`yield`, `break` ou `continue`).
-- Só as contas da própria linha são tratadas. Se um proc chamado nela falhar, o programa para; para avisar quem chamou, o proc usa `yield NaT;`.
+- Caso contrário, executa o bloco, que precisa divergir (`return`, `break` ou `continue`).
+- Só as contas da própria linha são tratadas. Se um proc chamado nela falhar, o programa para; para avisar quem chamou, o proc usa `return NaT;`.
 - Depois do `;`, `s` com certeza não é NaT.
 
 ### 8.6 E/S
 
 | Comando | Efeito |
 |---|---|
-| `print(x)` | Imprime um número (em decimal) ou um `text`, sem quebra de linha. Aceita `+` entre textos: `print("Olá, " + nome)` |
+| `print(x)` | Imprime um número (em decimal), um `text`, um enum, um struct ou um array, sem quebra de linha. Aceita `+` entre textos: `print("Olá, " + nome)`. Com vários valores, separa por espaço, como no Python: `print("total:", n)` → `total: 3` |
 | `printl(x)` | Igual ao `print`, seguido de quebra de linha. `printl()` só quebra a linha |
-| `print(b)` com buffer | Imprime as células: `[-8 -1 0 1 8]`, como o `Arrays.toString` do Java. O buffer é emprestado só durante a impressão, então continua precisando de `burn` |
+| `print(b)` com array | Imprime os elementos: `[-8, -1, 0, 1, 8]`, `["Ana", "Bia"]`, como o `Arrays.toString` do Java (textos entre aspas). O buffer é emprestado só durante a impressão, então continua precisando de `burn` |
 | `printf(fmt, args...)` | Imprime texto formatado (§8.6.1) |
 | `len(s)` | Tamanho de um `text` |
-| `toText(x)` | Converte um número em `text`, em decimal: `toText(-5)` → `"-5"`, `toText(1.5)` → `"1.5"`. Com um buffer, gera `"[-8 -1 0 1 8]"` |
+| `toText(x)` | Converte um número em `text`, em decimal: `toText(-5)` → `"-5"`, `toText(1.5)` → `"1.5"`. Com um array, gera `"[-8, -1, 0, 1, 8]"` |
 | `toText(x, 't')` / `toText(x, 'v')` | Converte um inteiro em `text` ternário (`"0t-++"`) ou heptavintimal (`"0ve"`), como o `Integer.toString(x, base)` do Java |
 | `emit(c)` | Imprime um `tryte` como caractere (tabela §4) |
 | `input()` | Lê um `int` (decimal, `0t` ou `0v`). Entrada inválida é uma conta que falha |
@@ -391,7 +394,7 @@ s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
 | `readLine()` | Uma linha da entrada padrão, sem o `\n`. No fim da entrada, devolve `""` |
 | `eof()` | `+` se a entrada padrão acabou |
 | `argCount()` / `arg(i)` | Argumentos do programa: `ksvm prog.ksb a b c` dá `arg(0) == "a"` |
-| `exit(código)` | Encerra o programa com esse código de saída. É um comando que não volta, como `yield`: um `proc` pode terminar nele |
+| `exit(código)` | Encerra o programa com esse código de saída. É um comando que não volta, como `return`: um `proc` pode terminar nele |
 
 #### 8.6.1 `printf`
 
@@ -404,12 +407,12 @@ printf("exemplo de " + notacao + " = %t\n", v);   // exemplo de %t = 0t+--
 
 O formato aceita duas formas de colocar valores, que podem ser misturadas:
 
-- **Chaves:** `{nome}` imprime a variável `nome`. Só aceita nomes de variáveis e constantes. Contas vão como argumento `%`.
+- **Chaves:** `{expr}` imprime o valor de qualquer expressão, como as f-strings do Python: `{nome}`, `{p.x}`, `{v[i].nome}`, `{media(a)}`, `{a + 1:t}`. O formato (`:t`, `:v`, `:c`) vem no fim. Dentro das chaves não pode haver outra `{` ou `}`.
 - **Porcentagem:** cada `%` consome o próximo argumento, em ordem: `printf("%d + %d = %d", a, b, a + b)`.
 
 | Forma | Imprime | Aceita |
 |---|---|---|
-| `{x}` | Valor normal (decimal, texto ou nome do enum) | número, `text` ou enum |
+| `{x}` | Valor normal (decimal, texto, nome do enum, struct ou array) | número, `text`, enum, struct, array |
 | `%d` ou `%i` | Inteiro em decimal | `trit`, `tryte`, `int` |
 | `%f` ou `%r` | Real | `real` |
 | `%s` | Texto (ou o nome de um enum) | `text`, enum |
@@ -488,7 +491,7 @@ print(p);            // Pessoa { nome: "Ana", casa: Ponto { x: 3, y: 5 } }
 - Os campos podem ser números, `text`, enums e outros structs. **Arrays não**: um struct é copiado como um número, e um array tem dono.
 - Um struct não pode conter a si mesmo, nem por meio de outro struct.
 - Para criar, **todos** os campos recebem valor (`Ponto { x: 1, y: 2 }`), em qualquer ordem. Faltar, repetir ou inventar um campo é erro. Os valores são calculados na ordem em que os campos foram declarados.
-- **É copiado**, como um `int`: atribuir, passar para um proc e o `yield` fazem cópias. Não precisa de `burn` e não usa `give`/`lend`.
+- **É copiado**, como um `int`: atribuir, passar para um proc e o `return` fazem cópias. Não precisa de `burn` e não usa `give`/`lend`.
 - `p.x` lê um campo e `p.x = v` (ou `+=`, `++`...) muda um campo. Com `final`, nem os campos mudam.
 - `print`, `printl`, `{p}` e `%s` mostram o struct inteiro. `==`, `<` e as contas não existem para structs: compare os campos.
 - Por dentro, um struct ocupa um slot por campo (um struct aninhado ocupa os slots dos seus campos). O `dump` mostra cada campo como `p.x`, `p.casa.y`.
@@ -521,7 +524,7 @@ Todos os limites são potências de 3. Os de parâmetros e variáveis também ca
 | Texto | `PUSHS k`, `TLEN`, `TIDX`, `TSTR`, `TSTRT`, `TSTRV` (número → texto), `TCAT`, `TEQ`, `TSUB`, `TTOI`, `TTOF`, `CHARIS k` |
 | Largura | `NARROW6`, `NARROW1`, `ITOF`, `FTOI` (overflow vira NaT) |
 | Modo das falhas | `SOFT` (contas que falham produzem NaT; emitido antes do valor de uma linha com `on NaT`), `HARD` (volta ao padrão: Trap). Cada proc começa em `HARD` |
-| Memória | `ALLOC` (sym), `ALLOCZ` (a partir de 0), `PACK n sym` (literal `{...}`), `LDIDX`, `STIDX`, `PURGE s` |
+| Memória | `ALLOC` (sym), `ALLOCZ` (a partir de 0), `ALLOCT w sym` (elementos de `w` células, preenchidos com um modelo: `real`, `text`, struct), `PACK n sym` (literal `{...}`), `PACKT n w sym`, `LDIDX`, `STIDX`, `LDELEM off n` / `STELEM off n` (`n` células de um elemento, a partir da célula `off`: campos de struct), `PURGE s` |
 | Fluxo | `JMP a`, `JNAT a`, `BR3 a- a0 a+`, `CALL f n` (`n` = valores passados; um struct conta um por campo), `RET`, `RETN n` (devolve os `n` valores de um struct), `TRAP str` |
 | E/S | `INPUT`, `EMIT`, `PRINT`, `SHOW`, `SHOWT` (`0t`), `SHOWV` (`0v`), `DUMP str`, `READF`, `FEXISTS`, `WRITEF`, `WRITEB`, `READLN`, `EOF`, `ARGC`, `ARG`, `EXIT` |
 
@@ -578,7 +581,7 @@ stmt       = [ "final" ] IDENT ":" type "=" expr [ on_nat ] ";"
            | place ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr ";"
            | place ( "++" | "--" ) ";"
            | "burn" IDENT ";"
-           | "yield" [ expr ] ";"
+           | "return" [ expr ] ";"
            | "break" ";" | "continue" ";"
            | "tri" tri_head "{" arm arm arm "}"
            | "if" expr block [ "else" ( block | if_stmt ) ]
@@ -623,7 +626,7 @@ proc sum(lent sym v[]: int, k: int) -> int {
     walk i in span k {
         acc += v[i];
     }
-    yield acc;
+    return acc;
 }
 
 proc main() -> int {
@@ -632,7 +635,7 @@ proc main() -> int {
         b[i] = i * i;
     }
 
-    s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s: int = sum(lend b, 2) on NaT { burn b; return -1; };
     s = s << 1;                    // s = s * 3
 
     tri s <=> 10 {
@@ -641,7 +644,7 @@ proc main() -> int {
         + => print("greater");
     }
     burn b;
-    yield 0;
+    return 0;
 }
 ```
 

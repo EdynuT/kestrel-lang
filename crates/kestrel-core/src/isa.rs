@@ -86,6 +86,16 @@ pub enum Op {
     AllocZ,
     /// Pop `n` values (the first pushed is the first cell) into a fresh buffer.
     Pack { n: u32, sym: bool },
+    /// Pop `w` template values, then N: a fresh buffer of N elements of `w`
+    /// cells each, every element a copy of the template (zeros of the right
+    /// type: `0`, `0.0`, `""`, or a struct's fields).
+    AllocT { w: u8, sym: bool },
+    /// Like `pack`, for elements of `w` cells (a struct): pop `n * w` values.
+    PackT { n: u32, w: u8, sym: bool },
+    /// Pop index and pointer, push `n` cells of that element from cell `off` on.
+    LdElem { off: u8, n: u8 },
+    /// Pop `n` values, index and pointer; store them into that element from cell `off` on.
+    StElem { off: u8, n: u8 },
     /// Pop index and pointer, push the cell.
     LdIdx,
     /// Pop value, index and pointer, store the cell.
@@ -216,6 +226,10 @@ impl Op {
             Purge(_) => 0x43,
             AllocZ => 0x44,
             Pack { .. } => 0x45,
+            AllocT { .. } => 0x46,
+            PackT { .. } => 0x47,
+            LdElem { .. } => 0x48,
+            StElem { .. } => 0x49,
 
             Jmp(_) => 0x50,
             JNat(_) => 0x51,
@@ -295,6 +309,10 @@ impl Op {
             Alloc => "alloc",
             AllocZ => "allocz",
             Pack { .. } => "pack",
+            AllocT { .. } => "alloct",
+            PackT { .. } => "packt",
+            LdElem { .. } => "ldelem",
+            StElem { .. } => "stelem",
             LdIdx => "ldidx",
             StIdx => "stidx",
             Purge(_) => "purge",
@@ -330,7 +348,8 @@ impl Op {
         1 + match self {
             PushC(_) | PushR(_) | PushS(_) | Jmp(_) | JNat(_) | Dump(_) | Trap(_) => 4,
             Test(_) | CharIs(_) | RetN(_) => 1,
-            Load(_) | Store(_) | Move(_) | Purge(_) => 2,
+            Load(_) | Store(_) | Move(_) | Purge(_) | AllocT { .. } | LdElem { .. } | StElem { .. } => 2,
+            PackT { .. } => 6,
             Br3 { .. } => 12,
             Call { .. } | Pack { .. } => 5,
             _ => 0,
@@ -359,6 +378,12 @@ impl Op {
                 out.extend_from_slice(&n.to_le_bytes());
                 out.push(u8::from(sym));
             }
+            AllocT { w, sym } => out.extend_from_slice(&[w, u8::from(sym)]),
+            PackT { n, w, sym } => {
+                out.extend_from_slice(&n.to_le_bytes());
+                out.extend_from_slice(&[w, u8::from(sym)]);
+            }
+            LdElem { off, n } | StElem { off, n } => out.extend_from_slice(&[off, n]),
             _ => {}
         }
     }
@@ -429,6 +454,23 @@ impl Op {
                     _ => return Err(DecodeError::BadOpcode { at, byte }),
                 }
             }
+            0x46 => {
+                let w = r.u8()?;
+                match r.u8()? {
+                    s @ 0..=1 => AllocT { w, sym: s == 1 },
+                    _ => return Err(DecodeError::BadOpcode { at, byte }),
+                }
+            }
+            0x47 => {
+                let n = r.u32()?;
+                let w = r.u8()?;
+                match r.u8()? {
+                    s @ 0..=1 => PackT { n, w, sym: s == 1 },
+                    _ => return Err(DecodeError::BadOpcode { at, byte }),
+                }
+            }
+            0x48 => LdElem { off: r.u8()?, n: r.u8()? },
+            0x49 => StElem { off: r.u8()?, n: r.u8()? },
             0x41 => LdIdx,
             0x42 => StIdx,
             0x43 => Purge(r.u16()?),
@@ -486,6 +528,9 @@ impl fmt::Display for Op {
             Call { f: func, argc } => write!(f, "{m:<7} fn#{func}, {argc}"),
             RetN(n) => write!(f, "{m:<7} {n}"),
             Pack { n, sym } => write!(f, "{m:<7} {n}{}", if sym { ", sym" } else { "" }),
+            AllocT { w, sym } => write!(f, "{m:<7} w{w}{}", if sym { ", sym" } else { "" }),
+            PackT { n, w, sym } => write!(f, "{m:<7} {n} w{w}{}", if sym { ", sym" } else { "" }),
+            LdElem { off, n } | StElem { off, n } => write!(f, "{m:<7} +{off} n{n}"),
             _ => f.write_str(m),
         }
     }
@@ -541,7 +586,7 @@ mod tests {
             Add, Sub, Mul, Div, Mod, Pow, Neg, Shl3, Shr3, Cmp3, KAnd, KOr, Test(0b101), Soft, Hard, Trap(4),
             FAdd, FSub, FMul, FDiv, FPow, FNeg, FCmp3,
             TLen, TIdx, Narrow6, Narrow1, IToF, FToI, TStr, TStrT, TStrV, TCat, TEq, TSub, TToI, TToF, CharIs(2),
-            Alloc, LdIdx, StIdx, Purge(8), AllocZ, Pack { n: 3, sym: true },
+            Alloc, LdIdx, StIdx, Purge(8), AllocZ, Pack { n: 3, sym: true }, AllocT { w: 2, sym: false }, PackT { n: 3, w: 2, sym: true }, LdElem { off: 1, n: 2 }, StElem { off: 0, n: 1 },
             Jmp(12), JNat(u32::MAX), Br3 { neg: 1, zero: 2, pos: 3 }, Call { f: 2, argc: 3 }, Ret, RetN(3),
             Input, Emit, Print, Show, Dump(5), ShowT, ShowV,
             ReadFile, FileExists, WriteFile, WriteBytes, ReadLine, Eof, ArgCount, Arg, Exit,

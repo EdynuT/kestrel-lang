@@ -25,7 +25,7 @@ pub enum Tok {
 
     // Keywords
     Proc,
-    Yield,
+    Return,
     Const,
     Final,
     Claim,
@@ -109,7 +109,7 @@ pub struct Token {
 
 const KEYWORDS: &[(&str, Tok)] = &[
     ("proc", Tok::Proc),
-    ("yield", Tok::Yield),
+    ("return", Tok::Return),
     ("const", Tok::Const),
     ("final", Tok::Final),
     ("claim", Tok::Claim),
@@ -487,7 +487,7 @@ proc sum(lent sym v[]: int, k: int) -> int {
     walk i in span k {
         acc += v[i];
     }
-    yield acc;
+    return acc;
 }
 
 proc main() -> int {
@@ -496,7 +496,7 @@ proc main() -> int {
         b[i] = i * i;
     }
 
-    s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s: int = sum(lend b, 2) on NaT { burn b; return -1; };
     s = s << 1;                    // s = s * 3
 
     tri s <=> 10 {
@@ -505,7 +505,7 @@ proc main() -> int {
         + => print("greater"),
     }
     burn b;
-    yield 0;
+    return 0;
 }
 "#;
         let t = toks(src);

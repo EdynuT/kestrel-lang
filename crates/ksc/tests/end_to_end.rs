@@ -52,7 +52,7 @@ fn print_buffers() {
         printf("{t:c} {t}\n"); print(toText(b) + "!"); burn b; burn t;"#;
     let e = ksc::compile("proc main() { sym b[]: int = claim 3; burn b; print(b); }").unwrap_err();
     assert!(e.message.contains("after it was burned"), "{}", e.message);
-    assert_eq!(main_out(body), "[-8 -1 0 1 8]\n[0t-0+ 0t- 0t0 0t+ 0t+0-] [0vh 0va 0v0 0vA 0vH]\nOlá [15 -12 -54]\n[-8 -1 0 1 8]!");
+    assert_eq!(main_out(body), "[-8, -1, 0, 1, 8]\n[0t-0+, 0t-, 0t0, 0t+, 0t+0-] [0vh, 0va, 0v0, 0vA, 0vH]\nOlá [15, -12, -54]\n[-8, -1, 0, 1, 8]!");
 }
 
 #[test]
@@ -73,16 +73,16 @@ fn spec_example() {
 proc sum(lent sym v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k { acc += v[i]; }
-    yield acc;
+    return acc;
 }
 proc main() -> int {
     sym b[]: int = claim 5;
     walk i in span 2 { b[i] = i * i; }
-    s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s: int = sum(lend b, 2) on NaT { burn b; return -1; };
     s = s << 1;
     tri s <=> 10 { - => print("less"); 0 => print("equal"); + => print("greater"); }
     burn b;
-    yield 0;
+    return 0;
 }"#;
     // 4 + 1 + 0 + 1 + 4 = 10, times 3 = 30 > 10.
     let (r, o) = run_with(src, "");
@@ -109,15 +109,15 @@ fn arithmetic_and_overflow() {
             printf("%d ", q);
         }
         t: tryte = 300;
-        u: tryte = t + 100 on NaT { print(" tryte"); yield; };"#;
+        u: tryte = t + 100 on NaT { print(" tryte"); return; };"#;
     assert_eq!(main_out(body), "-36 [/0]36  tryte");
     // Soft mode covers only that line, not the procs it calls.
-    let src = "proc div(a: int, b: int) -> int { yield a / b; }
-               proc main() { x := div(1, 0) on NaT { print(\"caught\"); yield; }; }";
+    let src = "proc div(a: int, b: int) -> int { return a / b; }
+               proc main() { x := div(1, 0) on NaT { print(\"caught\"); return; }; }";
     assert!(run_with(src, "").0.unwrap_err().reason.contains("division by zero"));
-    // A proc can still report failure on purpose by yielding NaT.
-    let src = "proc safe(a: int, b: int) -> int { if b == 0 { yield NaT; } yield a / b; }
-               proc main() { x := safe(1, 0) on NaT { print(\"no result\"); yield; }; print(x); }";
+    // A proc can still report failure on purpose by returning NaT.
+    let src = "proc safe(a: int, b: int) -> int { if b == 0 { return NaT; } return a / b; }
+               proc main() { x := safe(1, 0) on NaT { print(\"no result\"); return; }; print(x); }";
     assert_eq!(out(src), "no result");
 }
 
@@ -127,7 +127,7 @@ fn reals_and_conversions() {
     assert_eq!(main_out(r#"print((int) 6.9); print(" "); print((int) -6.9); print(" "); print((real) 7 / 2.0);"#), "6 -6 3.5");
     assert!(main_trap("print((tryte) 500);").contains("500 does not fit in a tryte (-364..364)"));
     assert!(main_trap("print(1.0 / 0.0);").contains("division by zero"));
-    assert_eq!(main_out(r#"r := 1.0 / 0.0 on NaT { print("caught"); yield; };"#), "caught");
+    assert_eq!(main_out(r#"r := 1.0 / 0.0 on NaT { print("caught"); return; };"#), "caught");
 }
 
 #[test]
@@ -158,9 +158,9 @@ fn walks() {
 fn procs_buffers_and_ownership() {
     let src = r#"
 proc fill(lent sym v[]: int, k: int) { walk i in span k { v[i] = i * 10; } }
-proc total(lent sym v[]: int, k: int) -> int { s := 0; walk i in span k { s += v[i]; } yield s; }
-proc make(n: int) -> sym int[] { sym b[]: int = claim 2 * n + 1; yield b; }
-proc consume(own sym b[]: int) -> int { x := b[0]; burn b; yield x; }
+proc total(lent sym v[]: int, k: int) -> int { s := 0; walk i in span k { s += v[i]; } return s; }
+proc make(n: int) -> sym int[] { sym b[]: int = claim 2 * n + 1; return b; }
+proc consume(own sym b[]: int) -> int { x := b[0]; burn b; return x; }
 proc main() {
     sym b[]: int = make(2);
     fill(lend b, 2);
@@ -172,8 +172,8 @@ proc main() {
 
 #[test]
 fn recursion() {
-    let src = "proc fact(n: int) -> int { tri n <=> 1 { - => yield 1; 0 => yield 1; + => yield n * fact(n - 1); } }
-               proc main() { print(fact(15)); f := fact(16) on NaT { print(\" big\"); yield; }; print(f); }";
+    let src = "proc fact(n: int) -> int { tri n <=> 1 { - => return 1; 0 => return 1; + => return n * fact(n - 1); } }
+               proc main() { print(fact(15)); f := fact(16) on NaT { print(\" big\"); return; }; print(f); }";
     // 15! = 1307674368000 fits in a word; 16! = 20922789888000 overflows.
     let (r, o) = run_with(src, "");
     assert_eq!(o, "1307674368000");
@@ -190,9 +190,9 @@ fn text_and_characters() {
 fn input_and_on_nat() {
     let src = r#"
 proc main() -> int {
-    x := input() on NaT { print("bad input"); yield 1; };
+    x := input() on NaT { print("bad input"); return 1; };
     print(x * 2);
-    yield 0;
+    return 0;
 }"#;
     assert_eq!(run_with(src, "21\n"), (Ok(Value::Word(Word::ZERO)), "42".to_string()));
     assert_eq!(run_with(src, "0t+0-\n").1, "16");
@@ -235,7 +235,7 @@ fn while_loops() {
     let (r, _) = run_with("proc main() { t: trit = 0; while t { } }", "");
     assert_eq!(r.unwrap_err().reason, "loop condition is 0 (unknown)");
     // collatz(27) takes 111 steps
-    let src = r#"proc steps(n: int) -> int { k := 0; while n != 1 { if n % 2 == 0 { n = n / 2; } else { n = 3 * n + 1; } k = k + 1; } yield k; }
+    let src = r#"proc steps(n: int) -> int { k := 0; while n != 1 { if n % 2 == 0 { n = n / 2; } else { n = 3 * n + 1; } k = k + 1; } return k; }
         proc main() { print(steps(27)); }"#;
     assert_eq!(out(src), "111");
 }
@@ -247,7 +247,7 @@ fn compound_assignment() {
         n := 5; n--; printf(" %d", n);
         r := 1.5; r *= 2.0; r -= 0.5; printf(" %f", r);
         sym b[]: int = claim 3; b[1] += 7; b[1]++; b[-1] -= 1; printf(" {b}", ); burn b;"#;
-    assert_eq!(main_out(body), "012 1 4 2.5 [-1 0 8]");
+    assert_eq!(main_out(body), "012 1 4 2.5 [-1, 0, 8]");
     let e = ksc::compile("proc main() { i := 0; final f := 1; f++; }").unwrap_err();
     assert!(e.message.contains("is final"), "{}", e.message);
     let e = ksc::compile("proc main() { i := 0; x := i++; }").unwrap_err();
@@ -259,10 +259,10 @@ fn enums_and_match() {
     let src = r#"enum Cor { Vermelho, Verde, Azul }
         enum Http { Ok = 200, NotFound = 404, Teapot }
         proc acao(c: Cor) -> text {
-            match c { Cor.Vermelho => yield "pare"; Cor.Verde => yield "siga"; Cor.Azul => yield "?"; }
+            match c { Cor.Vermelho => return "pare"; Cor.Verde => return "siga"; Cor.Azul => return "?"; }
         }
         proc tipo(c: tryte) -> text {
-            match c { 'a' | 'e' | 'i' | 'o' | 'u' => yield "vogal"; '0' | '1' => { yield "digito"; } else => yield "outro"; }
+            match c { 'a' | 'e' | 'i' | 'o' | 'u' => return "vogal"; '0' | '1' => { return "digito"; } else => return "outro"; }
         }
         proc main() {
             c: Cor = Cor.Verde;
@@ -293,7 +293,7 @@ fn files_args_stdin_exit() {
         writeBytes(arg(1) + ".bin", b);
         burn b;
         printf("{n} %s %s %d", readLine(), readLine(), eof());
-        yield argCount();
+        return argCount();
     }"#;
     let m = build(src);
     let out_path = dir.join("out.txt");
@@ -313,7 +313,7 @@ fn files_args_stdin_exit() {
     assert!(r.unwrap_err().reason.contains("not a byte"));
     let (r, _) = run_with("proc main() { a := arg(0); }", "");
     assert!(r.unwrap_err().reason.contains("there are 0 arguments"));
-    // exit ends a proc like yield does
+    // exit ends a proc like return does
     assert_eq!(out("proc f() -> int { exit(0); } proc main() { print(f()); }"), "");
     let e = ksc::compile("proc main() { x := exit(1); }").unwrap_err();
     assert!(e.message.contains("is a statement"), "{}", e.message);
@@ -410,8 +410,8 @@ fn structs() {
     let src = r#"enum Cor { Vermelho, Azul }
         struct Ponto { x: int; y: int; }
         struct Pessoa { nome: text; casa: Ponto; cor: Cor; }
-        proc mover(p: Ponto, dx: int) -> Ponto { p.x += dx; yield p; }
-        proc origem() -> Ponto { yield Ponto { x: 0, y: 0 }; }
+        proc mover(p: Ponto, dx: int) -> Ponto { p.x += dx; return p; }
+        proc origem() -> Ponto { return Ponto { x: 0, y: 0 }; }
         proc main() {
             a := Ponto { y: 2, x: 1 };
             b := a; b.x = 10;
@@ -445,6 +445,8 @@ fn structs() {
     assert!(e.message.contains("struct `A` contains itself"), "{}", e.message);
     let e = ksc::compile("struct A { v[]: int; } proc main() {}").unwrap_err();
     assert!(e.message.contains("cannot hold an array"), "{}", e.message);
+    let e = ksc::compile("struct P { x: int; } proc main() { p := P { x: 1 }; printf(\"%t\", p); }").unwrap_err();
+    assert!(e.note.unwrap().contains("with `%s` or `{x}`, or format one field"));
     let e = ksc::compile("struct A { x: int, y: int } proc main() {}").unwrap_err();
     assert!(e.note.unwrap().contains("end with `;`"));
 }
@@ -454,4 +456,83 @@ fn old_snake_case_names_point_to_camel_case() {
     let e = ksc::compile("proc main() { t := to_text(5); }").unwrap_err();
     assert!(e.message.contains("unknown proc `to_text`"), "{}", e.message);
     assert_eq!(e.note.as_deref(), Some("built-ins are written in camelCase: `toText`"));
+}
+
+#[test]
+fn arrays_of_any_type() {
+    let src = r#"enum Cor { Vermelho = 1, Azul }
+        struct Ponto { x: int; y: int; }
+        struct Aluno { nome: text; nota: real; pos: Ponto; }
+        proc soma(lent ps[]: Ponto) -> Ponto {
+            t := Ponto { x: 0, y: 0 };
+            for i: int = 0; i < len(ps); i++ { t.x += ps[i].x; t.y += ps[i].y; }
+            return t;
+        }
+        proc criar(n: int) -> Ponto[] {
+            v[]: Ponto = claim n;
+            for i: int = 0; i < n; i++ { v[i] = Ponto { x: i, y: i * i }; }
+            return v;
+        }
+        proc main() {
+            nomes[]: text = {"Ana", "Bia"}; nomes[1] = nomes[1] + "triz"; printl(nomes);
+            notas[]: real = claim 2; notas[0] = 9.5; printl(notas);
+            cores[]: Cor = claim 2; cores[1] = Cor.Azul; printf("%s %s\n", cores[0], cores[1]);
+            ps[]: Ponto = {Ponto { x: 1, y: 2 }, Ponto { x: 3, y: 4 }, Ponto { x: 5, y: 6 }};
+            ps[0].y = 40; ps[1].x++;
+            printl(ps[2]); printl(soma(lend ps));
+            sym s[]: Ponto = {Ponto { x: 7, y: 7 }, Ponto { x: 8, y: 8 }, Ponto { x: 9, y: 9 }};
+            printl(s[-1]); burn s;
+            v[]: Ponto = criar(4); printl(v[3]);
+            turma[]: Aluno = claim 2;
+            turma[1] = Aluno { nome: "Bia", nota: 8.5, pos: Ponto { x: 5, y: 6 } };
+            turma[1].pos.y = 60;
+            printl(turma[0]); printl(turma[1]); printl(len(turma));
+            burn nomes; burn notas; burn cores; burn ps; burn v; burn turma;
+        }"#;
+    assert_eq!(
+        out(src),
+        "[\"Ana\", \"Biatriz\"]\n[9.5, 0.0]\n0 Azul\nPonto { x: 5, y: 6 }\nPonto { x: 10, y: 50 }\nPonto { x: 7, y: 7 }\nPonto { x: 3, y: 9 }\n\
+         Aluno { nome: \"\", nota: 0.0, pos: Ponto { x: 0, y: 0 } }\n\
+         Aluno { nome: \"Bia\", nota: 8.5, pos: Ponto { x: 5, y: 60 } }\n2\n"
+    );
+    let (r, _) = run_with("struct P { x: int; } proc main() { v[]: P = claim 2; i := 2; printl(v[i].x); burn v; }", "");
+    assert!(r.unwrap_err().reason.contains("index 2 outside 0..1"));
+    let e = ksc::compile("struct P { x: int; } proc main() { v[]: P = claim 2; printl(v); burn v; }").unwrap_err();
+    assert!(e.message.contains("an array of P cannot be printed whole"), "{}", e.message);
+    let e = ksc::compile("proc main() { v[]: int[] = claim 2; }").unwrap_err();
+    assert!(e.message.contains("an array cannot hold arrays"), "{}", e.message);
+}
+
+#[test]
+fn print_several_values() {
+    let body = r#"n := 3; nomes[]: text = {"Ana Maria", "Bia"};
+        printl("total:", n, nomes);
+        print(1, 2.5); print("|"); printl(); printl("a" + "b", 'c' == 'c');
+        burn nomes;"#;
+    assert_eq!(main_out(body), "total: 3 [\"Ana Maria\", \"Bia\"]\n1 2.5|\nab 1\n");
+    let e = ksc::compile("proc main() { print(); }").unwrap_err();
+    assert!(e.message.contains("at least 1 argument"), "{}", e.message);
+}
+
+#[test]
+fn yield_became_return() {
+    assert_eq!(out("proc dobro(x: int) -> int { return x * 2; } proc main() { print(dobro(21)); }"), "42");
+    let e = ksc::compile("proc f() -> int { yield 1; } proc main() {}").unwrap_err();
+    assert!(e.message.contains("`yield` is now `return`"), "{}", e.message);
+}
+
+#[test]
+fn printf_braces_take_expressions() {
+    let src = r#"struct Aluno { nome: text; n1: real; n2: real; }
+        proc media(a: Aluno) -> real { return (a.n1 + a.n2) / 2.0; }
+        proc main() {
+            t[]: Aluno = {Aluno { nome: "Ana", n1: 6.0, n2: 4.5 }};
+            a := 5;
+            printf("{t[0].nome}: {media(t[0])} | {a + 1:t} {a * 2:v} {a > 1} {{a}}\n");
+            burn t;
+        }"#;
+    assert_eq!(out(src), "Ana: 5.25 | 0t+-0 0vJ 1 {a}\n");
+    let e = ksc::compile("proc main() { a := 1; printf(\"{a +}\"); }").unwrap_err();
+    assert!(e.message.contains("expected an expression"), "{}", e.message);
+    assert_eq!(e.span.start, 34);
 }

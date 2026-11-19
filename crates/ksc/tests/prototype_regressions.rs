@@ -50,7 +50,7 @@ fn bug5_tri_arm_leaks_when_another_diverges() {
     // Prototype: with one diverging arm, only the first surviving arm was checked.
     let e = compile_error(
         "proc main() { sym a[]: int = claim 3; t: trit = -;
-           tri t { - => { burn a; yield; } 0 => burn a; + => {} } }",
+           tri t { - => { burn a; return; } 0 => burn a; + => {} } }",
     );
     assert!(e.contains("different states"), "{e}");
 }
@@ -58,7 +58,7 @@ fn bug5_tri_arm_leaks_when_another_diverges() {
 #[test]
 fn bug8_wrong_number_of_arguments() {
     // Prototype: `f(1, 2, 3)` for `fn f(x)` panicked inside the VM.
-    let e = compile_error("proc f(x: int) -> int { yield x; } proc main() { y := f(1, 2, 3); }");
+    let e = compile_error("proc f(x: int) -> int { return x; } proc main() { y := f(1, 2, 3); }");
     assert!(e.contains("takes 1 argument, found 3"), "{e}");
 }
 
@@ -66,7 +66,7 @@ fn bug8_wrong_number_of_arguments() {
 fn bug9_poison_guard_that_falls_through() {
     // Prototype: a guard whose else did not diverge produced NaT anyway.
     let e = compile_error("proc main() { x := 1 / 0 on NaT { print(\"oops\"); }; print(x); }");
-    assert!(e.contains("must end with `yield`"), "{e}");
+    assert!(e.contains("must end with `return`"), "{e}");
 }
 
 // Bug 6 (inner `let` overwrote the outer variable) and bug 7 (shift

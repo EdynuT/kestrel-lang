@@ -20,6 +20,9 @@ const BUILTINS: [&str; 25] = [
     "isLetter", "isUpper", "isLower", "isSpace", "readFile", "fileExists", "writeFile", "writeBytes",
     "readLine", "eof", "argCount", "arg", "exit",
 ];
+/// Most cells one array element may take (a struct takes one per field).
+const MAX_ELEM_WIDTH: usize = 243;
+
 /// Names of the `is_*` built-ins, in `charset::Class::ALL` order.
 const CHAR_CLASSES: [&str; 5] = ["isDigit", "isLetter", "isUpper", "isLower", "isSpace"];
 
@@ -75,7 +78,7 @@ pub fn check(program: &Program) -> R<Hir> {
         return Err(Diagnostic::new("`main` cannot take parameters", main.span));
     }
     if !matches!(main.ret, Type::Void | Type::Scalar(Scalar::Int)) {
-        return Err(Diagnostic::new(format!("`main` must yield an int or nothing, not {}", main.ret), main.span));
+        return Err(Diagnostic::new(format!("`main` must return an int or nothing, not {}", main.ret), main.span));
     }
     let mut procs = Vec::new();
     for item in &program.items {
@@ -207,19 +210,21 @@ impl Checker {
             variants.push((v.name.clone(), k));
             next = k + 1;
         }
-        // proc $name.E(v: int) -> text { if v == k0 { yield "A"; } ... yield "Last"; }
+        // proc $name.E(v: int) -> text { if v == k0 { return "A"; } ... return "Last"; }
         let sp = e.name.span;
         let ex = |kind| Expr { kind, span: sp };
         let st = |kind| ast::Stmt { kind, span: sp };
-        let (last, rest) = variants.split_last().expect("checked non-empty");
+        // A value that is not in the enum (like the 0 that `claim` fills
+        // with) prints as its number.
         let mut stmts = Vec::new();
-        for (n, k) in rest {
+        for (n, k) in &variants {
             let v = ex(ExprKind::Var("v".into()));
             let cond = ex(ExprKind::Binary(BinOp::Eq, Box::new(v), Box::new(ex(ExprKind::Num(Word::new(*k))))));
-            let then = ast::Block { stmts: vec![st(StmtKind::Yield(Some(ex(ExprKind::Str(n.clone())))))], span: sp };
+            let then = ast::Block { stmts: vec![st(StmtKind::Return(Some(ex(ExprKind::Str(n.clone())))))], span: sp };
             stmts.push(st(StmtKind::If { cond, then, otherwise: None }));
         }
-        stmts.push(st(StmtKind::Yield(Some(ex(ExprKind::Str(last.0.clone()))))));
+        let num = ex(ExprKind::Call { name: ast::Ident { name: "toText".into(), span: sp }, args: vec![ex(ExprKind::Var("v".into()))] });
+        stmts.push(st(StmtKind::Return(Some(num))));
         let name_proc = format!("$name.{name}");
         let int = ast::TypeExpr { ty: Type::Scalar(Scalar::Int), span: sp };
         let decl = ast::ProcDecl {
@@ -234,6 +239,23 @@ impl Checker {
 
     /// Turns a type name into its enum or struct type.
     fn resolve(&self, t: &ast::TypeExpr) -> R<Type> {
+        let buf = match t.ty {
+            Type::Own(b) | Type::Lent(b) => b,
+            Type::Named(_) => return self.resolve_name(t),
+            other => return Ok(other),
+        };
+        let elem_ty = self.resolve(&ast::TypeExpr { ty: buf.ty(), span: t.span })?;
+        if let Type::Struct(n) = elem_ty {
+            let w = width(&self.structs, elem_ty);
+            if w > MAX_ELEM_WIDTH {
+                return Err(err(format!("struct `{n}` has {w} fields (counting nested ones); an array element can have at most {MAX_ELEM_WIDTH}"), t.span));
+            }
+        }
+        let buf = ast::Buf { elem: ast::Elem::of(elem_ty).expect("not an array"), ..buf };
+        Ok(if let Type::Own(_) = t.ty { Type::Own(buf) } else { Type::Lent(buf) })
+    }
+
+    fn resolve_name(&self, t: &ast::TypeExpr) -> R<Type> {
         let Type::Named(n) = t.ty else { return Ok(t.ty) };
         if let Some(info) = self.enums.get(n) {
             return Ok(Type::Enum(info.name));
@@ -304,6 +326,12 @@ impl Checker {
                 let body = self.field_of(*body, off, ty, span);
                 hx(HExprKind::Bind(tmp, value, Box::new(body)), ty, span)
             }
+            // `pts[i].x`: read just that field of the element.
+            HExprKind::Index(arr, idx) if matches!(arr.kind, HExprKind::Local(_)) => {
+                let HExprKind::Local(a) = arr.kind else { unreachable!() };
+                hx(HExprKind::ElemField(a, idx, off), ty, span)
+            }
+            HExprKind::ElemField(a, idx, o) => hx(HExprKind::ElemField(a, idx, o + off), ty, span),
             _ => {
                 let tmp = self.new_local("$struct", base.ty, LocalKind::Hidden, span);
                 let read = hx(HExprKind::Field(tmp, off), ty, span);
@@ -372,7 +400,7 @@ impl Checker {
             None => Type::Void,
         };
         if let (Type::Lent(_), Some(t)) = (ret, p.ret) {
-            return Err(err("a proc cannot yield a lent buffer", t.span).with_note("lent buffers only live as long as the call"));
+            return Err(err("a proc cannot return a lent buffer", t.span).with_note("lent buffers only live as long as the call"));
         }
         self.proc_ids.insert(name.clone(), self.sigs.len());
         self.sigs.push(Sig { params, ret, span: p.name.span });
@@ -388,7 +416,7 @@ impl Checker {
         let body = self.block(&p.body)?;
         if sig.ret != Type::Void && !body.diverges() {
             let end = Span::new(p.body.span.end - 1, p.body.span.end);
-            return Err(err(format!("`{}` must end with `yield` (it returns {})", p.name.name, sig.ret), end));
+            return Err(err(format!("`{}` must end with `return` (it returns {})", p.name.name, sig.ret), end));
         }
         let f = std::mem::replace(&mut self.f, FnCx::new(Type::Void));
         Ok(HProc { name: p.name.name.clone(), params: p.params.len(), ret: sig.ret, locals: f.locals, body })
@@ -426,7 +454,7 @@ impl Checker {
             if let Some(prev) = stmts.last() {
                 let diverged = HBlock { stmts: vec![prev.clone()], scope: vec![], span: prev.span }.diverges();
                 if diverged {
-                    return Err(err("unreachable code", s.span).with_note("nothing runs after `yield`, `break` or `continue`"));
+                    return Err(err("unreachable code", s.span).with_note("nothing runs after `return`, `break` or `continue`"));
                 }
             }
             stmts.push(self.stmt(s)?);
@@ -465,7 +493,7 @@ impl Checker {
                         }
                         let hb = self.block(b)?;
                         if !hb.diverges() {
-                            return Err(err("the `on NaT` block must end with `yield`, `break` or `continue`", b.span)
+                            return Err(err("the `on NaT` block must end with `return`, `break` or `continue`", b.span)
                                 .with_note("after it, the variable is guaranteed not to be NaT"));
                         }
                         Some(hb)
@@ -495,19 +523,19 @@ impl Checker {
                     t => return Err(err(format!("only an own buffer can be burned, `{}` is {t}", name.name), name.span)),
                 }
             }
-            StmtKind::Yield(v) => match (self.f.ret, v) {
-                (Type::Void, None) => HStmtKind::Yield(None),
+            StmtKind::Return(v) => match (self.f.ret, v) {
+                (Type::Void, None) => HStmtKind::Return(None),
                 (Type::Void, Some(e)) => {
-                    return Err(err("this proc has no return type, so it yields nothing", e.span).with_note("write `yield;`"));
+                    return Err(err("this proc has no return type, so it returns nothing", e.span).with_note("write `return;`"));
                 }
-                (t, None) => return Err(err(format!("this proc must yield a {t}"), s.span)),
+                (t, None) => return Err(err(format!("this proc must return a {t}"), s.span)),
                 (Type::Own(e), Some(Expr { kind: ExprKind::Var(name), span })) => {
-                    // `yield b` hands ownership back to the caller.
+                    // `return b` hands ownership back to the caller.
                     let id = self.lookup(name).ok_or_else(|| self.unknown(name, *span))?;
                     let h = self.give(id, *span)?;
-                    HStmtKind::Yield(Some(self.coerce(h, Type::Own(e))?))
+                    HStmtKind::Return(Some(self.coerce(h, Type::Own(e))?))
                 }
-                (t, Some(e)) => HStmtKind::Yield(Some(self.expect(e, t)?)),
+                (t, Some(e)) => HStmtKind::Return(Some(self.expect(e, t)?)),
             },
             StmtKind::Break | StmtKind::Continue => {
                 if self.f.loops == 0 {
@@ -654,10 +682,17 @@ impl Checker {
                 .with_note("declare it without `final` if it needs to change"));
         }
         if !place.fields.is_empty() {
-            if place.index.is_some() {
-                return Err(err("arrays of structs are not supported yet", place.span));
-            }
             let (mut off, mut ty) = (0, local.ty);
+            let index = match (&place.index, local.ty) {
+                (Some(idx), Type::Own(b) | Type::Lent(b)) => {
+                    ty = b.ty();
+                    let hidx = self.index(idx)?;
+                    self.check_index(id, &hidx)?;
+                    Some(hidx)
+                }
+                (Some(_), t) => return Err(err(format!("cannot index a {t}"), place.name.span)),
+                (None, _) => None,
+            };
             for f in &place.fields {
                 let Type::Struct(sname) = ty else {
                     return Err(err(format!("{ty} has no fields"), f.span));
@@ -667,13 +702,13 @@ impl Checker {
                 ty = t;
             }
             let hv = self.expect(value, ty)?;
-            return Ok(HStmtKind::Assign { local: id, index: None, field: off, value: hv });
+            return Ok(HStmtKind::Assign { local: id, index, field: off, value: hv });
         }
         match (&place.index, local.ty) {
             (Some(idx), Type::Own(e) | Type::Lent(e)) => {
                 let hidx = self.index(idx)?;
                 self.check_index(id, &hidx)?;
-                let hv = self.expect(value, Type::Scalar(e.scalar()))?;
+                let hv = self.expect(value, e.ty())?;
                 Ok(HStmtKind::Assign { local: id, index: Some(hidx), field: 0, value: hv })
             }
             (Some(_), Type::Text) => Err(err("text is read-only", place.span)),
@@ -737,9 +772,9 @@ impl Checker {
         let name = &self.f.locals[id].name;
         let range = if n == 0 { "none: it is empty".to_string() } else if b.sym { format!("{lo}..+{hi}") } else { format!("{lo}..{hi}") };
         let note = if b.sym {
-            format!("`{name}` is `sym` with {n} cells, so index 0 is the middle one")
+            format!("`{name}` is `sym` with {n} elements, so index 0 is the middle one")
         } else {
-            format!("`{name}` has {n} cells, counted from 0")
+            format!("`{name}` has {n} elements, counted from 0")
         };
         Err(err(format!("index {i} is out of bounds: valid indices of `{name}` are {range}"), idx.span).with_note(note))
     }
@@ -898,7 +933,7 @@ impl Checker {
                     let hidx = self.index(idx)?;
                     self.check_index(id, &hidx)?;
                     let hb = hx(HExprKind::Local(id), ty, base.span);
-                    return Ok(hx(HExprKind::Index(Box::new(hb), Box::new(hidx)), Type::Scalar(el.scalar()), span));
+                    return Ok(hx(HExprKind::Index(Box::new(hb), Box::new(hidx)), el.ty(), span));
                 }
                 let hb = self.expr(base, None)?;
                 if hb.ty != Type::Text {
@@ -926,7 +961,7 @@ impl Checker {
                     }
                     let mut hs = Vec::new();
                     for item in items {
-                        hs.push(self.expect(item, Type::Scalar(buf.scalar()))?);
+                        hs.push(self.expect(item, buf.ty())?);
                     }
                     hx(HExprKind::Pack(hs), t, span)
                 }
@@ -1133,13 +1168,29 @@ impl Checker {
         self.expr(e, None).ok().map(|h| h.ty).filter(|t| matches!(t, Type::Enum(_)))
     }
 
-    /// Like `expr`, but a buffer name is lent so `print`/`printf`/`toText`
-    /// can show its cells.
+    /// Like `expr`, but an array name is lent, for built-ins that look at
+    /// the whole array (`len`, `writeBytes`).
+    fn viewed(&mut self, e: &Expr, want: Option<Type>) -> R<HExpr> {
+        if let ExprKind::Var(name) = &e.kind
+            && let Some(id) = self.lookup(name)
+            && let Type::Own(el) | Type::Lent(el) = self.f.locals[id].ty
+        {
+            return Ok(hx(HExprKind::Lend(id), Type::Lent(el), e.span));
+        }
+        self.expr(e, want)
+    }
+
+    /// Like `viewed`, for `print`/`printf`/`toText`: only arrays of numbers
+    /// and texts print whole.
     fn shown(&mut self, e: &Expr, want: Option<Type>) -> R<HExpr> {
         if let ExprKind::Var(name) = &e.kind
             && let Some(id) = self.lookup(name)
             && let Type::Own(el) | Type::Lent(el) = self.f.locals[id].ty
         {
+            if !matches!(el.ty(), Type::Scalar(_) | Type::Text) {
+                return Err(err(format!("an array of {} cannot be printed whole", el.ty()), e.span)
+                    .with_note(format!("print its elements one by one: `for i: int = 0; i < len({name}); i++ {{ printl({name}[i]); }}`")));
+            }
             return Ok(hx(HExprKind::Lend(id), Type::Lent(el), e.span));
         }
         self.expr(e, want)
@@ -1226,7 +1277,11 @@ impl Checker {
                     }
                     flush(&mut lit, &mut out)?;
                     let label = format!("{{{inner}}}");
-                    let (name, spec) = inner.split_once(':').unwrap_or((&inner, ""));
+                    // `{expr}` or `{expr:t}`: any expression, like Python's f-strings.
+                    let (code, spec) = match inner.rsplit_once(':') {
+                        Some((code, spec)) if spec.chars().all(|c| c.is_ascii_alphabetic()) => (code, spec),
+                        _ => (inner.as_str(), ""),
+                    };
                     let spec = match spec {
                         "" => ' ',
                         "t" | "v" | "c" => spec.chars().next().unwrap_or(' '),
@@ -1235,13 +1290,15 @@ impl Checker {
                                 .with_note("use `:t` (ternary), `:v` (heptavintimal) or `:c` (character)"));
                         }
                     };
-                    let ident = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-                    if !ident {
-                        return Err(err(format!("`{label}` must hold a variable name"), pspan)
-                            .with_note("for expressions use `%` and pass them as arguments: `printf(\"%d\", a + b)`"));
+                    if code.trim().is_empty() {
+                        return Err(err(format!("`{label}` must hold a value"), pspan)
+                            .with_note("e.g. `{x}`, `{p.nome}` or `{a + b}`; write `{{` to print a `{`"));
                     }
-                    let h = self.shown(&Expr { kind: ExprKind::Var(name.to_string()), span: pspan }, None)?;
+                    // Lex the code where it sits in the file, so errors point inside the text.
+                    let padded = format!("{}{code}", " ".repeat(cspan.end));
+                    let tokens = crate::lexer::lex(&padded)?;
+                    let e = crate::parser::parse_expr(tokens)?;
+                    let h = self.shown(&e, None)?;
                     let (f, h) = piece(spec, &label, h)?;
                     out.push((f, self.displayed(h)));
                 }
@@ -1291,15 +1348,21 @@ impl Checker {
         let builtin = |b: Builtin, args: Vec<HExpr>, ty: Type| hx(HExprKind::Builtin(b, args), ty, span);
         match name.name.as_str() {
             "print" | "printl" => {
+                if name.name == "print" && args.is_empty() {
+                    return Err(err("`print` takes at least 1 argument", span).with_note("`printl()` prints an empty line"));
+                }
+                // `print(a, b, c)` prints the values separated by spaces, like Python.
                 let mut pieces = Vec::new();
-                if !(name.name == "printl" && args.is_empty()) {
-                    arity(1)?;
-                    if self.is_text_chain(&args[0]) {
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        pieces.push((Fmt::Plain, hx(HExprKind::Text(" ".into()), text, span)));
+                    }
+                    if self.is_text_chain(arg) {
                         let mut texts = Vec::new();
-                        self.text_pieces(&args[0], &mut texts)?;
+                        self.text_pieces(arg, &mut texts)?;
                         pieces.extend(texts.into_iter().map(|h| (Fmt::Plain, h)));
                     } else {
-                        let a = self.shown(&args[0], None)?;
+                        let a = self.shown(arg, None)?;
                         if !matches!(a.ty, Type::Scalar(_) | Type::Text | Type::Lent(_) | Type::Enum(_) | Type::Struct(_)) {
                             return Err(err(format!("`{}` prints numbers and text, found {}", name.name, a.ty), a.span));
                         }
@@ -1398,7 +1461,7 @@ impl Checker {
             }
             "len" => {
                 arity(1)?;
-                let a = self.shown(&args[0], None)?;
+                let a = self.viewed(&args[0], None)?;
                 if !matches!(a.ty, Type::Text | Type::Lent(_)) {
                     return Err(err(format!("`len` takes text or an array, found {}", a.ty), a.span));
                 }
@@ -1423,8 +1486,8 @@ impl Checker {
             "writeBytes" => {
                 arity(2)?;
                 let p = self.expect(&args[0], text)?;
-                let a = self.shown(&args[1], None)?;
-                if !matches!(a.ty, Type::Lent(_)) {
+                let a = self.viewed(&args[1], None)?;
+                if !matches!(a.ty, Type::Lent(b) if b.ty().is_int()) {
                     return Err(err(format!("`writeBytes` takes an array of bytes (0..255), found {}", a.ty), a.span));
                 }
                 return Ok(builtin(Builtin::WriteBytes, vec![p, a], Type::Void));
@@ -1526,7 +1589,7 @@ fn piece(spec: char, label: &str, h: HExpr) -> R<(Fmt, HExpr)> {
         'd' | 'i' | 't' | 'v' => ty.is_int() || buffer,
         'f' | 'r' => ty == Type::Scalar(Scalar::Real),
         's' => matches!(ty, Type::Text | Type::Enum(_) | Type::Struct(_)),
-        'c' => matches!(ty, Type::Scalar(Scalar::Tryte | Scalar::Trit) | Type::Lent(ast::Buf { elem: Elem::Tryte, .. })),
+        'c' => matches!(ty, Type::Scalar(Scalar::Tryte | Scalar::Trit) | Type::Lent(ast::Buf { elem: Elem::Scalar(Scalar::Tryte), .. })),
         _ => matches!(ty, Type::Scalar(_) | Type::Text | Type::Enum(_) | Type::Struct(_)) || buffer,
     };
     if !ok {
@@ -1538,13 +1601,16 @@ fn piece(spec: char, label: &str, h: HExpr) -> R<(Fmt, HExpr)> {
             _ => "a number or text",
         };
         let found = match ty {
-            Type::Lent(e) => format!("a buffer of {}", e.scalar()),
+            Type::Lent(e) => format!("an array of {}", e.ty()),
             t => t.to_string(),
         };
         let d = err(format!("`{label}` prints {wants}, found {found}"), h.span);
         return Err(match spec {
             'c' if ty.is_int() => d.with_note("cast it: `(tryte) x`"),
             'd' | 'i' | 't' | 'v' if matches!(ty, Type::Enum(_)) => d.with_note("cast it to read the number: `(int) x`"),
+            'd' | 'i' | 't' | 'v' | 'f' | 'r' | 'c' if matches!(ty, Type::Struct(_)) => {
+                d.with_note("print the whole struct with `%s` or `{x}`, or format one field: `p.x`")
+            }
             'd' | 'i' if ty == Type::Scalar(Scalar::Real) => d.with_note("use `%f` for reals, or cast: `(int) x`"),
             'f' | 'r' if ty.is_int() => d.with_note("use `%d` for integers, or cast: `(real) x`"),
             _ => d,
@@ -1590,7 +1656,7 @@ proc sum(lent sym v[]: int, k: int) -> int {
     walk i in span k {
         acc += v[i];
     }
-    yield acc;
+    return acc;
 }
 
 proc main() -> int {
@@ -1598,7 +1664,7 @@ proc main() -> int {
     walk i in span 2 {
         b[i] = i * i;
     }
-    s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s: int = sum(lend b, 2) on NaT { burn b; return -1; };
     s = s << 1;
     tri s <=> 10 {
         - => print("less");
@@ -1606,7 +1672,7 @@ proc main() -> int {
         + => print("greater");
     }
     burn b;
-    yield 0;
+    return 0;
 }
 "#;
 
@@ -1645,15 +1711,15 @@ proc main() -> int {
     fn logic_and_tri() {
         assert!(err_in("x := 1; y := x && x;").contains("`&&` works on trits, found int"));
         ok("a: trit = +; b: trit = 0; c := a && b || -;");
-        assert!(err_in("x := 5; tri x { - => yield; 0 => yield; + => yield; }").contains("`tri` needs a trit"));
-        ok("x := 5; tri x <=> 0 { - => yield; 0 => yield; + => yield; }");
+        assert!(err_in("x := 5; tri x { - => return; 0 => return; + => return; }").contains("`tri` needs a trit"));
+        ok("x := 5; tri x <=> 0 { - => return; 0 => return; + => return; }");
     }
 
     #[test]
     fn names_and_scopes() {
         assert_eq!(err_in("y = 1;"), "unknown name `y`");
         // An inner `x` shadows the outer one only inside its block.
-        let hir = ok("x := 1; t: trit = +; tri t { - => { x := 2; } 0 => yield; + => yield; } x = 3;");
+        let hir = ok("x := 1; t: trit = +; tri t { - => { x := 2; } 0 => return; + => return; } x = 3;");
         assert_eq!(hir.procs[0].locals.len(), 3);
         let HStmtKind::Assign { local, .. } = &hir.procs[0].body.stmts[3].kind else { panic!() };
         assert_eq!(*local, 0);
@@ -1686,11 +1752,11 @@ proc main() -> int {
 
     #[test]
     fn calls() {
-        let defs = "proc take(own sym b[]: int) { burn b; } proc peek(lent sym v[]: int) -> int { yield v[0]; }";
+        let defs = "proc take(own sym b[]: int) { burn b; } proc peek(lent sym v[]: int) -> int { return v[0]; }";
         assert!(err_of(&format!("{defs} proc main() {{ sym b[]: int = claim 3; take(b); }}")).contains("pass it with `give b`"));
         assert!(err_of(&format!("{defs} proc main() {{ sym b[]: int = claim 3; x := peek(b); }}")).contains("pass it with `lend b`"));
         assert!(err_of(&format!("{defs} proc main() {{ x := peek(); }}")).contains("takes 1 argument, found 0"));
-        assert!(err_of("proc mk() -> sym int[] { sym b[]: int = claim 1; yield b; } proc main() { mk(); }").contains("would be lost"));
+        assert!(err_of("proc mk() -> sym int[] { sym b[]: int = claim 1; return b; } proc main() { mk(); }").contains("would be lost"));
         assert!(err_in("x := 1; x + 1;").contains("does nothing"));
         assert!(err_in("x := print(\"a\");").contains("has no value"));
         assert!(err_in("emit(1000);").contains("does not fit in a tryte"));
@@ -1705,7 +1771,7 @@ proc main() -> int {
         assert!(err_in("x: int = 70; printf(\"%c\", x);").contains("prints a tryte, found int"));
         assert!(err_in("printf(\"%d %d\", 1);").contains("has no argument"));
         assert!(err_in("printf(\"oi\", 1);").contains("has no `%`"));
-        assert!(err_in("printf(\"{1+2}\");").contains("must hold a variable name"));
+        assert!(err_in("printf(\"{}\");").contains("must hold a value"));
         assert!(err_in("printf(\"{a:q}\");").contains("unknown format `:q`"));
         assert!(err_in("printf(\"{a\");").contains("never closed"));
         assert!(err_in("printf(\"%x\", 1);").contains("unknown format `%x`"));
@@ -1730,7 +1796,7 @@ proc main() -> int {
         assert!(e("proc main() { match 5 { else => print(1); 1 => print(2); } }").contains("must be the last"));
         assert!(e("proc main() { match 5 { 1 | 1 => print(1); else => {} } }").contains("already appears"));
         assert!(e("proc main() { x := 2; match 5 { x => print(1); else => {} } }").contains("must be a literal or an enum value"));
-        assert!(check_src("enum A { X, Y } proc f(a: A) -> A { yield a; } proc main() { b := f(A.Y); print(b); }").is_ok());
+        assert!(check_src("enum A { X, Y } proc f(a: A) -> A { return a; } proc main() { b := f(A.Y); print(b); }").is_ok());
     }
 
     #[test]
@@ -1747,7 +1813,7 @@ proc main() -> int {
     #[test]
     fn print_buffers() {
         ok("sym b[]: int = claim 3; sym t[]: tryte = claim 1; printl(b); printf(\"{b} {b:t} %v {t:c} %c\", b, t); s := toText(b, 'v'); burn b; burn t;");
-        assert!(err_in("sym b[]: int = claim 3; printf(\"{b:c}\"); burn b;").contains("found a buffer of int"));
+        assert!(err_in("sym b[]: int = claim 3; printf(\"{b:c}\"); burn b;").contains("found an array of int"));
         assert!(err_in("sym b[]: int = claim 3; printf(\"%f\", b); burn b;").contains("prints a real"));
     }
 
@@ -1784,10 +1850,10 @@ proc main() -> int {
         assert!(err_of("proc main(x: int) {}").contains("cannot take parameters"));
         assert!(err_of("proc f() {} proc f() {} proc main() {}").contains("defined twice"));
         assert!(err_of("proc print() {} proc main() {}").contains("built-in"));
-        assert!(err_of("proc f() -> int { x := 1; } proc main() {}").contains("must end with `yield`"));
-        assert!(err_in("yield; x := 1;").contains("unreachable code"));
-        assert!(err_in("x := input() on NaT { print(\"bad\"); };").contains("must end with `yield`"));
-        ok("x := input() on NaT { yield; }; print(x);");
+        assert!(err_of("proc f() -> int { x := 1; } proc main() {}").contains("must end with `return`"));
+        assert!(err_in("return; x := 1;").contains("unreachable code"));
+        assert!(err_in("x := input() on NaT { print(\"bad\"); };").contains("must end with `return`"));
+        ok("x := input() on NaT { return; }; print(x);");
     }
 
     #[test]

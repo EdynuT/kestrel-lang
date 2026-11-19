@@ -129,6 +129,23 @@ impl<'a> ProcGen<'a> {
         }
     }
 
+    /// The zero value of a type, as `claim` fills new arrays.
+    fn push_zero(&mut self, ty: Type) {
+        match ty {
+            Type::Scalar(Scalar::Real) => self.push_real(Real::ZERO),
+            Type::Text => {
+                let k = self.pools.string("");
+                self.emit(Op::PushS(k));
+            }
+            Type::Struct(n) => {
+                for (_, t) in self.structs[n].clone() {
+                    self.push_zero(t);
+                }
+            }
+            _ => self.push_word(Word::ZERO),
+        }
+    }
+
     /// Loads `n` slots starting at `first`.
     fn load(&mut self, first: Slot, n: usize) {
         for k in 0..n {
@@ -146,7 +163,7 @@ impl<'a> ProcGen<'a> {
     fn run(mut self) -> R<Function> {
         self.block(&self.p.body)?;
         if !self.p.body.diverges() {
-            // A proc without `-> T` that falls off its end yields nothing.
+            // A proc without `-> T` that falls off its end returns nothing.
             self.push_word(Word::ZERO);
             self.emit(Op::Ret);
         }
@@ -282,16 +299,21 @@ impl<'a> ProcGen<'a> {
                 self.expr(value)?;
                 self.store(self.slot(*local) + *field as Slot, self.width(value.ty));
             }
-            HStmtKind::Assign { local, index: Some(idx), value, .. } => {
+            HStmtKind::Assign { local, index: Some(idx), field, value } => {
                 self.emit(Op::Load(self.slot(*local)));
                 self.expr(idx)?;
                 self.expr(value)?;
-                self.emit(Op::StIdx);
+                let n = self.width(value.ty);
+                if *field == 0 && n == 1 {
+                    self.emit(Op::StIdx);
+                } else {
+                    self.emit(Op::StElem { off: *field as u8, n: n as u8 });
+                }
             }
             HStmtKind::Burn(id) => {
                 self.emit(Op::Purge(self.slot(*id)));
             }
-            HStmtKind::Yield(v) => {
+            HStmtKind::Return(v) => {
                 match v {
                     Some(e) => self.expr(e)?,
                     None => self.push_word(Word::ZERO),
@@ -561,7 +583,10 @@ impl<'a> ProcGen<'a> {
                     let HExprKind::Local(id) = base.kind else { unreachable!("buffer index base is a local") };
                     self.emit(Op::Load(self.slot(id)));
                     self.expr(idx)?;
-                    self.emit(Op::LdIdx);
+                    match self.width(e.ty) {
+                        1 => self.emit(Op::LdIdx),
+                        w => self.emit(Op::LdElem { off: 0, n: w as u8 }),
+                    };
                 }
             }
             HExprKind::Call(pid, args) => {
@@ -613,16 +638,40 @@ impl<'a> ProcGen<'a> {
             }
             HExprKind::Claim(n) => {
                 self.expr(n)?;
-                self.emit(if is_sym(e.ty) { Op::Alloc } else { Op::AllocZ });
+                let elem = elem_ty(e.ty);
+                if elem.is_int() || matches!(elem, Type::Enum(_)) {
+                    self.emit(if is_sym(e.ty) { Op::Alloc } else { Op::AllocZ });
+                } else {
+                    // Other elements start from a typed zero: 0.0, "", or a struct of zeros.
+                    self.push_zero(elem);
+                    self.emit(Op::AllocT { w: self.width(elem) as u8, sym: is_sym(e.ty) });
+                }
             }
             HExprKind::Pack(items) => {
                 for item in items {
                     self.expr(item)?;
                 }
-                self.emit(Op::Pack { n: items.len() as u32, sym: is_sym(e.ty) });
+                let (n, sym) = (items.len() as u32, is_sym(e.ty));
+                match self.width(elem_ty(e.ty)) {
+                    1 => self.emit(Op::Pack { n, sym }),
+                    w => self.emit(Op::PackT { n, w: w as u8, sym }),
+                };
+            }
+            HExprKind::ElemField(arr, idx, off) => {
+                self.emit(Op::Load(self.slot(*arr)));
+                self.expr(idx)?;
+                self.emit(Op::LdElem { off: *off as u8, n: self.width(e.ty) as u8 });
             }
         }
         Ok(())
+    }
+}
+
+/// The element type of an array type.
+fn elem_ty(t: Type) -> Type {
+    match t {
+        Type::Own(b) | Type::Lent(b) => b.ty(),
+        other => other,
     }
 }
 

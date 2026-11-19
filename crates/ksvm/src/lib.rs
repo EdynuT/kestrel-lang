@@ -77,7 +77,9 @@ impl fmt::Display for Trap {
 impl std::error::Error for Trap {}
 
 struct Block {
-    cells: Vec<Word>,
+    cells: Vec<Value>,
+    /// Cells per element: 1, or the number of fields of a struct.
+    w: usize,
     /// Lowest valid index: `-k` for a symmetric buffer, `0` otherwise.
     lo: i64,
     generation: u32,
@@ -165,7 +167,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
     /// Zero every heap cell and register (forensic wipe before aborting).
     fn scrub(&mut self) {
         for b in &mut self.heap {
-            b.cells.fill(Word::ZERO);
+            b.cells.fill(Value::Word(Word::ZERO));
             b.live = false;
         }
         for f in &mut self.frames {
@@ -275,7 +277,10 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             Op::TLen => {
                 let n = match self.pop()? {
                     Value::Text(t) => self.texts[t as usize].len(),
-                    Value::Ptr(p) => self.cells(p)?.len(),
+                    Value::Ptr(p) => {
+                        let b = self.block(p)?;
+                        b.cells.len() / b.w
+                    }
                     other => return Err(format!("expected text or a buffer, found {other:?}")),
                 };
                 self.push(Value::Word(Word::new(n as i64)));
@@ -297,57 +302,39 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             }
 
             Op::Alloc | Op::AllocZ => {
-                let n = self.pop_word()?.get().ok_or("claim size is NaT")?;
-                let sym = op == Op::Alloc;
-                if sym && (n <= 0 || n % 2 == 0) {
-                    return Err(format!("claim {n}: a sym array needs an odd, positive size (2k+1)"));
-                }
-                if n < 0 {
-                    return Err(format!("claim {n}: size cannot be negative"));
-                }
-                if n > MAX_CELLS {
-                    return Err(format!("claim {n}: out of memory (limit {MAX_CELLS} cells)"));
-                }
-                let p = self.alloc(vec![Word::ZERO; n as usize], sym);
+                let n = self.claim_size(op == Op::Alloc, 1)?;
+                let p = self.alloc(vec![Value::Word(Word::ZERO); n], 1, op == Op::Alloc);
+                self.push(Value::Ptr(p));
+            }
+            Op::AllocT { w, sym } => {
+                let w = usize::from(w).max(1);
+                let template = self.pop_n(w)?;
+                let n = self.claim_size(sym, w)?;
+                let p = self.alloc(template.repeat(n), w, sym);
                 self.push(Value::Ptr(p));
             }
             Op::Pack { n, sym } => {
-                let n = n as usize;
-                if self.stack.len() < n {
-                    return Err("stack underflow".to_string());
-                }
-                let mut cells = Vec::with_capacity(n);
-                for v in self.stack.split_off(self.stack.len() - n) {
-                    match v {
-                        Value::Word(w) => cells.push(w),
-                        other => return Err(format!("expected an int, found {other:?}")),
-                    }
-                }
-                let p = self.alloc(cells, sym);
+                let cells = self.pop_n(n as usize)?;
+                let p = self.alloc(cells, 1, sym);
                 self.push(Value::Ptr(p));
             }
-            Op::LdIdx => {
-                let i = self.pop_word()?;
-                let p = self.pop_ptr()?;
-                let b = self.block(p)?;
-                let v = b.cells[cell_index(b, i)?];
-                self.push(Value::Word(v));
+            Op::PackT { n, w, sym } => {
+                let w = usize::from(w).max(1);
+                let cells = self.pop_n(n as usize * w)?;
+                let p = self.alloc(cells, w, sym);
+                self.push(Value::Ptr(p));
             }
-            Op::StIdx => {
-                let v = self.pop_word()?;
-                let i = self.pop_word()?;
-                let p = self.pop_ptr()?;
-                let b = self.block(p)?;
-                let at = cell_index(b, i)?;
-                b.cells[at] = v;
-            }
+            Op::LdIdx => self.load_elem(0, 1)?,
+            Op::StIdx => self.store_elem(0, 1)?,
+            Op::LdElem { off, n } => self.load_elem(usize::from(off), usize::from(n))?,
+            Op::StElem { off, n } => self.store_elem(usize::from(off), usize::from(n))?,
             Op::Purge(s) => {
                 let slot = self.frame().locals[usize::from(s)];
                 let Value::Ptr(p) = slot else {
                     return Err("burn of a buffer that was already burned or given away".into());
                 };
                 let b = self.block(p)?;
-                b.cells.fill(Word::ZERO);
+                b.cells.fill(Value::Word(Word::ZERO));
                 b.cells = Vec::new();
                 b.live = false;
                 b.generation = b.generation.wrapping_add(1);
@@ -404,7 +391,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 let vals = self.stack.split_off(self.stack.len() - n);
                 self.frames.pop();
                 if self.frames.is_empty() {
-                    return Err("`main` cannot yield a struct".into());
+                    return Err("`main` cannot return a struct".into());
                 }
                 self.stack.extend(vals);
             }
@@ -428,10 +415,11 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 let p = self.pop_ptr()?;
                 let path = self.pop_string()?;
                 let mut bytes = Vec::new();
-                for (i, w) in self.cells(p)?.iter().enumerate() {
-                    match w.get() {
-                        Some(v @ 0..=255) => bytes.push(v as u8),
-                        _ => return Err(format!("writeBytes: cell {i} is {w}, not a byte (0..255)")),
+                for (i, c) in self.cells(p)?.iter().enumerate() {
+                    match c {
+                        Value::Word(w) if (0..=255).contains(&w.get().unwrap_or(-1)) => bytes.push(w.get().unwrap_or(0) as u8),
+                        Value::Word(w) => return Err(format!("writeBytes: cell {i} is {w}, not a byte (0..255)")),
+                        other => return Err(format!("writeBytes: cell {i} is {other:?}, not a byte")),
                     }
                 }
                 std::fs::write(&path, bytes).map_err(|e| format!("cannot write file {path:?}: {e}"))?;
@@ -471,7 +459,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             Op::Emit => {
                 // A tryte buffer prints as the characters of its cells.
                 let s: String = match self.pop()? {
-                    Value::Ptr(p) => self.cells(p)?.iter().map(|&w| tryte_char(w)).collect(),
+                    Value::Ptr(p) => self.cells(p)?.iter().map(|c| if let Value::Word(w) = c { tryte_char(*w) } else { '\u{FFFD}' }).collect(),
                     Value::Word(w) => tryte_char(w).to_string(),
                     other => return Err(format!("expected an int, found {other:?}")),
                 };
@@ -573,10 +561,16 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         };
         Ok(match (v, base) {
             (Value::Word(w), _) => word_text(w, base),
-            // A buffer prints its cells: `[-8 -1 0 1 8]`.
+            // An array prints its cells: `[-8, -1, 0]`, `["Ana", "Bia"]`.
             (Value::Ptr(p), _) => {
-                let cells: Vec<String> = self.cells(p)?.iter().map(|&w| word_text(w, base)).collect();
-                format!("[{}]", cells.join(" "))
+                let mut cells = Vec::new();
+                for &c in self.cells(p)? {
+                    cells.push(match c {
+                        Value::Text(t) => format!("\"{}\"", self.texts[t as usize].iter().collect::<String>()),
+                        _ => self.render(c, op)?,
+                    });
+                }
+                format!("[{}]", cells.join(", "))
             }
             (Value::Real(r), None) => r.to_string(),
             (Value::Text(t), None) => self.texts[t as usize].iter().collect(),
@@ -663,21 +657,67 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         })
     }
 
-    fn alloc(&mut self, cells: Vec<Word>, sym: bool) -> Ptr {
-        let lo = if sym { -(cells.len() as i64 / 2) } else { 0 };
+    /// Pops the element count of a `claim` and checks it (`w` cells each).
+    fn claim_size(&mut self, sym: bool, w: usize) -> Result<usize, String> {
+        let n = self.pop_word()?.get().ok_or("claim size is NaT")?;
+        if sym && (n <= 0 || n % 2 == 0) {
+            return Err(format!("claim {n}: a sym array needs an odd, positive size (2k+1)"));
+        }
+        if n < 0 {
+            return Err(format!("claim {n}: size cannot be negative"));
+        }
+        if n.saturating_mul(w as i64) > MAX_CELLS {
+            return Err(format!("claim {n}: out of memory (limit {MAX_CELLS} cells)"));
+        }
+        Ok(n as usize)
+    }
+
+    /// Pops the top `n` values, first pushed first.
+    fn pop_n(&mut self, n: usize) -> Result<Vec<Value>, String> {
+        if self.stack.len() < n {
+            return Err("stack underflow".to_string());
+        }
+        Ok(self.stack.split_off(self.stack.len() - n))
+    }
+
+    /// `index`, `ptr` -> `n` cells of that element, from cell `off` on.
+    fn load_elem(&mut self, off: usize, n: usize) -> Result<(), String> {
+        let i = self.pop_word()?;
+        let p = self.pop_ptr()?;
+        let b = self.block(p)?;
+        let at = elem_cell(b, i, off, n)?;
+        let vals = b.cells[at..at + n].to_vec();
+        self.stack.extend(vals);
+        Ok(())
+    }
+
+    /// `n` values, `index`, `ptr`: store them into that element from cell `off` on.
+    fn store_elem(&mut self, off: usize, n: usize) -> Result<(), String> {
+        let vals = self.pop_n(n)?;
+        let i = self.pop_word()?;
+        let p = self.pop_ptr()?;
+        let b = self.block(p)?;
+        let at = elem_cell(b, i, off, n)?;
+        b.cells[at..at + n].copy_from_slice(&vals);
+        Ok(())
+    }
+
+    fn alloc(&mut self, cells: Vec<Value>, w: usize, sym: bool) -> Ptr {
+        let lo = if sym { -((cells.len() / w) as i64 / 2) } else { 0 };
         if let Some(idx) = self.free.pop() {
             let b = &mut self.heap[idx as usize];
             b.cells = cells;
+            b.w = w;
             b.lo = lo;
             b.live = true;
             Ptr { block: idx, generation: b.generation }
         } else {
-            self.heap.push(Block { cells, lo, generation: 0, live: true });
+            self.heap.push(Block { cells, w, lo, generation: 0, live: true });
             Ptr { block: (self.heap.len() - 1) as u32, generation: 0 }
         }
     }
 
-    fn cells(&self, p: Ptr) -> Result<&[Word], String> {
+    fn cells(&self, p: Ptr) -> Result<&[Value], String> {
         self.heap
             .get(p.block as usize)
             .filter(|b| b.live && b.generation == p.generation)
@@ -709,19 +749,29 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                     format!("{w:<14} {}  {}", b.to_trits(27), b.to_hepta())
                 }
                 Value::Real(r) => format!("{r:<14} (real)  {}", Word27::from(r).to_hepta()),
-                Value::Text(t) => format!("{:?}", self.module.strings[t as usize]),
+                Value::Text(t) => format!("{:?}", self.texts[t as usize].iter().collect::<String>()),
                 Value::Ptr(p) => format!("-> heap #{}", p.block),
             };
             writeln!(out, "  {reg:<4} {name:<10} = {shown}")?;
         }
         for (i, b) in self.heap.iter().enumerate().filter(|(_, b)| b.live) {
             write!(out, "  heap #{i} ({} cells):", b.cells.len())?;
-            for (k, c) in b.cells.iter().enumerate() {
+            for (k, elem) in b.cells.chunks(b.w.max(1)).enumerate() {
                 let i = k as i64 + b.lo;
+                let shown: Vec<String> = elem
+                    .iter()
+                    .map(|c| match c {
+                        Value::Word(w) => w.to_string(),
+                        Value::Real(r) => r.to_string(),
+                        Value::Text(t) => format!("{:?}", self.texts[*t as usize].iter().collect::<String>()),
+                        Value::Ptr(p) => format!("->#{}", p.block),
+                    })
+                    .collect();
+                let shown = if b.w > 1 { format!("({})", shown.join(" ")) } else { shown.join(" ") };
                 if b.lo < 0 {
-                    write!(out, " [{i:+}]={c}")?;
+                    write!(out, " [{i:+}]={shown}")?;
                 } else {
-                    write!(out, " [{i}]={c}")?;
+                    write!(out, " [{i}]={shown}")?;
                 }
             }
             writeln!(out)?;
@@ -744,15 +794,22 @@ fn tryte_char(w: Word) -> char {
     w.get().and_then(tryte_to_char).unwrap_or('\u{FFFD}')
 }
 
-fn cell_index(b: &Block, i: Word) -> Result<usize, String> {
+/// First cell of `n` cells at offset `off` inside element `i`.
+fn elem_cell(b: &Block, i: Word, off: usize, n: usize) -> Result<usize, String> {
     let i = i.get().ok_or("buffer index is NaT")?;
-    let hi = b.lo + b.cells.len() as i64 - 1;
+    let hi = b.lo + (b.cells.len() / b.w) as i64 - 1;
     if i < b.lo || i > hi {
-        let range = if b.lo < 0 { format!("{}..+{hi}", b.lo) } else { format!("0..{hi}") };
-        Err(format!("index {i} outside {range}"))
-    } else {
-        Ok((i - b.lo) as usize)
+        let range = match (b.lo < 0, hi < b.lo) {
+            (_, true) => "none: it is empty".to_string(),
+            (true, _) => format!("{}..+{hi}", b.lo),
+            (false, _) => format!("0..{hi}"),
+        };
+        return Err(format!("index {i} outside {range}"));
     }
+    if off + n > b.w {
+        return Err(format!("cells {off}..{} outside an element of {} cells", off + n, b.w));
+    }
+    Ok((i - b.lo) as usize * b.w + off)
 }
 
 /// `input()`: decimal, `0t...` or `0v...`. Anything else is NaT.
@@ -832,7 +889,7 @@ mod tests {
 
     #[test]
     fn call_and_return() {
-        // main: print(sum(8)); yield 0     sum(v): yield v + v
+        // main: print(sum(8)); return 0     sum(v): return v + v
         let m = module(
             vec![
                 func("main", 0, 0, &[c(8), Op::Call { f: 1, argc: 1 }, Op::Show, c(0), Op::Ret]),
@@ -943,13 +1000,13 @@ mod tests {
         let mut out = Vec::new();
         let mut vm = Vm::new(&m, "".as_bytes(), &mut out);
         assert!(vm.run().is_err());
-        assert!(vm.heap.iter().all(|b| !b.live && b.cells.iter().all(|c| *c == Word::ZERO)));
+        assert!(vm.heap.iter().all(|b| !b.live && b.cells.iter().all(|c| *c == Value::Word(Word::ZERO))));
         assert!(vm.stack.is_empty() && vm.frames.is_empty());
     }
 
     #[test]
     fn nat_guard_and_input() {
-        // x = input() on NaT { print "bad"; yield -1 }; print(x)
+        // x = input() on NaT { print "bad"; return -1 }; print(x)
         // Soft, Input, Hard (1 each) + JNat(5) + Show(1) + PushC(5) + Ret(1): the handler starts at byte 15.
         let m = module(
             vec![func(

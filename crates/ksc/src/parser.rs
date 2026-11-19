@@ -19,6 +19,16 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
     Ok(Program { items })
 }
 
+/// One expression and nothing else (the `{...}` of a `printf` format).
+pub fn parse_expr(tokens: Vec<Token>) -> Result<Expr, Diagnostic> {
+    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0 };
+    let e = p.expr()?;
+    if p.peek() != &Tok::Eof {
+        return Err(p.unexpected("the end of `{...}`"));
+    }
+    Ok(e)
+}
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -158,14 +168,6 @@ impl Parser {
         Ok(ProcDecl { name, params, ret, body })
     }
 
-    fn elem(&self, s: Scalar, span: Span) -> PResult<Elem> {
-        match s {
-            Scalar::Tryte => Ok(Elem::Tryte),
-            Scalar::Int => Ok(Elem::Int),
-            _ => Err(Diagnostic::new(format!("arrays hold trytes or ints, not {s}"), span)),
-        }
-    }
-
     /// `[sym] name[]: T` (array) or `name: T`, as in declarations and
     /// parameters. Returns the name and its type.
     fn typed_name(&mut self, sym: bool, sym_span: Span) -> PResult<(Ident, TypeExpr)> {
@@ -187,10 +189,10 @@ impl Parser {
             }
             return Ok((name, ty));
         }
-        let Type::Scalar(s) = ty.ty else {
-            return Err(Diagnostic::new(format!("arrays hold trytes or ints, not {}", ty.ty), ty.span));
+        let Some(elem) = Elem::of(ty.ty) else {
+            return Err(Diagnostic::new("an array cannot hold arrays", ty.span)
+                .with_note("write the element type: `x[]: int`"));
         };
-        let elem = self.elem(s, ty.span)?;
         Ok((name, TypeExpr { ty: Type::Own(Buf { elem, sym }), span: ty.span }))
     }
 
@@ -256,38 +258,36 @@ impl Parser {
     fn type_expr(&mut self) -> PResult<TypeExpr> {
         let start = self.span();
         let sym = self.eat(&Tok::Sym);
-        if let Some(s) = self.scalar() {
-            if self.peek() == &Tok::LBracket && self.peek_at(1) == &Tok::RBracket {
-                self.bump();
-                self.bump();
-                let elem = self.elem(s, start)?;
-                return Ok(TypeExpr { ty: Type::Own(Buf { elem, sym }), span: start.to(self.tokens[self.pos - 1].span) });
+        let ty = if let Some(s) = self.scalar() {
+            Type::Scalar(s)
+        } else {
+            match self.peek().clone() {
+                Tok::Ident(name) => {
+                    self.bump();
+                    Type::Named(intern(&name))
+                }
+                Tok::Text => {
+                    self.bump();
+                    Type::Text
+                }
+                Tok::Own | Tok::Lent => {
+                    return Err(self
+                        .unexpected("a type")
+                        .with_note("arrays are declared on the name: `x[]: int`, or `lent v[]: int` for a parameter"));
+                }
+                _ => return Err(self.unexpected("a type")),
             }
-            if sym {
-                return Err(Diagnostic::new("`sym` only applies to arrays", start).with_note("write `sym int[]`"));
-            }
-            return Ok(TypeExpr { ty: Type::Scalar(s), span: start });
+        };
+        // `T[]` (after `->`): an array type.
+        if self.peek() == &Tok::LBracket && self.peek_at(1) == &Tok::RBracket {
+            self.bump();
+            self.bump();
+            let elem = Elem::of(ty).expect("a plain type");
+            return Ok(TypeExpr { ty: Type::Own(Buf { elem, sym }), span: start.to(self.tokens[self.pos - 1].span) });
         }
         if sym {
-            return Err(self.unexpected("`tryte[]` or `int[]` after `sym`"));
+            return Err(Diagnostic::new("`sym` only applies to arrays", start).with_note(format!("write `sym {ty}[]`")));
         }
-        if let Tok::Ident(name) = self.peek() {
-            let ty = Type::Named(intern(name));
-            self.bump();
-            return Ok(TypeExpr { ty, span: start });
-        }
-        let ty = match self.peek() {
-            Tok::Text => {
-                self.bump();
-                Type::Text
-            }
-            Tok::Own | Tok::Lent => {
-                return Err(self
-                    .unexpected("a type")
-                    .with_note("arrays are declared on the name: `x[]: int`, or `lent v[]: int` for a parameter"));
-            }
-            _ => return Err(self.unexpected("a type")),
-        };
         Ok(TypeExpr { ty, span: start.to(self.tokens[self.pos - 1].span) })
     }
 
@@ -324,6 +324,9 @@ impl Parser {
     /// Parses one statement, including its `;` when it needs one.
     fn stmt_kind(&mut self) -> PResult<StmtKind> {
         let end = |p: &mut Parser| p.expect(Tok::Semi).map(|_| ());
+        if self.peek() == &Tok::Ident("yield".into()) {
+            return Err(Diagnostic::new("`yield` is now `return`", self.span()).with_note("write `return x;`"));
+        }
         let kind = match self.peek().clone() {
             Tok::Burn => {
                 self.bump();
@@ -331,11 +334,11 @@ impl Parser {
                 end(self)?;
                 StmtKind::Burn(name)
             }
-            Tok::Yield => {
+            Tok::Return => {
                 self.bump();
                 let value = if matches!(self.peek(), Tok::Semi | Tok::Comma) { None } else { Some(self.expr()?) };
                 end(self)?;
-                StmtKind::Yield(value)
+                StmtKind::Return(value)
             }
             Tok::Break => {
                 self.bump();
@@ -946,13 +949,13 @@ mod tests {
 
     #[test]
     fn declarations() {
-        let stmts = body("acc: int = 0; y := claim 2 * k + 1; s: int = f() on NaT { yield; };");
+        let stmts = body("acc: int = 0; y := claim 2 * k + 1; s: int = f() on NaT { return; };");
         let StmtKind::Let { name, ty, .. } = &stmts[0] else { panic!() };
         assert_eq!((name.name.as_str(), ty.unwrap().ty), ("acc", Type::Scalar(Scalar::Int)));
         let StmtKind::Let { ty: None, value, .. } = &stmts[1] else { panic!() };
         assert_eq!(sx(value), "(claim (+ (* 2 k) 1))");
         let StmtKind::Let { on_nat: Some(b), .. } = &stmts[2] else { panic!() };
-        assert_eq!(b.stmts[0].kind, StmtKind::Yield(None));
+        assert_eq!(b.stmts[0].kind, StmtKind::Return(None));
     }
 
     #[test]
@@ -970,14 +973,14 @@ mod tests {
     #[test]
     fn tri_and_walk() {
         let stmts = body(
-            "tri s <=> 10 { + => print(\"big\"); - => { x = 1; } 0 => yield; }
+            "tri s <=> 10 { + => print(\"big\"); - => { x = 1; } 0 => return; }
              walk i in span 2 { b[i] = i; }
              walk j in -1..k + 1 { break; }",
         );
         let StmtKind::Tri { head, neg, zero, pos } = &stmts[0] else { panic!() };
         assert_eq!(sx(head), "(<=> s 10)");
         assert_eq!(neg.stmts.len(), 1);
-        assert_eq!(zero.stmts[0].kind, StmtKind::Yield(None));
+        assert_eq!(zero.stmts[0].kind, StmtKind::Return(None));
         assert!(matches!(&pos.stmts[0].kind, StmtKind::Expr(_)));
         assert!(matches!(&stmts[1], StmtKind::Walk { range: Range::Span(_), .. }));
         let StmtKind::Walk { range: Range::Between(a, b), .. } = &stmts[2] else { panic!() };
@@ -986,10 +989,10 @@ mod tests {
 
     #[test]
     fn items() {
-        let p = program("const LIMIT: int = 0vMM;\nproc sum(lent sym v[]: int, k: int) -> int { yield k; }");
+        let p = program("const LIMIT: int = 0vMM;\nproc sum(lent sym v[]: int, k: int) -> int { return k; }");
         assert!(matches!(&p.items[0], Item::Const(c) if c.name.name == "LIMIT"));
         let Item::Proc(f) = &p.items[1] else { panic!() };
-        assert_eq!(f.params[0].ty.ty, Type::Lent(Buf { elem: Elem::Int, sym: true }));
+        assert_eq!(f.params[0].ty.ty, Type::Lent(Buf { elem: Elem::Scalar(Scalar::Int), sym: true }));
         assert_eq!(f.ret.unwrap().ty, Type::Scalar(Scalar::Int));
     }
 
@@ -1004,7 +1007,7 @@ mod tests {
         assert!(parse_err("proc main() { tri x { - => a; + => b; } }").message.contains("missing the 0 arm"));
         assert!(parse_err("proc main() { tri x { - => a; - => b; 0 => c; + => d; } }").message.contains("appears twice"));
         assert!(parse_err("proc main() { x + 1 = 3; }").message.contains("cannot assign"));
-        assert!(parse_err("proc main() { b[]: real = claim 3; }").message.contains("trytes or ints"));
+        assert!(parse_err("proc main() { b[]: int[] = claim 3; }").message.contains("an array cannot hold arrays"));
         let e = parse_err("proc main() { walk i in 3.. { print(i); } }");
         assert!(e.message.contains("the end of the range"), "{}", e.message);
         assert!(parse_err("proc main() { if {1} { } }").message.contains("expected an expression, found `{`"));
@@ -1022,7 +1025,7 @@ proc sum(lent sym v[]: int, k: int) -> int {
     walk i in span k {
         acc += v[i];
     }
-    yield acc;
+    return acc;
 }
 
 proc main() -> int {
@@ -1030,7 +1033,7 @@ proc main() -> int {
     walk i in span 2 {
         b[i] = i * i;
     }
-    s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s: int = sum(lend b, 2) on NaT { burn b; return -1; };
     s = s << 1;
     tri s <=> 10 {
         - => print("less");
@@ -1038,7 +1041,7 @@ proc main() -> int {
         + => print("greater");
     }
     burn b;
-    yield 0;
+    return 0;
 }
 "#;
         let p = program(src);

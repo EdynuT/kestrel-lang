@@ -14,14 +14,14 @@ proc sum(lent sym v[]: int, k: int) -> int {
     walk i in span k {             // i goes from -k to +k
         acc += v[i];
     }
-    yield acc;
+    return acc;
 }
 
 proc main() -> int {
     sym b[]: int = claim 5;       // indices -2..+2
     walk i in span 2 { b[i] = i * i; }
 
-    s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s: int = sum(lend b, 2) on NaT { burn b; return -1; };
 
     tri s <=> 10 {                 // three-way branch
         - => print("less");
@@ -29,7 +29,7 @@ proc main() -> int {
         + => print("greater");
     }
     burn b;                        // zero the memory and free it, exactly once
-    yield 0;
+    return 0;
 }
 ```
 

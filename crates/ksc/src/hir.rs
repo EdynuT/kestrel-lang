@@ -86,7 +86,7 @@ pub enum HStmtKind {
     /// `x = e`, `b[i] = e`, or a field: `p.x = e` writes at slot offset `field`.
     Assign { local: LocalId, index: Option<HExpr>, field: usize, value: HExpr },
     Burn(LocalId),
-    Yield(Option<HExpr>),
+    Return(Option<HExpr>),
     Break,
     Continue,
     /// Arms in order `-`, `0`, `+`.
@@ -199,13 +199,16 @@ pub enum HExprKind {
     /// Stores the value in a hidden local, then evaluates the body (used to
     /// read fields of a struct that is not in a variable, like `f().x`).
     Bind(LocalId, Box<HExpr>, Box<HExpr>),
+    /// A field of an array element, `pts[i].x`: array local, index, offset
+    /// of the field inside the element.
+    ElemField(LocalId, Box<HExpr>, usize),
 }
 
 impl HBlock {
     /// True if control never reaches the end of the block.
     pub fn diverges(&self) -> bool {
         self.stmts.last().is_some_and(|s| match &s.kind {
-            HStmtKind::Yield(_) | HStmtKind::Break | HStmtKind::Continue | HStmtKind::Trap(_) | HStmtKind::Exit(_) => true,
+            HStmtKind::Return(_) | HStmtKind::Break | HStmtKind::Continue | HStmtKind::Trap(_) | HStmtKind::Exit(_) => true,
             HStmtKind::Tri { arms, .. } => arms.iter().all(HBlock::diverges),
             HStmtKind::Block(b) => b.diverges(),
             _ => false,

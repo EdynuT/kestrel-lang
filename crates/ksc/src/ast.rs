@@ -66,11 +66,15 @@ pub enum Scalar {
     Real,
 }
 
-/// Cell type of a buffer.
+/// Element type of an array: any type that is not itself an array.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Elem {
-    Tryte,
-    Int,
+    Scalar(Scalar),
+    Text,
+    Enum(&'static str),
+    Struct(&'static str),
+    /// A type name as written; the checker resolves it.
+    Named(&'static str),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,23 +124,39 @@ pub struct Buf {
 }
 
 impl Buf {
-    pub fn scalar(self) -> Scalar {
-        self.elem.scalar()
+    /// The type of one element.
+    pub fn ty(self) -> Type {
+        self.elem.ty()
     }
 }
 
 impl std::fmt::Display for Buf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}{}[]", if self.sym { "sym " } else { "" }, self.elem.scalar())
+        write!(f, "{}{}[]", if self.sym { "sym " } else { "" }, self.elem.ty())
     }
 }
 
 impl Elem {
-    pub fn scalar(self) -> Scalar {
+    pub fn ty(self) -> Type {
         match self {
-            Elem::Tryte => Scalar::Tryte,
-            Elem::Int => Scalar::Int,
+            Elem::Scalar(s) => Type::Scalar(s),
+            Elem::Text => Type::Text,
+            Elem::Enum(n) => Type::Enum(n),
+            Elem::Struct(n) => Type::Struct(n),
+            Elem::Named(n) => Type::Named(n),
         }
+    }
+
+    /// The element type for `ty`; `None` for arrays and `Void`.
+    pub fn of(ty: Type) -> Option<Elem> {
+        Some(match ty {
+            Type::Scalar(s) => Elem::Scalar(s),
+            Type::Text => Elem::Text,
+            Type::Enum(n) => Elem::Enum(n),
+            Type::Struct(n) => Elem::Struct(n),
+            Type::Named(n) => Elem::Named(n),
+            Type::Own(_) | Type::Lent(_) | Type::Void => return None,
+        })
     }
 }
 
@@ -214,7 +234,7 @@ pub enum StmtKind {
     Assign { place: Place, value: Expr },
     /// `add d, s;`, `add d, a, b;`, `neg d;`, `mov d, s;`
     Burn(Ident),
-    Yield(Option<Expr>),
+    Return(Option<Expr>),
     Break,
     Continue,
     /// Three-way branch. `head` evaluates to a trit.

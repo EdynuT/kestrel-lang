@@ -2,7 +2,7 @@
 //! exactly once on every path.
 //!
 //! The checker walks each proc tracking every own local as alive, burned or
-//! given. Leaving a block or yielding with a buffer still alive is a leak;
+//! given. Leaving a block or returning with a buffer still alive is a leak;
 //! touching a burned or given buffer is a use-after-free; the arms of a `tri`
 //! that fall through must agree; a loop body (`walk`, `while`) must leave outer buffers as it
 //! found them.
@@ -62,7 +62,7 @@ fn check_proc(p: &HProc) -> R<()> {
     }
     let mut ck = Checker { p, loops: Vec::new() };
     if let Some(end) = ck.block(&p.body, st)? {
-        // A proc without `-> T` may fall off its end: that is an implicit `yield;`.
+        // A proc without `-> T` may fall off its end: that is an implicit `return;`.
         let end_span = Span::new(p.body.span.end - 1, p.body.span.end);
         ck.no_alive(&end, end_span, "the proc ends")?;
     }
@@ -101,7 +101,7 @@ impl Checker<'_> {
         Ok(Some(st))
     }
 
-    /// Every buffer still alive at a yield (or at the end of a proc) leaks.
+    /// Every buffer still alive at a return (or at the end of a proc) leaks.
     fn no_alive(&self, st: &State, span: Span, when: &str) -> R<()> {
         if let Some(id) = st.iter().position(|s| *s == St::Alive) {
             let name = self.name(id);
@@ -169,11 +169,11 @@ impl Checker<'_> {
                     }
                 }
             }
-            HStmtKind::Yield(v) => {
+            HStmtKind::Return(v) => {
                 if let Some(e) = v {
                     self.expr(e, &mut st)?;
                 }
-                self.no_alive(&st, s.span, "the proc yields")?;
+                self.no_alive(&st, s.span, "the proc returns")?;
                 return Ok(None);
             }
             // A trap zeroes the heap, so buffers still alive here are fine.
@@ -324,6 +324,10 @@ impl Checker<'_> {
             HExprKind::Print(pieces) => pieces.iter().try_for_each(|(_, a)| self.expr(a, st))?,
             HExprKind::StructLit(items) => items.iter().try_for_each(|a| self.expr(a, st))?,
             HExprKind::Field(..) => {}
+            HExprKind::ElemField(arr, idx, _) => {
+                self.expr(idx, st)?;
+                self.require_alive(*arr, st, e.span)?;
+            }
             HExprKind::Bind(_, value, body) => {
                 self.expr(value, st)?;
                 self.expr(body, st)?;
@@ -345,9 +349,9 @@ mod tests {
 
     const DEFS: &str = "
         proc take(own sym b[]: int) { burn b; }
-        proc peek(lent sym v[]: int) -> int { yield v[0]; }
+        proc peek(lent sym v[]: int) -> int { return v[0]; }
         proc both(lent sym v[]: int, own sym b[]: int) { burn b; }
-        proc mk() -> sym int[] { sym b[]: int = claim 1; yield b; }
+        proc mk() -> sym int[] { sym b[]: int = claim 1; return b; }
     ";
 
     fn ok(body: &str) {
@@ -371,16 +375,16 @@ mod tests {
 proc sum(lent sym v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k { acc += v[i]; }
-    yield acc;
+    return acc;
 }
 proc main() -> int {
     sym b[]: int = claim 5;
     walk i in span 2 { b[i] = i * i; }
-    s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s: int = sum(lend b, 2) on NaT { burn b; return -1; };
     s = s << 1;
     tri s <=> 10 { - => print("less"); 0 => print("equal"); + => print("greater"); }
     burn b;
-    yield 0;
+    return 0;
 }"#;
         run(src).unwrap();
     }
@@ -409,15 +413,15 @@ proc main() -> int {
     fn calls_and_yield() {
         assert!(err("sym b[]: int = claim 3; both(lend b, give b);").contains("lent and given away in the same call"));
         assert!(err("sym b[]: int = claim 3; b[0] = peek(lend b) + 0; take(give b); b[1] = 2;").contains("given away"));
-        assert!(err("sym b[]: int = claim 3; yield;").contains("still owns a buffer when the proc yields"));
+        assert!(err("sym b[]: int = claim 3; return;").contains("still owns a buffer when the proc returns"));
         assert!(run(&format!("{DEFS} proc keep(own sym b[]: int) {{ }} proc main() {{}}")).unwrap_err().message.contains("when the proc ends"));
-        run(&format!("{DEFS} proc pass(own sym b[]: int) -> sym int[] {{ yield b; }} proc main() {{}}")).unwrap();
+        run(&format!("{DEFS} proc pass(own sym b[]: int) -> sym int[] {{ return b; }} proc main() {{}}")).unwrap();
     }
 
     #[test]
     fn on_nat_must_clean_up() {
-        ok("sym b[]: int = claim 3; s := peek(lend b) on NaT { burn b; yield; }; burn b;");
-        assert!(err("sym b[]: int = claim 3; s := peek(lend b) on NaT { yield; }; burn b;").contains("when the proc yields"));
+        ok("sym b[]: int = claim 3; s := peek(lend b) on NaT { burn b; return; }; burn b;");
+        assert!(err("sym b[]: int = claim 3; s := peek(lend b) on NaT { return; }; burn b;").contains("when the proc returns"));
     }
 
     #[test]
@@ -425,11 +429,11 @@ proc main() -> int {
         ok("sym b[]: int = claim 3; t: trit = +; tri t { - => burn b; 0 => burn b; + => take(give b); }");
         assert!(err("sym b[]: int = claim 3; t: trit = +; tri t { - => burn b; 0 => burn b; + => take(give b); } b = claim 1; burn b;")
             .contains("only be reused after `burn`"));
-        ok("sym b[]: int = claim 3; t: trit = +; tri t { - => { burn b; yield; } 0 => {} + => {} } burn b;");
+        ok("sym b[]: int = claim 3; t: trit = +; tri t { - => { burn b; return; } 0 => {} + => {} } burn b;");
         let e = err("sym b[]: int = claim 3; t: trit = +; tri t { - => burn b; 0 => {} + => burn b; }");
         assert!(e.contains("leave `b` in different states"), "{e}");
         assert!(e.contains("`-` arm: burned, `0` arm: still owned, `+` arm: burned"), "{e}");
-        assert!(err("sym b[]: int = claim 3; t: trit = +; tri t { - => yield; 0 => burn b; + => burn b; }").contains("when the proc yields"));
+        assert!(err("sym b[]: int = claim 3; t: trit = +; tri t { - => return; 0 => burn b; + => burn b; }").contains("when the proc returns"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! ksvm: runs a `.ksb` file on the BET virtual machine.
 //!
-//! Exit codes: the value `main` yields (mod 256), 101 on a Trap,
-//! 102 if `main` yields NaT, 2 if the file cannot be loaded.
+//! Exit codes: the value `main` returns (mod 256), 101 on a Trap,
+//! 102 if `main` returns NaT, 2 if the file cannot be loaded.
 
 use std::io::{self, BufWriter};
 use std::process::ExitCode;

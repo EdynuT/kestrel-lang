@@ -35,7 +35,7 @@ impl Rng {
 const SEEDS: &[&str] = &[
     include_str!("../../../examples/tour.ks"),
     r#"enum Cor { Vermelho, Verde, Azul }
-proc nome(c: Cor) -> text { match c { Cor.Vermelho => yield "r"; Cor.Verde => yield "g"; Cor.Azul => yield "b"; } }
+proc nome(c: Cor) -> text { match c { Cor.Vermelho => return "r"; Cor.Verde => return "g"; Cor.Azul => return "b"; } }
 proc main() {
     a[]: int = {3, 1, 2};
     sym s[]: int = {-8, 0, 8};
@@ -44,14 +44,14 @@ proc main() {
     t := "Kes" + "trel"; printl(sub(t, 0, 3) + toText(len(t)));
     n := 0; while n < 5 { n++; if n == 4 { break; } }
     printf("{n} %s %t %v\n", nome(Cor.Azul), n, n);
-    x := toInt("12") on NaT { burn a; burn s; yield; };
+    x := toInt("12") on NaT { burn a; burn s; return; };
     r := (real) x / 3.0;
     printl(r);
     burn a; burn s;
 }"#,
-    r#"proc fib(n: int) -> int { if n < 2 { yield n; } yield fib(n - 1) + fib(n - 2); }
-proc fill(own v[]: int) -> int[] { for i: int = 0; i < len(v); i++ { v[i] = fib(i); } yield v; }
-proc soma(lent v[]: int) -> int { s := 0; walk i in 0..len(v) - 1 { s += v[i]; } yield s; }
+    r#"proc fib(n: int) -> int { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
+proc fill(own v[]: int) -> int[] { for i: int = 0; i < len(v); i++ { v[i] = fib(i); } return v; }
+proc soma(lent v[]: int) -> int { s := 0; walk i in 0..len(v) - 1 { s += v[i]; } return s; }
 proc main() -> int {
     b[]: int = claim 8;
     c[]: int = fill(give b);
@@ -59,21 +59,25 @@ proc main() -> int {
     final k: tryte = 'A';
     match k { 'A' | 'B' => printl(-k); else => printl(k); }
     burn c;
-    yield 0;
+    return 0;
 }"#,
     r#"struct Ponto { x: int; y: int; }
 struct Linha { a: Ponto; b: Ponto; nome: text; }
-proc meio(l: Linha) -> Ponto { yield Ponto { x: (l.a.x + l.b.x) / 2, y: (l.a.y + l.b.y) / 2 }; }
+proc meio(l: Linha) -> Ponto { return Ponto { x: (l.a.x + l.b.x) / 2, y: (l.a.y + l.b.y) / 2 }; }
 proc main() {
     l := Linha { a: Ponto { x: 0, y: 0 }, b: Ponto { x: 4, y: 8 }, nome: "d" };
     m := meio(l); l.b.y -= 2; k := l;
     printl(m); printf("{l} %d %s\n", meio(k).y, l);
+    ps[]: Ponto = {m, Ponto { x: 1, y: 2 }}; ps[1].y += ps[0].x;
+    ns[]: text = claim 2; ns[0] = l.nome; rs[]: real = {1.5, 2.5};
+    printl(ps[1]); printl(ns); printl(rs);
+    burn ps; burn ns; burn rs;
 }"#,
 ];
 
 /// Pieces a mutation may insert.
 const VOCAB: &[&str] = &[
-    "proc", "yield", "if", "else", "while", "for", "walk", "in", "span", "tri", "match", "burn", "give", "lend", "claim",
+    "proc", "return", "if", "else", "while", "for", "walk", "in", "span", "tri", "match", "burn", "give", "lend", "claim",
     "sym", "final", "own", "lent", "int", "tryte", "trit", "real", "text", "enum", "NaT", "on", "break", "continue",
     "{", "}", "(", ")", "[", "]", ";", ",", ".", "..", ":", ":=", "=", "==", "!=", "<", ">", "<=", ">=", "<=>", "+",
     "-", "*", "/", "%", "**", "<<", ">>", "&&", "||", "!", "|", "=>", "->", "++", "--", "+=", "0", "1", "-1", "364",

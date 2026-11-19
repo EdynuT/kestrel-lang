@@ -8,7 +8,7 @@ proc sum(lent sym v[]: int, k: int) -> int {
     walk i in span k {
         acc += v[i];
     }
-    yield acc;
+    return acc;
 }
 
 // Prints a word as "negative", "zero" or "positive".
@@ -30,7 +30,7 @@ proc main() -> int {
     print("cubes: ");
     walk i in span 2 { print(b[i]); print(" "); }
     print("\nsum = ");
-    s: int = sum(lend b, 2) on NaT { burn b; yield 1; };
+    s: int = sum(lend b, 2) on NaT { burn b; return 1; };
     print(s);
     print(" (");
     describe(s);
@@ -44,10 +44,10 @@ proc main() -> int {
     t: tryte = 360;
     // Past 364 a tryte overflows. That stops the program, unless the line
     // has `on NaT`: then the handler runs instead.
-    u: tryte = t + 10 on NaT { printl("360 + 10 does not fit in a tryte"); burn b; yield 1; };
+    u: tryte = t + 10 on NaT { printl("360 + 10 does not fit in a tryte"); burn b; return 1; };
     printl(u);
 
     dump("before burn");
     burn b;
-    yield 0;
+    return 0;
 }

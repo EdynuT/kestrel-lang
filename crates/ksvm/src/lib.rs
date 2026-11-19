@@ -317,7 +317,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 self.push(Value::Word(parse_input(line.trim())));
             }
             Op::Emit => {
-                let c = self.pop_word()?.get().and_then(tryte_to_char).unwrap_or('#');
+                let c = self.pop_word()?.get().and_then(tryte_to_char).unwrap_or('\u{FFFD}');
                 write!(self.output, "{c}").map_err(io_err)?;
             }
             Op::Print => {

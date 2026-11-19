@@ -244,6 +244,7 @@ impl Lexer<'_> {
                         return Err(match c {
                             '!' => d.with_note("ownership uses `give x` and `burn x`; negation is `~x` or `-x`"),
                             '<' | '>' => d.with_note("comparisons use the three-way operator `a <=> b`"),
+                            '\\' => d.with_note("escapes like `\\n` only work inside quotes: `\"\\n\"`"),
                             _ => d,
                         });
                     };
@@ -341,18 +342,19 @@ impl Lexer<'_> {
             Some('\\') => match self.bump() {
                 Some('n') => '\n',
                 Some('t') => '\t',
+                Some('"') => '"',
+                Some('\'') => '\'',
                 other => {
                     let shown = other.map_or(String::new(), |c| c.to_string());
-                    return Err(self.err(format!("unknown escape `\\{shown}`"), c_start).with_note("escapes are `\\n` and `\\t`"));
+                    return Err(self.err(format!("unknown escape `\\{shown}`"), c_start).with_note("escapes are `\\n`, `\\t`, `\\\"` and `\\'`"));
                 }
             },
             Some(c) => c,
         };
-        // `{ } %` pass in strings so `printf` can read them; sema checks the rest.
-        if char_to_tryte(c).is_none() && !(quote == '"' && matches!(c, '{' | '}' | '%')) {
+        if char_to_tryte(c).is_none() {
             return Err(self
                 .err(format!("character {c:?} is not in the Kestrel character table"), c_start)
-                .with_note("allowed: letters, digits, space, \\n, \\t and . , : ; ! ? - + / _ = ( ) [ ]"));
+                .with_note("allowed: letters (with á à â ã é ê í ó ô õ ú ç), digits, space, \\n, \\t and . , : ; ! ? - + / _ = ( ) [ ] * < > @ # % { } \" '"));
         }
         Ok(Some(c))
     }
@@ -449,8 +451,8 @@ mod tests {
         assert!(err("12abc").contains("right after a number"));
         assert!(err("@R5").contains("not a register"));
         assert!(err("@R1").contains("not a register"));
-        assert!(err(r#""user@mail""#).contains("'@' is not in the Kestrel character table"));
-        assert!(err(r#""ção""#).contains("'ç'"));
+        assert!(err(r#""a & b""#).contains("'&' is not in the Kestrel character table"));
+        assert!(err(r#""niño""#).contains("'ñ'"));
         assert!(err(r#""open"#).contains("unterminated string"));
         assert!(err("'ab'").contains("exactly one character"));
         assert!(err(r#""\q""#).contains("unknown escape"));

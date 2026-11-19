@@ -5,9 +5,10 @@ proc main() {
 
     // declaração de variaveis
     variavel1: int = 5;
-    printf("exemplo de %%t = %t\n", variavel1);
+    printf("exemplo de %%t = %t = 5\n", variavel1);
+    printf("exemplo de %%v = %v = 5\n", variavel1);
     variavel1 = -5;
-    printl(variavel1);
+    printf("\n%i\n", variavel1);
 
     // operações
     variavel2: int = 2;

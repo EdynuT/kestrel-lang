@@ -3,9 +3,15 @@
 //! 0 is a space, so zeroed memory reads as blank. Upper case letters are
 //! positive and lower case negative, so negating a tryte swaps the case.
 
-const PUNCT: [char; 17] = [
+const PUNCT: [char; 27] = [
     '\n', '\t', '.', ',', ':', ';', '!', '?', '-', '+', '/', '_', '=', '(', ')', '[', ']',
+    '*', '<', '>', '@', '#', '%', '{', '}', '"', '\'',
 ];
+
+/// Accented letters: upper case at +54.., lower case at -54.., so negation
+/// still swaps the case.
+const ACCENT_UPPER: [char; 12] = ['Á', 'À', 'Â', 'Ã', 'É', 'Ê', 'Í', 'Ó', 'Ô', 'Õ', 'Ú', 'Ç'];
+const ACCENT_LOWER: [char; 12] = ['á', 'à', 'â', 'ã', 'é', 'ê', 'í', 'ó', 'ô', 'õ', 'ú', 'ç'];
 
 /// Character for a tryte value, or `None` if the value is unassigned.
 pub fn tryte_to_char(v: i64) -> Option<char> {
@@ -14,7 +20,9 @@ pub fn tryte_to_char(v: i64) -> Option<char> {
         1..=26 => Some((b'A' + (v - 1) as u8) as char),
         -26..=-1 => Some((b'a' + (-v - 1) as u8) as char),
         27..=36 => Some((b'0' + (v - 27) as u8) as char),
-        -43..=-27 => Some(PUNCT[(-v - 27) as usize]),
+        -53..=-27 => Some(PUNCT[(-v - 27) as usize]),
+        54..=65 => Some(ACCENT_UPPER[(v - 54) as usize]),
+        -65..=-54 => Some(ACCENT_LOWER[(-v - 54) as usize]),
         _ => None,
     }
 }
@@ -26,7 +34,13 @@ pub fn char_to_tryte(c: char) -> Option<i64> {
         'A'..='Z' => Some(i64::from(c as u8 - b'A') + 1),
         'a'..='z' => Some(-(i64::from(c as u8 - b'a') + 1)),
         '0'..='9' => Some(i64::from(c as u8 - b'0') + 27),
-        _ => PUNCT.iter().position(|&p| p == c).map(|i| -(i as i64) - 27),
+        _ => {
+            let find = |t: &[char]| t.iter().position(|&p| p == c).map(|i| i as i64);
+            find(&PUNCT)
+                .map(|i| -i - 27)
+                .or_else(|| find(&ACCENT_UPPER).map(|i| i + 54))
+                .or_else(|| find(&ACCENT_LOWER).map(|i| -i - 54))
+        }
     }
 }
 
@@ -44,17 +58,22 @@ mod tests {
         assert_eq!(char_to_tryte('9'), Some(36));
         assert_eq!(char_to_tryte('\n'), Some(-27));
         assert_eq!(char_to_tryte(']'), Some(-43));
-        assert_eq!(char_to_tryte('@'), None);
-        assert_eq!(char_to_tryte('ç'), None);
+        assert_eq!(char_to_tryte('*'), Some(-44));
+        assert_eq!(char_to_tryte('\''), Some(-53));
+        assert_eq!(char_to_tryte('Á'), Some(54));
+        assert_eq!(char_to_tryte('ç'), Some(-65));
+        assert_eq!(char_to_tryte('&'), None);
+        assert_eq!(char_to_tryte('ñ'), None);
         assert_eq!(tryte_to_char(37), None);
-        assert_eq!(tryte_to_char(-44), None);
+        assert_eq!(tryte_to_char(-54), Some('á'));
+        assert_eq!(tryte_to_char(-66), None);
     }
 
     #[test]
     fn negation_swaps_case() {
-        for c in 'A'..='Z' {
+        for c in ('A'..='Z').chain(ACCENT_UPPER) {
             let v = char_to_tryte(c).unwrap();
-            assert_eq!(tryte_to_char(-v), Some(c.to_ascii_lowercase()));
+            assert_eq!(tryte_to_char(-v), c.to_lowercase().next());
         }
     }
 
@@ -67,6 +86,6 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 1 + 26 + 26 + 10 + 17);
+        assert_eq!(count, 1 + 26 + 26 + 10 + 27 + 12 + 12);
     }
 }

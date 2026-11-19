@@ -61,7 +61,7 @@ valor = (mantissa / 3²⁰) × 3^expoente
 - `s[i]` devolve o `tryte` da posição `i`. **O índice começa em 0**, como em C (exceção à indexação simétrica dos buffers). Índice fora de `0 .. len(s)-1` dispara **Trap**.
 - `len(s)` devolve o tamanho como `int`.
 - `print(s)` imprime o texto. Dentro do `print`, `+` junta textos: `print("Olá, " + nome + "\n")`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo**. Fora do `print`, `+` com texto também é erro (o texto não pode ser criado em tempo de execução).
-- Cada caractere precisa existir na tabela §4. Um caractere fora dela, como `@` ou `ç`, é **erro de compilação**.
+- Cada caractere precisa existir na tabela §4. Um caractere fora dela, como `&` ou `ñ`, é **erro de compilação**.
 - Para montar texto em tempo de execução, use um `own [tryte]`, como um array de `char` em C.
 
 ---
@@ -133,10 +133,14 @@ Regras:
 | +1 .. +26 | `A`–`Z` |
 | −1 .. −26 | `a`–`z` (por isso `~'A' == 'a'`) |
 | +27 .. +36 | `0`–`9` |
-| −27 .. −43 | `\n` `\t` `.` `,` `:` `;` `!` `?` `-` `+` `/` `_` `=` `(` `)` `[` `]` |
-| demais | reservados. `emit` imprime `#` |
+| −27 .. −53 | `\n` `\t` `.` `,` `:` `;` `!` `?` `-` `+` `/` `_` `=` `(` `)` `[` `]` `*` `<` `>` `@` `#` `%` `{` `}` `"` `'` |
+| +54 .. +65 | `Á` `À` `Â` `Ã` `É` `Ê` `Í` `Ó` `Ô` `Õ` `Ú` `Ç` |
+| −54 .. −65 | `á` `à` `â` `ã` `é` `ê` `í` `ó` `ô` `õ` `ú` `ç` (`~'Á' == 'á'`) |
+| demais | reservados. `emit` imprime `�` |
 
-Atribuição exata da faixa de pontuação: −27 `\n`, −28 `\t`, −29 `.`, −30 `,`, −31 `:`, −32 `;`, −33 `!`, −34 `?`, −35 `-`, −36 `+`, −37 `/`, −38 `_`, −39 `=`, −40 `(`, −41 `)`, −42 `[`, −43 `]`.
+Atribuição exata da faixa de pontuação: −27 `\n`, −28 `\t`, −29 `.`, −30 `,`, −31 `:`, −32 `;`, −33 `!`, −34 `?`, −35 `-`, −36 `+`, −37 `/`, −38 `_`, −39 `=`, −40 `(`, −41 `)`, −42 `[`, −43 `]`, −44 `*`, −45 `<`, −46 `>`, −47 `@`, −48 `#`, −49 `%`, −50 `{`, −51 `}`, −52 `"`, −53 `'`.
+
+Dentro de textos e caracteres, `"` e `'` são escritos como `\"` e `\'`. Os escapes aceitos são `\n`, `\t`, `\"` e `\'`.
 
 ---
 
@@ -316,8 +320,7 @@ O formato aceita duas formas de colocar valores, que podem ser misturadas:
 | `{x:c}` / `%c` | Caractere (tabela §4) | `trit`, `tryte` (um `int` precisa de cast: `(tryte) x`) |
 
 - Tudo é verificado **na compilação**: tipo errado, `%` sem argumento, argumento sobrando ou nome desconhecido é **erro**.
-- `{{`, `}}` e `%%` imprimem `{`, `}` e `%`. Por enquanto esses caracteres não estão na tabela §4, então ainda geram erro.
-- Fora do `printf`, `{`, `}` e `%` em texto são erro de compilação.
+- `{{`, `}}` e `%%` imprimem `{`, `}` e `%`. Fora do `printf`, esses caracteres são impressos normalmente.
 
 ## 9. BET-VM
 

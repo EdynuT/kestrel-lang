@@ -477,10 +477,7 @@ impl Checker {
             }
             ExprKind::Real(r) => hx(HExprKind::Real(*r), Type::Scalar(Scalar::Real), span),
             ExprKind::Char(c) => hx(HExprKind::Word(kestrel_core::Word::new(*c)), Type::Scalar(Scalar::Tryte), span),
-            ExprKind::Str(s) => {
-                printable(s, span)?;
-                hx(HExprKind::Text(s.clone()), Type::Text, span)
-            }
+            ExprKind::Str(s) => hx(HExprKind::Text(s.clone()), Type::Text, span),
             ExprKind::NaT => match want {
                 Some(Type::Scalar(Scalar::Real)) => hx(HExprKind::Real(kestrel_core::Real::NAT), Type::Scalar(Scalar::Real), span),
                 Some(t @ Type::Scalar(_)) => hx(HExprKind::Word(kestrel_core::Word::NAT), t, span),
@@ -653,7 +650,6 @@ impl Checker {
         let mut chars = located.into_iter().peekable();
         let flush = |lit: &mut String, out: &mut Vec<(Fmt, HExpr)>| -> R<()> {
             if !lit.is_empty() {
-                printable(lit, fspan)?;
                 out.push((Fmt::Plain, hx(HExprKind::Text(std::mem::take(lit)), Type::Text, fspan)));
             }
             Ok(())
@@ -864,16 +860,6 @@ fn add_chain<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     }
 }
 
-/// Every character of a text must be in the character table (SPEC §4).
-fn printable(s: &str, span: Span) -> R<()> {
-    match s.chars().find(|&c| kestrel_core::charset::char_to_tryte(c).is_none()) {
-        Some(c @ ('{' | '}' | '%')) => Err(err(format!("{c:?} cannot be printed yet: it is not in the character table"), span)
-            .with_note("`{name}` and `%d` placeholders only work inside `printf`")),
-        Some(c) => Err(err(format!("character {c:?} is not in the Kestrel character table"), span)),
-        None => Ok(()),
-    }
-}
-
 /// Checks one `printf` value against its format letter (`' '` for a bare `{x}`).
 fn piece(spec: char, label: &str, h: HExpr) -> R<(Fmt, HExpr)> {
     let ty = h.ty;
@@ -1057,7 +1043,7 @@ proc main() -> int {
         assert!(err_in("printf(\"{a:q}\");").contains("unknown format `:q`"));
         assert!(err_in("printf(\"{a\");").contains("never closed"));
         assert!(err_in("printf(\"%x\", 1);").contains("unknown format `%x`"));
-        assert!(err_in("print(\"{x}\");").contains("cannot be printed yet"));
+        ok("print(\"{x} 50% 'a' \\\"b\\\" ação\");");
         assert!(err_in("f: text = \"x\"; printf(f, 1);").contains("has no `%`"));
         ok("f: text = \"t\"; n: int = 1; printf(\"a \" + f + \" = %t {n}\" + \"!\", n);");
         assert!(err_in("n: int = 1; printf(\"a\" + n);").contains("joins text only, found int"));

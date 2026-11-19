@@ -14,6 +14,7 @@ pub enum Item {
     Const(ConstDecl),
     Proc(ProcDecl),
     Enum(EnumDecl),
+    Struct(StructDecl),
 }
 
 /// `enum Name { A, B = 5, C }`: values count up from 0, or from the last explicit one.
@@ -21,6 +22,13 @@ pub enum Item {
 pub struct EnumDecl {
     pub name: Ident,
     pub variants: Vec<(Ident, Option<Expr>)>,
+}
+
+/// `struct Name { a: int; b: text; }`: plain data, copied like a number.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructDecl {
+    pub name: Ident,
+    pub fields: Vec<(Ident, TypeExpr)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -73,6 +81,11 @@ pub enum Type {
     Lent(Buf),
     /// A declared enum, by name (interned: types stay `Copy`).
     Enum(&'static str),
+    /// A declared struct, by name.
+    Struct(&'static str),
+    /// A type name as written; the checker turns it into `Enum` or `Struct`.
+    /// Only produced by the parser.
+    Named(&'static str),
     /// No value: the result of `print(...)` or of a proc without `->`.
     /// Only produced by the checker, never by the parser.
     Void,
@@ -155,7 +168,7 @@ impl std::fmt::Display for Type {
             Type::Text => f.write_str("text"),
             Type::Own(b) => write!(f, "{b}"),
             Type::Lent(b) => write!(f, "lent {b}"),
-            Type::Enum(name) => f.write_str(name),
+            Type::Enum(name) | Type::Struct(name) | Type::Named(name) => f.write_str(name),
             Type::Void => f.write_str("no value"),
         }
     }
@@ -222,6 +235,8 @@ pub enum StmtKind {
 pub struct Place {
     pub name: Ident,
     pub index: Option<Expr>,
+    /// `p.a.b = ...`: the fields after the name (and index), outermost first.
+    pub fields: Vec<Ident>,
     pub span: Span,
 }
 
@@ -255,8 +270,10 @@ pub enum ExprKind {
     Index(Box<Expr>, Box<Expr>),
     /// `{1, 2, 3}`: a new array; the declared type says which kind.
     ArrayLit(Vec<Expr>),
-    /// `base.name`: for now only enum values, `Cor.Verde`.
+    /// `base.name`: an enum value (`Cor.Verde`) or a struct field (`p.x`).
     Member(Box<Expr>, Ident),
+    /// `Ponto { x: 1, y: 2 }`
+    StructLit { name: Ident, fields: Vec<(Ident, Expr)> },
     Call { name: Ident, args: Vec<Expr> },
     Claim(Box<Expr>),
     Give(Ident),

@@ -31,7 +31,7 @@ pub fn tryte_to_char(v: i64) -> Option<char> {
     }
 }
 
-/// Character classes for `is_digit` and friends (by tryte value).
+/// Character classes for `isDigit` and friends (by tryte value).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
     Digit,

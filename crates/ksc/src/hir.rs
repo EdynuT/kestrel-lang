@@ -4,6 +4,8 @@
 //! built-ins are resolved, and assembly instructions are lowered to plain
 //! assignments. The ownership checker and the code generator both read this.
 
+use std::collections::HashMap;
+
 use kestrel_core::{Real, Word};
 
 pub use crate::ast::{BinOp, Elem, Scalar, Type};
@@ -16,6 +18,22 @@ pub type ProcId = usize;
 pub struct Hir {
     pub procs: Vec<HProc>,
     pub entry: ProcId,
+    /// Fields of each struct, in declared order.
+    pub structs: Structs,
+}
+
+/// Struct layouts. A struct value is its fields side by side, nested
+/// structs flattened: `struct A { x: int; b: B; }` with `B { y; z }` takes
+/// 3 slots (`x`, `b.y`, `b.z`).
+pub type Structs = HashMap<&'static str, Vec<(String, Type)>>;
+
+/// How many slots (or stack values) a value of type `ty` takes.
+pub fn width(structs: &Structs, ty: Type) -> usize {
+    match ty {
+        Type::Struct(n) => structs[n].iter().map(|(_, t)| width(structs, *t)).sum(),
+        Type::Void => 0,
+        _ => 1,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -65,8 +83,8 @@ pub struct HStmt {
 #[derive(Clone, Debug, PartialEq)]
 pub enum HStmtKind {
     Let { local: LocalId, value: HExpr, on_nat: Option<HBlock> },
-    /// `x = e` or `b[i] = e`.
-    Assign { local: LocalId, index: Option<HExpr>, value: HExpr },
+    /// `x = e`, `b[i] = e`, or a field: `p.x = e` writes at slot offset `field`.
+    Assign { local: LocalId, index: Option<HExpr>, field: usize, value: HExpr },
     Burn(LocalId),
     Yield(Option<HExpr>),
     Break,
@@ -110,13 +128,13 @@ pub enum Builtin {
     Emit,
     Input,
     Len,
-    /// `to_text(x)`, `to_text(x, 't')`, `to_text(x, 'v')`
+    /// `toText(x)`, `toText(x, 't')`, `toText(x, 'v')`
     ToText(Fmt),
     /// `sub(s, start, end)`: characters `start..end-1`, like Java's `substring`.
     Sub,
     ToInt,
     ToReal,
-    /// `is_digit(c)` etc.: index into `charset::Class::ALL`.
+    /// `isDigit(c)` etc.: index into `charset::Class::ALL`.
     CharIs(u8),
     ReadFile,
     FileExists,
@@ -173,6 +191,14 @@ pub enum HExprKind {
     Claim(Box<HExpr>),
     /// `{a, b, c}`: a new array holding these values.
     Pack(Vec<HExpr>),
+    /// `Ponto { x: 1, y: 2 }`: field values in declared order.
+    StructLit(Vec<HExpr>),
+    /// A field of a struct local: the slots from this offset on (as many as
+    /// the node's type takes).
+    Field(LocalId, usize),
+    /// Stores the value in a hidden local, then evaluates the body (used to
+    /// read fields of a struct that is not in a variable, like `f().x`).
+    Bind(LocalId, Box<HExpr>, Box<HExpr>),
 }
 
 impl HBlock {

@@ -16,12 +16,12 @@ use crate::hir::*;
 type R<T> = Result<T, Diagnostic>;
 
 const BUILTINS: [&str; 25] = [
-    "print", "printl", "printf", "to_text", "emit", "input", "len", "dump", "sub", "to_int", "to_real", "is_digit",
-    "is_letter", "is_upper", "is_lower", "is_space", "read_file", "file_exists", "write_file", "write_bytes",
-    "read_line", "eof", "arg_count", "arg", "exit",
+    "print", "printl", "printf", "toText", "emit", "input", "len", "dump", "sub", "toInt", "toReal", "isDigit",
+    "isLetter", "isUpper", "isLower", "isSpace", "readFile", "fileExists", "writeFile", "writeBytes",
+    "readLine", "eof", "argCount", "arg", "exit",
 ];
 /// Names of the `is_*` built-ins, in `charset::Class::ALL` order.
-const CHAR_CLASSES: [&str; 5] = ["is_digit", "is_letter", "is_upper", "is_lower", "is_space"];
+const CHAR_CLASSES: [&str; 5] = ["isDigit", "isLetter", "isUpper", "isLower", "isSpace"];
 
 pub fn check(program: &Program) -> R<Hir> {
     let mut cx = Checker {
@@ -29,21 +29,38 @@ pub fn check(program: &Program) -> R<Hir> {
         proc_ids: HashMap::new(),
         consts: HashMap::new(),
         enums: HashMap::new(),
+        structs: Structs::new(),
         f: FnCx::new(Type::Void),
     };
     // Enums first, so types like `c: Cor` resolve anywhere. Each enum gets a
-    // hidden proc that turns a value into its name, for `print` and `to_text`.
+    // hidden proc that turns a value into its name, for `print` and `toText`.
     let mut name_procs = Vec::new();
     for item in &program.items {
         if let Item::Enum(e) = item {
             name_procs.push(cx.declare_enum(e)?);
         }
     }
+    // Struct names next, so a field can name any struct; then their fields.
+    let decls: Vec<&ast::StructDecl> =
+        program.items.iter().filter_map(|i| if let Item::Struct(s) = i { Some(s) } else { None }).collect();
+    for s in &decls {
+        let name = &s.name.name;
+        if cx.structs.contains_key(name.as_str()) || cx.enums.contains_key(name) {
+            return Err(err(format!("type `{name}` is defined twice"), s.name.span));
+        }
+        cx.structs.insert(ast::intern(name), Vec::new());
+    }
+    for s in &decls {
+        cx.declare_struct(s)?;
+    }
+    for s in &decls {
+        cx.no_cycle(s.name.name.as_str(), &mut Vec::new(), s.name.span)?;
+    }
     for item in &program.items {
         match item {
             Item::Const(c) => cx.declare_const(c)?,
             Item::Proc(p) => cx.declare_proc(p)?,
-            Item::Enum(_) => {}
+            Item::Enum(_) | Item::Struct(_) => {}
         }
     }
     for p in &name_procs {
@@ -69,7 +86,7 @@ pub fn check(program: &Program) -> R<Hir> {
     for p in &name_procs {
         procs.push(cx.check_proc(p)?);
     }
-    Ok(Hir { procs, entry })
+    Ok(Hir { procs, entry, structs: cx.structs })
 }
 
 #[derive(Clone)]
@@ -107,6 +124,7 @@ struct Checker {
     proc_ids: HashMap<String, ProcId>,
     consts: HashMap<String, HExpr>,
     enums: HashMap<String, EnumInfo>,
+    structs: Structs,
     f: FnCx,
 }
 
@@ -148,15 +166,16 @@ impl Checker {
         if self.consts.contains_key(&c.name.name) {
             return Err(err(format!("const `{}` is defined twice", c.name.name), c.name.span));
         }
-        if !matches!(c.ty.ty, Type::Scalar(_) | Type::Text) {
+        let ty = self.resolve(&c.ty)?;
+        if !matches!(ty, Type::Scalar(_) | Type::Text) {
             return Err(err("a const must be a number or text", c.ty.span));
         }
-        let value = self.expect(&c.value, c.ty.ty)?;
+        let value = self.expect(&c.value, ty)?;
         if !matches!(value.kind, HExprKind::Word(_) | HExprKind::Real(_) | HExprKind::Text(_)) {
             return Err(err("a const value must be a literal", c.value.span));
         }
         // The const takes its declared type, so `const T: tryte = 5;` is a tryte.
-        let value = HExpr { ty: c.ty.ty, ..value };
+        let value = HExpr { ty, ..value };
         self.consts.insert(c.name.name.clone(), value);
         Ok(())
     }
@@ -213,12 +232,115 @@ impl Checker {
         Ok(decl)
     }
 
-    /// Rejects enum types that were never declared.
-    fn known(&self, t: &ast::TypeExpr) -> R<()> {
-        match t.ty {
-            Type::Enum(n) if !self.enums.contains_key(n) => Err(err(format!("unknown type `{n}`"), t.span)
-                .with_note("types are trit, tryte, int, real, text, arrays (`x[]: int`) or a declared enum")),
-            _ => Ok(()),
+    /// Turns a type name into its enum or struct type.
+    fn resolve(&self, t: &ast::TypeExpr) -> R<Type> {
+        let Type::Named(n) = t.ty else { return Ok(t.ty) };
+        if let Some(info) = self.enums.get(n) {
+            return Ok(Type::Enum(info.name));
+        }
+        if let Some((&k, _)) = self.structs.get_key_value(n) {
+            return Ok(Type::Struct(k));
+        }
+        Err(err(format!("unknown type `{n}`"), t.span)
+            .with_note("types are trit, tryte, int, real, text, arrays (`x[]: int`), or a declared enum or struct"))
+    }
+
+    fn declare_struct(&mut self, s: &ast::StructDecl) -> R<()> {
+        if s.fields.is_empty() {
+            return Err(err(format!("struct `{}` needs at least one field", s.name.name), s.name.span));
+        }
+        let mut fields: Vec<(String, Type)> = Vec::new();
+        for (f, t) in &s.fields {
+            if fields.iter().any(|(n, _)| *n == f.name) {
+                return Err(err(format!("field `{}` appears twice in struct `{}`", f.name, s.name.name), f.span));
+            }
+            fields.push((f.name.clone(), self.resolve(t)?));
+        }
+        *self.structs.get_mut(s.name.name.as_str()).expect("names come first") = fields;
+        Ok(())
+    }
+
+    /// A struct cannot hold itself, not even through another struct: it
+    /// would never end.
+    fn no_cycle(&self, name: &str, path: &mut Vec<String>, span: Span) -> R<()> {
+        if path.first().is_some_and(|p| p == name) {
+            path.push(name.to_string());
+            return Err(err(format!("struct `{}` contains itself", path[0]), span)
+                .with_note(format!("{}: it would never end; keep the others in an array and store an index", path.join(" -> "))));
+        }
+        if path.iter().any(|p| p == name) {
+            return Ok(()); // a cycle that does not pass through the start; reported from its own struct
+        }
+        path.push(name.to_string());
+        for (_, t) in &self.structs[name] {
+            if let Type::Struct(inner) = t {
+                self.no_cycle(inner, path, span)?;
+            }
+        }
+        path.pop();
+        Ok(())
+    }
+
+    /// The offset (in slots) and type of field `f` of struct `sname`.
+    fn field(&self, sname: &str, f: &ast::Ident) -> R<(usize, Type)> {
+        let mut off = 0;
+        for (n, t) in &self.structs[sname] {
+            if *n == f.name {
+                return Ok((off, *t));
+            }
+            off += width(&self.structs, *t);
+        }
+        let names: Vec<&str> = self.structs[sname].iter().map(|(n, _)| n.as_str()).collect();
+        Err(err(format!("struct `{sname}` has no field `{}`", f.name), f.span).with_note(format!("its fields are {}", names.join(", "))))
+    }
+
+    /// Field at `off` of the struct value `base`. Fields are read from a
+    /// local, so a struct that is not in one (`f().x`) is copied to a hidden one.
+    fn field_of(&mut self, base: HExpr, off: usize, ty: Type, span: Span) -> HExpr {
+        match base.kind {
+            HExprKind::Local(id) => hx(HExprKind::Field(id, off), ty, span),
+            HExprKind::Field(id, o) => hx(HExprKind::Field(id, o + off), ty, span),
+            HExprKind::Bind(tmp, value, body) => {
+                let body = self.field_of(*body, off, ty, span);
+                hx(HExprKind::Bind(tmp, value, Box::new(body)), ty, span)
+            }
+            _ => {
+                let tmp = self.new_local("$struct", base.ty, LocalKind::Hidden, span);
+                let read = hx(HExprKind::Field(tmp, off), ty, span);
+                hx(HExprKind::Bind(tmp, Box::new(base), Box::new(read)), ty, span)
+            }
+        }
+    }
+
+    /// How a value prints: an enum by its name, a struct as `Ponto { x: 1, y: 2 }`.
+    fn displayed(&mut self, h: HExpr) -> HExpr {
+        let Type::Struct(sname) = h.ty else { return self.named(h) };
+        let span = h.span;
+        let text = |s: &str| (Fmt::Plain, hx(HExprKind::Text(s.to_string()), Type::Text, span));
+        let (base, bind) = match h.kind {
+            HExprKind::Local(_) | HExprKind::Field(..) => (h, None),
+            _ => {
+                let tmp = self.new_local("$struct", h.ty, LocalKind::Hidden, span);
+                (hx(HExprKind::Local(tmp), h.ty, span), Some((tmp, h)))
+            }
+        };
+        let mut pieces = vec![text(&format!("{sname} {{ "))];
+        let mut off = 0;
+        for (i, (fname, fty)) in self.structs[sname].clone().into_iter().enumerate() {
+            pieces.push(text(&format!("{}{fname}: ", if i > 0 { ", " } else { "" })));
+            let f = self.field_of(base.clone(), off, fty, span);
+            if fty == Type::Text {
+                pieces.extend([text("\""), (Fmt::Plain, f), text("\"")]);
+            } else {
+                pieces.push((Fmt::Plain, self.displayed(f)));
+            }
+            off += width(&self.structs, fty);
+        }
+        pieces.push(text(" }"));
+        let print = hx(HExprKind::Print(pieces), Type::Void, span);
+        match bind {
+            Some((tmp, value)) => hx(HExprKind::Bind(tmp, Box::new(value), Box::new(print)), Type::Void, span),
+            None => print,
         }
     }
 
@@ -243,13 +365,12 @@ impl Checker {
             if params.iter().any(|(n, _)| *n == param.name.name) {
                 return Err(err(format!("parameter `{}` appears twice", param.name.name), param.name.span));
             }
-            self.known(&param.ty)?;
-            params.push((param.name.name.clone(), param.ty.ty));
+            params.push((param.name.name.clone(), self.resolve(&param.ty)?));
         }
-        if let Some(t) = &p.ret {
-            self.known(t)?;
-        }
-        let ret = p.ret.map_or(Type::Void, |t| t.ty);
+        let ret = match &p.ret {
+            Some(t) => self.resolve(t)?,
+            None => Type::Void,
+        };
         if let (Type::Lent(_), Some(t)) = (ret, p.ret) {
             return Err(err("a proc cannot yield a lent buffer", t.span).with_note("lent buffers only live as long as the call"));
         }
@@ -321,12 +442,12 @@ impl Checker {
             StmtKind::Let { is_final, name, ty, value, on_nat } => {
                 let (value, lty) = match ty {
                     Some(t) => {
-                        self.known(t)?;
-                        if let Type::Lent(_) = t.ty {
+                        let ty = self.resolve(t)?;
+                        if let Type::Lent(_) = ty {
                             return Err(err("a variable cannot hold a lent buffer", t.span)
                                 .with_note("lent buffers exist only as proc parameters"));
                         }
-                        (self.expect(value, t.ty)?, t.ty)
+                        (self.expect(value, ty)?, ty)
                     }
                     None => {
                         let h = self.expr(value, None)?;
@@ -532,12 +653,28 @@ impl Checker {
             return Err(err(format!("`{name}` is final and cannot change"), place.name.span)
                 .with_note("declare it without `final` if it needs to change"));
         }
+        if !place.fields.is_empty() {
+            if place.index.is_some() {
+                return Err(err("arrays of structs are not supported yet", place.span));
+            }
+            let (mut off, mut ty) = (0, local.ty);
+            for f in &place.fields {
+                let Type::Struct(sname) = ty else {
+                    return Err(err(format!("{ty} has no fields"), f.span));
+                };
+                let (o, t) = self.field(sname, f)?;
+                off += o;
+                ty = t;
+            }
+            let hv = self.expect(value, ty)?;
+            return Ok(HStmtKind::Assign { local: id, index: None, field: off, value: hv });
+        }
         match (&place.index, local.ty) {
             (Some(idx), Type::Own(e) | Type::Lent(e)) => {
                 let hidx = self.index(idx)?;
                 self.check_index(id, &hidx)?;
                 let hv = self.expect(value, Type::Scalar(e.scalar()))?;
-                Ok(HStmtKind::Assign { local: id, index: Some(hidx), value: hv })
+                Ok(HStmtKind::Assign { local: id, index: Some(hidx), field: 0, value: hv })
             }
             (Some(_), Type::Text) => Err(err("text is read-only", place.span)),
             (Some(_), t) => Err(err(format!("cannot index a {t}"), place.name.span)),
@@ -547,7 +684,7 @@ impl Checker {
                 let hv = self.expect(value, t)?;
                 self.f.sizes.remove(&id);
                 self.note_size(id, &hv);
-                Ok(HStmtKind::Assign { local: id, index: None, value: hv })
+                Ok(HStmtKind::Assign { local: id, index: None, field: 0, value: hv })
             }
         }
     }
@@ -628,7 +765,11 @@ impl Checker {
             return Ok(());
         }
         let d = err(format!("expected a number, found {}", h.ty), h.span);
-        Err(if h.ty == Type::Text { d.with_note("texts work with `+`, `==` and `!=`; `to_int(s)` reads a number") } else { d })
+        Err(match h.ty {
+            Type::Text => d.with_note("texts work with `+`, `==` and `!=`; `toInt(s)` reads a number"),
+            Type::Struct(_) => d.with_note("compare or compute with the fields, e.g. `a.x == b.x`"),
+            _ => d,
+        })
     }
 
     /// Checks both operands of an arithmetic or comparison operator and
@@ -718,13 +859,20 @@ impl Checker {
             }
             ExprKind::Binary(op, a, b) => self.binary(*op, a, b, want, span)?,
             ExprKind::Member(base, field) => {
-                let note = "`.` only works on enum names for now, like `Cor.Verde`";
-                let ExprKind::Var(tname) = &base.kind else {
-                    return Err(err("cannot use `.` here", span).with_note(note));
+                let enum_name = match &base.kind {
+                    ExprKind::Var(n) if self.lookup(n).is_none() && self.enums.contains_key(n) => Some(n),
+                    _ => None,
                 };
-                let Some(info) = self.enums.get(tname) else {
-                    return Err(err(format!("`{tname}` is not an enum"), base.span).with_note(note));
+                let Some(tname) = enum_name else {
+                    let hb = self.expr(base, None)?;
+                    let Type::Struct(sname) = hb.ty else {
+                        return Err(err(format!("{} has no fields", hb.ty), field.span)
+                            .with_note("`.` reads a struct field (`p.x`) or an enum value (`Cor.Verde`)"));
+                    };
+                    let (off, ty) = self.field(sname, field)?;
+                    return Ok(self.field_of(hb, off, ty, span));
                 };
+                let info = &self.enums[tname];
                 let Some((_, k)) = info.variants.iter().find(|(n, _)| *n == field.name) else {
                     let names: Vec<&str> = info.variants.iter().map(|(n, _)| n.as_str()).collect();
                     return Err(err(format!("enum `{tname}` has no value `{}`", field.name), field.span)
@@ -791,6 +939,34 @@ impl Checker {
                 let id = self.lookup(&name.name).ok_or_else(|| self.unknown(&name.name, name.span))?;
                 self.give(id, span)?
             }
+            ExprKind::StructLit { name, fields } => {
+                let Some((&sname, decl)) = self.structs.get_key_value(name.name.as_str()) else {
+                    return Err(err(format!("unknown struct `{}`", name.name), name.span));
+                };
+                let decl = decl.clone();
+                for (i, (f, _)) in fields.iter().enumerate() {
+                    if !decl.iter().any(|(n, _)| *n == f.name) {
+                        self.field(sname, f)?;
+                    }
+                    if fields[..i].iter().any(|(g, _)| g.name == f.name) {
+                        return Err(err(format!("field `{}` is given twice", f.name), f.span));
+                    }
+                }
+                let missing: Vec<String> =
+                    decl.iter().filter(|(n, _)| !fields.iter().any(|(f, _)| f.name == *n)).map(|(n, _)| format!("`{n}`")).collect();
+                if !missing.is_empty() {
+                    let s = if missing.len() == 1 { "" } else { "s" };
+                    return Err(err(format!("missing field{s} {} in `{sname}`", missing.join(", ")), span)
+                        .with_note("every field must get a value"));
+                }
+                // Values are evaluated in the declared order of the fields.
+                let mut values = Vec::new();
+                for (n, t) in &decl {
+                    let (_, e) = fields.iter().find(|(f, _)| f.name == *n).expect("checked above");
+                    values.push(self.expect(e, *t)?);
+                }
+                hx(HExprKind::StructLit(values), Type::Struct(sname), span)
+            }
             ExprKind::Lend(_) => {
                 return Err(err("`lend` is only allowed as a call argument", span));
             }
@@ -819,7 +995,7 @@ impl Checker {
                 for h in [&ha, &hb] {
                     if h.ty != text {
                         let what = if op == BinOp::Add { "`+` joins text with text only" } else { "a text can only be compared with text" };
-                        return Err(err(format!("{what}, found {}", h.ty), h.span).with_note("convert it first: `to_text(x)`"));
+                        return Err(err(format!("{what}, found {}", h.ty), h.span).with_note("convert it first: `toText(x)`"));
                     }
                 }
                 let ty = if op == BinOp::Add { text } else { trit };
@@ -957,7 +1133,7 @@ impl Checker {
         self.expr(e, None).ok().map(|h| h.ty).filter(|t| matches!(t, Type::Enum(_)))
     }
 
-    /// Like `expr`, but a buffer name is lent so `print`/`printf`/`to_text`
+    /// Like `expr`, but a buffer name is lent so `print`/`printf`/`toText`
     /// can show its cells.
     fn shown(&mut self, e: &Expr, want: Option<Type>) -> R<HExpr> {
         if let ExprKind::Var(name) = &e.kind
@@ -1067,7 +1243,7 @@ impl Checker {
                     }
                     let h = self.shown(&Expr { kind: ExprKind::Var(name.to_string()), span: pspan }, None)?;
                     let (f, h) = piece(spec, &label, h)?;
-                    out.push((f, self.named(h)));
+                    out.push((f, self.displayed(h)));
                 }
                 '}' => return Err(err("`}` without a matching `{` in this format", cspan).with_note("write `}}` to print a `}`")),
                 '%' => {
@@ -1093,7 +1269,7 @@ impl Checker {
                     flush(&mut lit, &mut out)?;
                     let h = self.shown(a, Some(want))?;
                     let (f, h) = piece(spec, &label, h)?;
-                    out.push((f, self.named(h)));
+                    out.push((f, self.displayed(h)));
                 }
                 _ => lit.push(c),
             }
@@ -1124,10 +1300,10 @@ impl Checker {
                         pieces.extend(texts.into_iter().map(|h| (Fmt::Plain, h)));
                     } else {
                         let a = self.shown(&args[0], None)?;
-                        if !matches!(a.ty, Type::Scalar(_) | Type::Text | Type::Lent(_) | Type::Enum(_)) {
+                        if !matches!(a.ty, Type::Scalar(_) | Type::Text | Type::Lent(_) | Type::Enum(_) | Type::Struct(_)) {
                             return Err(err(format!("`{}` prints numbers and text, found {}", name.name, a.ty), a.span));
                         }
-                        pieces.push((Fmt::Plain, self.named(a)));
+                        pieces.push((Fmt::Plain, self.displayed(a)));
                     }
                 }
                 if name.name == "printl" {
@@ -1163,19 +1339,19 @@ impl Checker {
                 }
                 return Ok(hx(HExprKind::Print(pieces), Type::Void, span));
             }
-            "to_text" => {
+            "toText" => {
                 let (x, base) = match args {
                     [x] => (x, None),
                     [x, b] => (x, Some(b)),
-                    _ => return Err(err(format!("`to_text` takes 1 or 2 arguments, found {}", args.len()), span)),
+                    _ => return Err(err(format!("`toText` takes 1 or 2 arguments, found {}", args.len()), span)),
                 };
                 let fmt = match base.map(|b| &b.kind) {
                     None => Fmt::Plain,
                     Some(ExprKind::Char(c)) if char_to_tryte('t') == Some(*c) => Fmt::Trits,
                     Some(ExprKind::Char(c)) if char_to_tryte('v') == Some(*c) => Fmt::Hepta,
                     Some(_) => {
-                        return Err(err("the base of `to_text` must be 't' (ternary) or 'v' (heptavintimal)", base.map_or(span, |b| b.span))
-                            .with_note("leave it out for decimal: `to_text(x)`"));
+                        return Err(err("the base of `toText` must be 't' (ternary) or 'v' (heptavintimal)", base.map_or(span, |b| b.span))
+                            .with_note("leave it out for decimal: `toText(x)`"));
                     }
                 };
                 let a = self.shown(x, None)?;
@@ -1188,7 +1364,7 @@ impl Checker {
                 };
                 if !ok {
                     let wants = if fmt == Fmt::Plain { "a number" } else { "an integer" };
-                    return Err(err(format!("`to_text` takes {wants}, found {}", a.ty), a.span));
+                    return Err(err(format!("`toText` takes {wants}, found {}", a.ty), a.span));
                 }
                 return Ok(builtin(Builtin::ToText(fmt), vec![a], text));
             }
@@ -1199,10 +1375,10 @@ impl Checker {
                 let b = self.expect(&args[2], Type::Scalar(Scalar::Int))?;
                 return Ok(builtin(Builtin::Sub, vec![s, a, b], text));
             }
-            "to_int" | "to_real" => {
+            "toInt" | "toReal" => {
                 arity(1)?;
                 let s = self.expect(&args[0], text)?;
-                let (b, ty) = if name.name == "to_int" { (Builtin::ToInt, Scalar::Int) } else { (Builtin::ToReal, Scalar::Real) };
+                let (b, ty) = if name.name == "toInt" { (Builtin::ToInt, Scalar::Int) } else { (Builtin::ToReal, Scalar::Real) };
                 return Ok(builtin(b, vec![s], Type::Scalar(ty)));
             }
             n if CHAR_CLASSES.contains(&n) => {
@@ -1229,31 +1405,31 @@ impl Checker {
                 return Ok(builtin(Builtin::Len, vec![a], Type::Scalar(Scalar::Int)));
             }
             "dump" | "exit" => return Err(err(format!("`{}(...)` is a statement, not a value", name.name), span)),
-            "read_file" | "file_exists" => {
+            "readFile" | "fileExists" => {
                 arity(1)?;
                 let p = self.expect(&args[0], text)?;
-                return Ok(if name.name == "read_file" {
+                return Ok(if name.name == "readFile" {
                     builtin(Builtin::ReadFile, vec![p], text)
                 } else {
                     builtin(Builtin::FileExists, vec![p], Type::Scalar(Scalar::Trit))
                 });
             }
-            "write_file" => {
+            "writeFile" => {
                 arity(2)?;
                 let p = self.expect(&args[0], text)?;
                 let t = self.expect(&args[1], text)?;
                 return Ok(builtin(Builtin::WriteFile, vec![p, t], Type::Void));
             }
-            "write_bytes" => {
+            "writeBytes" => {
                 arity(2)?;
                 let p = self.expect(&args[0], text)?;
                 let a = self.shown(&args[1], None)?;
                 if !matches!(a.ty, Type::Lent(_)) {
-                    return Err(err(format!("`write_bytes` takes an array of bytes (0..255), found {}", a.ty), a.span));
+                    return Err(err(format!("`writeBytes` takes an array of bytes (0..255), found {}", a.ty), a.span));
                 }
                 return Ok(builtin(Builtin::WriteBytes, vec![p, a], Type::Void));
             }
-            "read_line" => {
+            "readLine" => {
                 arity(0)?;
                 return Ok(builtin(Builtin::ReadLine, vec![], text));
             }
@@ -1261,7 +1437,7 @@ impl Checker {
                 arity(0)?;
                 return Ok(builtin(Builtin::Eof, vec![], Type::Scalar(Scalar::Trit)));
             }
-            "arg_count" => {
+            "argCount" => {
                 arity(0)?;
                 return Ok(builtin(Builtin::ArgCount, vec![], Type::Scalar(Scalar::Int)));
             }
@@ -1276,7 +1452,19 @@ impl Checker {
             return Err(if self.lookup(&name.name).is_some() {
                 err(format!("`{}` is a variable, not a proc", name.name), name.span)
             } else {
-                err(format!("unknown proc `{}`", name.name), name.span)
+                let d = err(format!("unknown proc `{}`", name.name), name.span);
+                // Built-ins are camelCase: `to_text` became `toText`.
+                let mut parts = name.name.split('_');
+                let first = parts.next().unwrap_or_default().to_string();
+                let camel = parts.fold(first, |acc, p| {
+                    let mut c = p.chars();
+                    acc + &c.next().map(|h| h.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+                });
+                if camel != name.name && BUILTINS.contains(&camel.as_str()) {
+                    d.with_note(format!("built-ins are written in camelCase: `{camel}`"))
+                } else {
+                    d
+                }
             });
         };
         let sig = self.sigs[id].clone();
@@ -1337,9 +1525,9 @@ fn piece(spec: char, label: &str, h: HExpr) -> R<(Fmt, HExpr)> {
     let ok = match spec {
         'd' | 'i' | 't' | 'v' => ty.is_int() || buffer,
         'f' | 'r' => ty == Type::Scalar(Scalar::Real),
-        's' => matches!(ty, Type::Text | Type::Enum(_)),
+        's' => matches!(ty, Type::Text | Type::Enum(_) | Type::Struct(_)),
         'c' => matches!(ty, Type::Scalar(Scalar::Tryte | Scalar::Trit) | Type::Lent(ast::Buf { elem: Elem::Tryte, .. })),
-        _ => matches!(ty, Type::Scalar(_) | Type::Text | Type::Enum(_)) || buffer,
+        _ => matches!(ty, Type::Scalar(_) | Type::Text | Type::Enum(_) | Type::Struct(_)) || buffer,
     };
     if !ok {
         let wants = match spec {
@@ -1431,7 +1619,7 @@ proc main() -> int {
         assert_eq!(sum.locals[2].name, "acc");
         // `acc += v[i]` became `acc = acc + v[i]`.
         let HStmtKind::Walk { body, .. } = &sum.body.stmts[1].kind else { panic!() };
-        let HStmtKind::Assign { local: 2, index: None, value } = &body.stmts[0].kind else { panic!() };
+        let HStmtKind::Assign { local: 2, index: None, value, .. } = &body.stmts[0].kind else { panic!() };
         assert!(matches!(value.kind, HExprKind::Binary(BinOp::Add, ..)));
     }
 
@@ -1537,7 +1725,7 @@ proc main() -> int {
         assert!(e("enum A { X } proc main() { a: A = 0; }").contains("expected A, found int"));
         assert!(e("enum A { X } enum B { Y } proc main() { t: trit = A.X == B.Y; }").contains("cannot compare A with B"));
         assert!(e("enum A { X } proc main() { printf(\"%d\", A.X); }").contains("cast it"));
-        assert!(e("proc main() { x := 1; y := x.z; }").contains("`x` is not an enum"));
+        assert!(e("proc main() { x := 1; y := x.z; }").contains("int has no fields"));
         assert!(e("proc main() { match 5 { 1 => print(1); } }").contains("needs an `else` arm"));
         assert!(e("proc main() { match 5 { else => print(1); 1 => print(2); } }").contains("must be the last"));
         assert!(e("proc main() { match 5 { 1 | 1 => print(1); else => {} } }").contains("already appears"));
@@ -1558,7 +1746,7 @@ proc main() -> int {
 
     #[test]
     fn print_buffers() {
-        ok("sym b[]: int = claim 3; sym t[]: tryte = claim 1; printl(b); printf(\"{b} {b:t} %v {t:c} %c\", b, t); s := to_text(b, 'v'); burn b; burn t;");
+        ok("sym b[]: int = claim 3; sym t[]: tryte = claim 1; printl(b); printf(\"{b} {b:t} %v {t:c} %c\", b, t); s := toText(b, 'v'); burn b; burn t;");
         assert!(err_in("sym b[]: int = claim 3; printf(\"{b:c}\"); burn b;").contains("found a buffer of int"));
         assert!(err_in("sym b[]: int = claim 3; printf(\"%f\", b); burn b;").contains("prints a real"));
     }
@@ -1575,11 +1763,11 @@ proc main() -> int {
 
     #[test]
     fn to_text_checks() {
-        ok("n: int = 5; a := to_text(n); b: text = to_text(n, 't'); c := to_text(1.5); print(\"x\" + to_text(n, 'v'));");
-        assert!(err_in("x := to_text(1.5, 't');").contains("takes an integer, found real"));
-        assert!(err_in("x := to_text(\"a\");").contains("takes a number, found text"));
-        assert!(err_in("x := to_text(5, 'x');").contains("must be 't' (ternary) or 'v'"));
-        assert!(err_in("x := to_text();").contains("1 or 2 arguments"));
+        ok("n: int = 5; a := toText(n); b: text = toText(n, 't'); c := toText(1.5); print(\"x\" + toText(n, 'v'));");
+        assert!(err_in("x := toText(1.5, 't');").contains("takes an integer, found real"));
+        assert!(err_in("x := toText(\"a\");").contains("takes a number, found text"));
+        assert!(err_in("x := toText(5, 'x');").contains("must be 't' (ternary) or 'v'"));
+        assert!(err_in("x := toText();").contains("1 or 2 arguments"));
     }
 
     #[test]

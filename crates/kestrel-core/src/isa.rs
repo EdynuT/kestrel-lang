@@ -103,6 +103,8 @@ pub enum Op {
     Call { f: u32, argc: u8 },
     /// Pop the return value, drop the frame, push the value for the caller.
     Ret,
+    /// Like `ret`, for a struct: pop `n` values and push them for the caller.
+    RetN(u8),
     /// Stop with a trap; the reason is string `k`.
     Trap(u32),
 
@@ -220,6 +222,7 @@ impl Op {
             Br3 { .. } => 0x52,
             Call { .. } => 0x53,
             Ret => 0x54,
+            RetN(_) => 0x56,
             Trap(_) => 0x55,
 
             Input => 0x60,
@@ -300,6 +303,7 @@ impl Op {
             Br3 { .. } => "br3",
             Call { .. } => "call",
             Ret => "ret",
+            RetN(_) => "retn",
             Trap(_) => "trap",
             Input => "input",
             Emit => "emit",
@@ -325,7 +329,7 @@ impl Op {
         use Op::*;
         1 + match self {
             PushC(_) | PushR(_) | PushS(_) | Jmp(_) | JNat(_) | Dump(_) | Trap(_) => 4,
-            Test(_) | CharIs(_) => 1,
+            Test(_) | CharIs(_) | RetN(_) => 1,
             Load(_) | Store(_) | Move(_) | Purge(_) => 2,
             Br3 { .. } => 12,
             Call { .. } | Pack { .. } => 5,
@@ -340,7 +344,7 @@ impl Op {
             PushC(k) | PushR(k) | PushS(k) | Jmp(k) | JNat(k) | Dump(k) | Trap(k) => {
                 out.extend_from_slice(&k.to_le_bytes())
             }
-            Test(m) | CharIs(m) => out.push(m),
+            Test(m) | CharIs(m) | RetN(m) => out.push(m),
             Load(s) | Store(s) | Move(s) | Purge(s) => out.extend_from_slice(&s.to_le_bytes()),
             Br3 { neg, zero, pos } => {
                 for a in [neg, zero, pos] {
@@ -434,6 +438,7 @@ impl Op {
             0x53 => Call { f: r.u32()?, argc: r.u8()? },
             0x54 => Ret,
             0x55 => Trap(r.u32()?),
+            0x56 => RetN(r.u8()?),
             0x60 => Input,
             0x61 => Emit,
             0x62 => Print,
@@ -479,6 +484,7 @@ impl fmt::Display for Op {
             Jmp(a) | JNat(a) => write!(f, "{m:<7} @{a}"),
             Br3 { neg, zero, pos } => write!(f, "{m:<7} @{neg}, @{zero}, @{pos}"),
             Call { f: func, argc } => write!(f, "{m:<7} fn#{func}, {argc}"),
+            RetN(n) => write!(f, "{m:<7} {n}"),
             Pack { n, sym } => write!(f, "{m:<7} {n}{}", if sym { ", sym" } else { "" }),
             _ => f.write_str(m),
         }
@@ -536,7 +542,7 @@ mod tests {
             FAdd, FSub, FMul, FDiv, FPow, FNeg, FCmp3,
             TLen, TIdx, Narrow6, Narrow1, IToF, FToI, TStr, TStrT, TStrV, TCat, TEq, TSub, TToI, TToF, CharIs(2),
             Alloc, LdIdx, StIdx, Purge(8), AllocZ, Pack { n: 3, sym: true },
-            Jmp(12), JNat(u32::MAX), Br3 { neg: 1, zero: 2, pos: 3 }, Call { f: 2, argc: 3 }, Ret,
+            Jmp(12), JNat(u32::MAX), Br3 { neg: 1, zero: 2, pos: 3 }, Call { f: 2, argc: 3 }, Ret, RetN(3),
             Input, Emit, Print, Show, Dump(5), ShowT, ShowV,
             ReadFile, FileExists, WriteFile, WriteBytes, ReadLine, Eof, ArgCount, Arg, Exit,
         ]

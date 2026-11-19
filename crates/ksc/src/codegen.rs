@@ -20,7 +20,7 @@ pub fn generate(hir: &Hir) -> R<Module> {
     let mut pools = Pools::default();
     let mut functions = Vec::new();
     for p in &hir.procs {
-        functions.push(ProcGen::new(p, &mut pools)?.run()?);
+        functions.push(ProcGen::new(p, &hir.structs, &mut pools)?.run()?);
     }
     let m = Module { entry: hir.entry as u32, consts: pools.consts, strings: pools.strings, functions };
     debug_assert_eq!(m.verify(), Ok(()));
@@ -62,55 +62,85 @@ struct LoopLabels {
 
 struct ProcGen<'a> {
     p: &'a HProc,
+    structs: &'a Structs,
     pools: &'a mut Pools,
     slots: Vec<Slot>,
     names: Vec<String>,
     code: Vec<u8>,
     loops: Vec<LoopLabels>,
+    /// Slots taken by the parameters (a struct parameter takes several).
+    param_slots: usize,
 }
 
 impl<'a> ProcGen<'a> {
-    fn new(p: &'a HProc, pools: &'a mut Pools) -> R<Self> {
+    fn new(p: &'a HProc, structs: &'a Structs, pools: &'a mut Pools) -> R<Self> {
+        // Each local takes as many slots as its type (a struct: one per
+        // field). Parameters come first, in order, as the caller pushes them.
+        // User variables get the low registers next; walk variables and
+        // compiler temporaries go last so `dump` shows what the programmer wrote first.
         let n = p.locals.len();
-        if n > MAX_LOCALS {
-            return Err(Diagnostic::new(
-                format!("`{}` has {n} variables; a proc can have at most {MAX_LOCALS}", p.name),
-                p.body.span,
-            )
-            .with_note("split it into smaller procs"));
-        }
-        let mut slots = vec![Slot::MAX; n];
-        let mut taken: HashMap<Slot, usize> = HashMap::new();
-        for (i, slot) in slots.iter_mut().enumerate().take(p.params) {
-            *slot = i as Slot;
-            taken.insert(i as Slot, i);
-        }
-        // User variables get the low registers; walk variables and compiler
-        // temporaries go last so `dump` shows what the programmer wrote first.
-        let mut order: Vec<usize> = (0..n).filter(|&i| slots[i] == Slot::MAX).collect();
+        let mut order: Vec<usize> = (p.params..n).collect();
         order.sort_by_key(|&i| match p.locals[i].kind {
             LocalKind::Param | LocalKind::Let => 0,
             LocalKind::WalkVar => 1,
             LocalKind::Hidden => 2,
         });
-        let mut next: Slot = 0;
-        for i in order {
-            while taken.contains_key(&next) {
-                next += 1;
+        let mut slots = vec![0; n];
+        let mut names = Vec::new();
+        let mut param_slots = 0;
+        for (k, i) in (0..p.params).chain(order).enumerate() {
+            if names.len() + width(structs, p.locals[i].ty) > MAX_LOCALS {
+                return Err(Diagnostic::new(
+                    format!("`{}` has too many variables; a proc can have at most {MAX_LOCALS} slots", p.name),
+                    p.body.span,
+                )
+                .with_note("split it into smaller procs (each struct field takes a slot)"));
             }
-            slots[i] = next;
-            taken.insert(next, i);
-            next += 1;
+            slots[i] = names.len() as Slot;
+            leaf_names(structs, p.locals[i].ty, &p.locals[i].name, &mut names);
+            if k < p.params {
+                param_slots = names.len();
+            }
         }
-        let count = taken.keys().max().map_or(0, |m| usize::from(*m) + 1);
-        let mut names = vec![String::new(); count];
-        for (i, l) in p.locals.iter().enumerate() {
-            names[usize::from(slots[i])] = l.name.clone();
+        if param_slots > MAX_PARAMS {
+            return Err(Diagnostic::new(
+                format!("`{}` takes {param_slots} values; a proc can take at most {MAX_PARAMS}", p.name),
+                p.body.span,
+            )
+            .with_note("each struct field counts as one value"));
         }
-        if p.params > MAX_PARAMS {
-            return Err(Diagnostic::new(format!("a proc can take at most {MAX_PARAMS} parameters"), p.body.span));
+        Ok(ProcGen { p, structs, pools, slots, names, code: Vec::new(), loops: Vec::new(), param_slots })
+    }
+
+    fn width(&self, ty: Type) -> usize {
+        width(self.structs, ty)
+    }
+
+    /// How many values an expression statement leaves to pop. Every proc
+    /// call returns something (a dummy 0 for procs without `-> T`); built-ins
+    /// without a result and prints push nothing.
+    fn leftover(&self, e: &HExpr) -> usize {
+        match &e.kind {
+            HExprKind::Builtin(..) => usize::from(e.ty != Type::Void),
+            HExprKind::Print(_) => 0,
+            HExprKind::Bind(_, _, body) => self.leftover(body),
+            HExprKind::Call(..) if e.ty == Type::Void => 1,
+            _ => self.width(e.ty),
         }
-        Ok(ProcGen { p, pools, slots, names, code: Vec::new(), loops: Vec::new() })
+    }
+
+    /// Loads `n` slots starting at `first`.
+    fn load(&mut self, first: Slot, n: usize) {
+        for k in 0..n {
+            self.emit(Op::Load(first + k as Slot));
+        }
+    }
+
+    /// Stores the top `n` stack values into the slots starting at `first`.
+    fn store(&mut self, first: Slot, n: usize) {
+        for k in (0..n).rev() {
+            self.emit(Op::Store(first + k as Slot));
+        }
     }
 
     fn run(mut self) -> R<Function> {
@@ -122,7 +152,7 @@ impl<'a> ProcGen<'a> {
         }
         Ok(Function {
             name: self.p.name.clone(),
-            params: self.p.params as u8,
+            params: self.param_slots as u8,
             locals: self.names.len() as u16,
             code: self.code,
             local_names: self.names,
@@ -233,7 +263,7 @@ impl<'a> ProcGen<'a> {
                 }
                 match on_nat {
                     None => {
-                        self.emit(Op::Store(self.slot(*local)));
+                        self.store(self.slot(*local), self.width(value.ty));
                     }
                     Some(handler) => {
                         // value; jnat H; store x; jmp END; H: handler (diverges); END:
@@ -248,11 +278,11 @@ impl<'a> ProcGen<'a> {
                     }
                 }
             }
-            HStmtKind::Assign { local, index: None, value } => {
+            HStmtKind::Assign { local, index: None, field, value } => {
                 self.expr(value)?;
-                self.emit(Op::Store(self.slot(*local)));
+                self.store(self.slot(*local) + *field as Slot, self.width(value.ty));
             }
-            HStmtKind::Assign { local, index: Some(idx), value } => {
+            HStmtKind::Assign { local, index: Some(idx), value, .. } => {
                 self.emit(Op::Load(self.slot(*local)));
                 self.expr(idx)?;
                 self.expr(value)?;
@@ -266,7 +296,10 @@ impl<'a> ProcGen<'a> {
                     Some(e) => self.expr(e)?,
                     None => self.push_word(Word::ZERO),
                 }
-                self.emit(Op::Ret);
+                match self.p.ret {
+                    Type::Struct(_) => self.emit(Op::RetN(self.width(self.p.ret) as u8)),
+                    _ => self.emit(Op::Ret),
+                };
             }
             HStmtKind::Break => {
                 let at = self.emit(Op::Jmp(0));
@@ -306,7 +339,7 @@ impl<'a> ProcGen<'a> {
             HStmtKind::Walk { var, span_tmp, start, end, end_tmp, body } => self.walk(*var, span_tmp, start, end, *end_tmp, body)?,
             HStmtKind::Expr(e) => {
                 self.expr(e)?;
-                if leaves_value(e) {
+                for _ in 0..self.leftover(e) {
                     self.emit(Op::Pop);
                 }
             }
@@ -422,8 +455,20 @@ impl<'a> ProcGen<'a> {
                 let k = self.pools.string(s);
                 self.emit(Op::PushS(k));
             }
-            HExprKind::Local(id) | HExprKind::Lend(id) => {
+            HExprKind::Local(id) => self.load(self.slot(*id), self.width(e.ty)),
+            HExprKind::Lend(id) => {
                 self.emit(Op::Load(self.slot(*id)));
+            }
+            HExprKind::Field(id, off) => self.load(self.slot(*id) + *off as Slot, self.width(e.ty)),
+            HExprKind::StructLit(items) => {
+                for item in items {
+                    self.expr(item)?;
+                }
+            }
+            HExprKind::Bind(tmp, value, body) => {
+                self.expr(value)?;
+                self.store(self.slot(*tmp), self.width(value.ty));
+                self.expr(body)?;
             }
             HExprKind::Give(id) => {
                 self.emit(Op::Move(self.slot(*id)));
@@ -523,11 +568,15 @@ impl<'a> ProcGen<'a> {
                 for a in args {
                     self.expr(a)?;
                 }
-                self.emit(Op::Call { f: *pid as u32, argc: args.len() as u8 });
+                let argc: usize = args.iter().map(|a| self.width(a.ty)).sum();
+                self.emit(Op::Call { f: *pid as u32, argc: argc as u8 });
             }
             HExprKind::Print(pieces) => {
                 for (fmt, p) in pieces {
                     self.expr(p)?;
+                    if p.ty == Type::Void {
+                        continue; // a struct, already printed field by field
+                    }
                     self.emit(match fmt {
                         Fmt::Plain if p.ty == Type::Text => Op::Print,
                         Fmt::Plain => Op::Show,
@@ -581,13 +630,14 @@ fn is_sym(t: Type) -> bool {
     matches!(t, Type::Own(b) | Type::Lent(b) if b.sym)
 }
 
-/// Whether an expression statement leaves a value to pop. Every proc call
-/// returns one (a dummy 0 for procs without `-> T`); built-ins without a
-/// result push nothing.
-fn leaves_value(e: &HExpr) -> bool {
-    match e.kind {
-        HExprKind::Builtin(..) => e.ty != Type::Void,
-        HExprKind::Print(_) => false,
-        _ => true,
+/// Names for each slot of a local: a struct `p` gives `p.x`, `p.y`, ...
+fn leaf_names(structs: &Structs, ty: Type, name: &str, out: &mut Vec<String>) {
+    match ty {
+        Type::Struct(s) => {
+            for (f, t) in &structs[s] {
+                leaf_names(structs, *t, &format!("{name}.{f}"), out);
+            }
+        }
+        _ => out.push(name.to_string()),
     }
 }

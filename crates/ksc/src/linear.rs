@@ -133,7 +133,7 @@ impl Checker<'_> {
                     }
                 }
             }
-            HStmtKind::Assign { local, index, value } => {
+            HStmtKind::Assign { local, index, value, .. } => {
                 if let Some(i) = index {
                     self.expr(i, &mut st)?;
                 }
@@ -322,6 +322,12 @@ impl Checker<'_> {
             }
             HExprKind::Builtin(_, args) => args.iter().try_for_each(|a| self.expr(a, st))?,
             HExprKind::Print(pieces) => pieces.iter().try_for_each(|(_, a)| self.expr(a, st))?,
+            HExprKind::StructLit(items) => items.iter().try_for_each(|a| self.expr(a, st))?,
+            HExprKind::Field(..) => {}
+            HExprKind::Bind(_, value, body) => {
+                self.expr(value, st)?;
+                self.expr(body, st)?;
+            }
         }
         Ok(())
     }

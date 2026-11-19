@@ -16,7 +16,7 @@ use kestrel_core::{Module, Real, Word, Word27};
 pub use kestrel_core::limits::MAX_CALL_DEPTH as MAX_DEPTH;
 /// Largest buffer `claim` may create, in cells.
 pub const MAX_CELLS: i64 = 1 << 24;
-/// Limit on characters of texts made at run time by `to_text`.
+/// Limit on characters of texts made at run time by `toText`.
 pub const MAX_TEXT_CHARS: usize = 1 << 24;
 
 /// A value on the stack or in a register.
@@ -133,7 +133,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
     }
 
     /// Runs `main` to completion and returns its result.
-    /// Sets the program arguments read by `arg_count()` and `arg(i)`.
+    /// Sets the program arguments read by `argCount()` and `arg(i)`.
     pub fn with_args(mut self, args: Vec<String>) -> Self {
         self.args = args;
         self
@@ -396,6 +396,18 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 }
                 self.push(v);
             }
+            Op::RetN(n) => {
+                let n = usize::from(n);
+                if self.stack.len() < n {
+                    return Err("stack underflow in retn".into());
+                }
+                let vals = self.stack.split_off(self.stack.len() - n);
+                self.frames.pop();
+                if self.frames.is_empty() {
+                    return Err("`main` cannot yield a struct".into());
+                }
+                self.stack.extend(vals);
+            }
 
             Op::ReadFile => {
                 let path = self.pop_string()?;
@@ -419,7 +431,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 for (i, w) in self.cells(p)?.iter().enumerate() {
                     match w.get() {
                         Some(v @ 0..=255) => bytes.push(v as u8),
-                        _ => return Err(format!("write_bytes: cell {i} is {w}, not a byte (0..255)")),
+                        _ => return Err(format!("writeBytes: cell {i} is {w}, not a byte (0..255)")),
                     }
                 }
                 std::fs::write(&path, bytes).map_err(|e| format!("cannot write file {path:?}: {e}"))?;
@@ -506,12 +518,12 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             Op::TToI => {
                 let t = self.pop_text()?;
                 let s: String = self.texts[t].iter().collect();
-                self.check(parse_input(&s), false, || format!("to_int(\"{s}\"): not an integer"))?;
+                self.check(parse_input(&s), false, || format!("toInt(\"{s}\"): not an integer"))?;
             }
             Op::TToF => {
                 let t = self.pop_text()?;
                 let s: String = self.texts[t].iter().collect();
-                self.check(parse_real(&s), false, || format!("to_real(\"{s}\"): not a number"))?;
+                self.check(parse_real(&s), false, || format!("toReal(\"{s}\"): not a number"))?;
             }
             Op::CharIs(k) => {
                 let w = self.pop_word()?;
@@ -552,7 +564,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         Ok(())
     }
 
-    /// A value as `print`/`to_text` writes it; the `T`/`V` ops take integers only.
+    /// A value as `print`/`toText` writes it; the `T`/`V` ops take integers only.
     fn render(&self, v: Value, op: Op) -> Result<String, String> {
         let base = match op {
             Op::ShowT | Op::TStrT => Some(true),
@@ -755,7 +767,7 @@ fn parse_input(s: &str) -> Word {
     parsed.unwrap_or(Word::NAT)
 }
 
-/// `to_real`: `[-]digits[.digits]`. Anything else is NaT.
+/// `toReal`: `[-]digits[.digits]`. Anything else is NaT.
 fn parse_real(s: &str) -> Real {
     let (neg, body) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),

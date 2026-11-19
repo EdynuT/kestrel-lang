@@ -49,7 +49,7 @@ fn print_buffers() {
     let body = r#"sym b[]: int = claim 5; walk i in -2..2 { b[i] = i * i * i; }
         printl(b); printf("{b:t} %v\n", b);
         sym t[]: tryte = claim 3; t[-1] = 'O'; t[0] = 'l'; t[1] = 'á';
-        printf("{t:c} {t}\n"); print(to_text(b) + "!"); burn b; burn t;"#;
+        printf("{t:c} {t}\n"); print(toText(b) + "!"); burn b; burn t;"#;
     let e = ksc::compile("proc main() { sym b[]: int = claim 3; burn b; print(b); }").unwrap_err();
     assert!(e.message.contains("after it was burned"), "{}", e.message);
     assert_eq!(main_out(body), "[-8 -1 0 1 8]\n[0t-0+ 0t- 0t0 0t+ 0t+0-] [0vh 0va 0v0 0vA 0vH]\nOlá [15 -12 -54]\n[-8 -1 0 1 8]!");
@@ -57,8 +57,8 @@ fn print_buffers() {
 
 #[test]
 fn to_text_values() {
-    let body = r#"n: int = -5; t := to_text(n, 't'); printl("n = " + to_text(n) + " = " + t + " = " + to_text(n, 'v'));
-        print(len(t)); print(" "); emit(t[2]); print(" " + to_text(1.0 / 4.0) + " " + to_text(NaT));"#;
+    let body = r#"n: int = -5; t := toText(n, 't'); printl("n = " + toText(n) + " = " + t + " = " + toText(n, 'v'));
+        print(len(t)); print(" "); emit(t[2]); print(" " + toText(1.0 / 4.0) + " " + toText(NaT));"#;
     assert_eq!(main_out(body), "n = -5 = 0t-++ = 0ve\n5 - 0.25 NaT");
 }
 
@@ -268,7 +268,7 @@ fn enums_and_match() {
             c: Cor = Cor.Verde;
             printf("{c} %d %s/", (int) c, acao(Cor.Vermelho));
             h := Http.Teapot;
-            printl(to_text(h) + " " + to_text((int) h));
+            printl(toText(h) + " " + toText((int) h));
             printf("%s %s %s %d/", tipo('e'), tipo('1'), tipo('z'), c != Cor.Azul);
             match 7 % 3 { 0 => print("div"); 1 | -1 => print("r1"); else => print("r2"); }
         }"#;
@@ -284,16 +284,16 @@ fn files_args_stdin_exit() {
     let input = dir.join("in.txt");
     std::fs::write(&input, "a | b\nc & d\n").unwrap();
     let src = r#"proc main() -> int {
-        if !file_exists(arg(0)) { exit(3); }
-        s := read_file(arg(0));
+        if !fileExists(arg(0)) { exit(3); }
+        s := readFile(arg(0));
         n := 0;
         for i: int = 0; i < len(s); i++ { if s[i] == '|' || s[i] == '&' { n++; } }
-        write_file(arg(1), "n=" + to_text(n));
+        writeFile(arg(1), "n=" + toText(n));
         b[]: int = {75, 51, 66, 1};
-        write_bytes(arg(1) + ".bin", b);
+        writeBytes(arg(1) + ".bin", b);
         burn b;
-        printf("{n} %s %s %d", read_line(), read_line(), eof());
-        yield arg_count();
+        printf("{n} %s %s %d", readLine(), readLine(), eof());
+        yield argCount();
     }"#;
     let m = build(src);
     let out_path = dir.join("out.txt");
@@ -307,9 +307,9 @@ fn files_args_stdin_exit() {
     // a missing file: exit(3) when checked, Trap when read directly
     let r = Vm::new(&m, "".as_bytes(), Vec::new()).with_args(vec!["/no/such/file".into(), "x".into()]).run();
     assert_eq!(r, Ok(Value::Word(Word::new(3))));
-    let (r, _) = run_with(r#"proc main() { s := read_file("/no/such/file"); }"#, "");
+    let (r, _) = run_with(r#"proc main() { s := readFile("/no/such/file"); }"#, "");
     assert!(r.unwrap_err().reason.contains("cannot read file"));
-    let (r, _) = run_with("proc main() { b[]: int = {300}; write_bytes(\"x\", b); burn b; }", "");
+    let (r, _) = run_with("proc main() { b[]: int = {300}; writeBytes(\"x\", b); burn b; }", "");
     assert!(r.unwrap_err().reason.contains("not a byte"));
     let (r, _) = run_with("proc main() { a := arg(0); }", "");
     assert!(r.unwrap_err().reason.contains("there are 0 arguments"));
@@ -325,13 +325,13 @@ fn text_operations() {
     let body = r#"nome := "Edynu"; printl("Olá, " + nome + "!");
         s := "Kestrel";
         printf("[%s][%s][%s] %d %d\n", sub(s, 0, 3), sub(s, 3, 7), sub(s, 2, 2), s == "Kestrel", s != "kestrel");
-        printf("%d %d ", to_int("123") + to_int("-7"), to_int("0t+0-"));
-        printf("%f %f\n", to_real("2.5") * 2.0, to_real("-0.75"));
-        printf("%d%d%d%d%d %d%d\n", is_digit('7'), is_letter('ç'), is_upper('Á'), is_lower('a'), is_space('\n'), is_digit('a'), is_letter(' '));
-        acc := ""; for i: int = 0; i < 3; i++ { acc = acc + to_text(i) + ","; } print(acc);"#;
+        printf("%d %d ", toInt("123") + toInt("-7"), toInt("0t+0-"));
+        printf("%f %f\n", toReal("2.5") * 2.0, toReal("-0.75"));
+        printf("%d%d%d%d%d %d%d\n", isDigit('7'), isLetter('ç'), isUpper('Á'), isLower('a'), isSpace('\n'), isDigit('a'), isLetter(' '));
+        acc := ""; for i: int = 0; i < 3; i++ { acc = acc + toText(i) + ","; } print(acc);"#;
     assert_eq!(main_out(body), "Olá, Edynu!\n[Kes][trel][] 1 1\n116 8 5.0 -0.75\n11111 -1-1\n0,1,2,");
-    assert!(main_trap(r#"x := to_int("12a");"#).contains(r#"to_int("12a"): not an integer"#));
-    assert!(main_trap(r#"x := to_real("abc");"#).contains(r#"to_real("abc"): not a number"#));
+    assert!(main_trap(r#"x := toInt("12a");"#).contains(r#"toInt("12a"): not an integer"#));
+    assert!(main_trap(r#"x := toReal("abc");"#).contains(r#"toReal("abc"): not a number"#));
     let (r, _) = run_with(r#"proc main() { x := sub("abc", 2, 1); }"#, "");
     assert!(r.unwrap_err().reason.contains("needs 0 <= start <= end <= 3"));
     let e = ksc::compile(r#"proc main() { x := "a" + 1; }"#).unwrap_err();
@@ -403,4 +403,55 @@ fn dump_shows_variables() {
     let o = main_out("low: int = -1; acc: int = 8; dump(\"here\");");
     assert!(o.contains("R-4  low"), "{o}");
     assert!(o.contains("R-3  acc        = 8"), "{o}");
+}
+
+#[test]
+fn structs() {
+    let src = r#"enum Cor { Vermelho, Azul }
+        struct Ponto { x: int; y: int; }
+        struct Pessoa { nome: text; casa: Ponto; cor: Cor; }
+        proc mover(p: Ponto, dx: int) -> Ponto { p.x += dx; yield p; }
+        proc origem() -> Ponto { yield Ponto { x: 0, y: 0 }; }
+        proc main() {
+            a := Ponto { y: 2, x: 1 };
+            b := a; b.x = 10;
+            printl(a); printl(b);
+            c := mover(a, 5);
+            printf("{c} %d %d\n", a.x, origem().y);
+            ana := Pessoa { nome: "Ana", casa: Ponto { x: 3, y: 4 }, cor: Cor.Azul };
+            ana.casa.y++;
+            printl(ana);
+            printl(mover(ana.casa, -3).x + ana.casa.y);
+            mover(a, 1);
+        }"#;
+    assert_eq!(
+        out(src),
+        "Ponto { x: 1, y: 2 }\nPonto { x: 10, y: 2 }\nPonto { x: 6, y: 2 } 1 0\n\
+         Pessoa { nome: \"Ana\", casa: Ponto { x: 3, y: 5 }, cor: Azul }\n5\n"
+    );
+    let p = "struct P { x: int; y: int; } proc main() { ";
+    for (body, msg) in [
+        ("a := P { x: 1 }; }", "missing field `y` in `P`"),
+        ("a := P { x: 1, y: 2, z: 3 }; }", "struct `P` has no field `z`"),
+        ("a := P { x: 1, x: 2, y: 3 }; }", "field `x` is given twice"),
+        ("final a: P = P { x: 1, y: 2 }; a.x = 3; }", "`a` is final"),
+        ("a := P { x: 1, y: 2 }; if a == a { } }", "expected a number, found P"),
+        ("x := 1; x.y = 2; }", "int has no fields"),
+    ] {
+        let e = ksc::compile(&format!("{p}{body}")).unwrap_err();
+        assert!(e.message.contains(msg), "{body}: {}", e.message);
+    }
+    let e = ksc::compile("struct A { b: B; } struct B { a: A; } proc main() {}").unwrap_err();
+    assert!(e.message.contains("struct `A` contains itself"), "{}", e.message);
+    let e = ksc::compile("struct A { v[]: int; } proc main() {}").unwrap_err();
+    assert!(e.message.contains("cannot hold an array"), "{}", e.message);
+    let e = ksc::compile("struct A { x: int, y: int } proc main() {}").unwrap_err();
+    assert!(e.note.unwrap().contains("end with `;`"));
+}
+
+#[test]
+fn old_snake_case_names_point_to_camel_case() {
+    let e = ksc::compile("proc main() { t := to_text(5); }").unwrap_err();
+    assert!(e.message.contains("unknown proc `to_text`"), "{}", e.message);
+    assert_eq!(e.note.as_deref(), Some("built-ins are written in camelCase: `toText`"));
 }

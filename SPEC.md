@@ -34,7 +34,7 @@ Neste documento, `t6` e `t27` indicam larguras. No código-fonte, os tipos se es
 ### 1.3 NaT (veneno)
 
 - O NaT vale para a **palavra inteira**. Basta um trit `?` para a palavra toda ser NaT.
-- **Uma conta que falha para o programa (Trap)**, com uma mensagem que diz o motivo: overflow, divisão por zero, cast fora do intervalo, `to_int` de texto inválido. Como uma exceção não tratada no Java.
+- **Uma conta que falha para o programa (Trap)**, com uma mensagem que diz o motivo: overflow, divisão por zero, cast fora do intervalo, `toInt` de texto inválido. Como uma exceção não tratada no Java.
 - **Exceto numa linha com `on NaT`** (§8.5). Ali a conta que falha produz NaT, qualquer operação com NaT também produz NaT (o veneno se espalha), e o bloco do `on NaT` trata o erro. Isso vale só para as contas escritas na própria linha: um proc chamado dela continua parando o programa.
 - Um proc pode avisar que falhou de propósito com `yield NaT;`, como retornar `null`. Quem chama trata com `on NaT`.
 - Usar um valor NaT numa conta fora de uma linha com `on NaT` também dispara Trap.
@@ -64,13 +64,13 @@ valor = (mantissa / 3²⁰) × 3^expoente
 - É um literal imutável guardado no pool de strings do `.ksb`, como o `const char*` do C. É copiável e **não precisa de `burn`**.
 - `s[i]` devolve o `tryte` da posição `i`. **O índice começa em 0**, como em C (como os arrays sem `sym`). Índice fora de `0 .. len(s)-1` dispara **Trap**.
 - `len(s)` devolve o tamanho como `int`.
-- `a + b` cria um texto novo: `saudacao := "Olá, " + nome + "!";`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo** (use `to_text(5)`).
+- `a + b` cria um texto novo: `saudacao := "Olá, " + nome + "!";`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo** (use `toText(5)`).
 - `a == b` e `a != b` comparam caractere por caractere. `<` e `>` não valem para textos.
 - `sub(s, início, fim)` devolve os caracteres de `início` até `fim - 1`, como o `substring` do Java: `sub("Kestrel", 0, 3)` é `"Kes"`. Fora de `0 ≤ início ≤ fim ≤ len(s)` dispara **Trap**.
-- `to_int(s)` e `to_real(s)` leem um número (`"123"`, `"-7"`, `"0t+0-"`, `"2.5"`). Texto inválido é uma conta que falha (§1.3): use `on NaT` para tratar.
-- `is_digit(c)`, `is_letter(c)`, `is_upper(c)`, `is_lower(c)` e `is_space(c)` dizem (`+`/`-`) se um `tryte` é dígito, letra (com acentos), maiúscula, minúscula ou espaço (`' '`, `\n`, `\t`).
+- `toInt(s)` e `toReal(s)` leem um número (`"123"`, `"-7"`, `"0t+0-"`, `"2.5"`). Texto inválido é uma conta que falha (§1.3): use `on NaT` para tratar.
+- `isDigit(c)`, `isLetter(c)`, `isUpper(c)`, `isLower(c)` e `isSpace(c)` dizem (`+`/`-`) se um `tryte` é dígito, letra (com acentos), maiúscula, minúscula ou espaço (`' '`, `\n`, `\t`).
 - Cada caractere precisa existir na tabela §4. Um caractere fora dela, como `&` ou `ñ`, é **erro de compilação**.
-- `to_text(x)` cria um texto novo a partir de um número (§8.6). Todo texto criado com o programa rodando (`+`, `sub`, `to_text`) dura até o fim do programa (limite de 2²⁴ caracteres no total). Para montar texto caractere por caractere, use um array de `tryte`, como um array de `char` em C.
+- `toText(x)` cria um texto novo a partir de um número (§8.6). Todo texto criado com o programa rodando (`+`, `sub`, `toText`) dura até o fim do programa (limite de 2²⁴ caracteres no total). Para montar texto caractere por caractere, use um array de `tryte`, como um array de `char` em C.
 
 ---
 
@@ -228,12 +228,14 @@ Erros de compilação:
 
 | Classe | Causas | Efeito |
 |---|---|---|
-| **Conta que falha** | Overflow, divisão por zero, cast fora do intervalo, `to_int`/`to_real`/`input` inválido, conta com NaT | Trap com o motivo. Numa linha com `on NaT`, o valor vira NaT e o bloco trata |
+| **Conta que falha** | Overflow, divisão por zero, cast fora do intervalo, `toInt`/`toReal`/`input` inválido, conta com NaT | Trap com o motivo. Numa linha com `on NaT`, o valor vira NaT e o bloco trata |
 | **Trap** (estrutura) | `claim` inválido, índice fora dos limites, `tri`/`if`/`while` sobre NaT, `if`/`while` sobre `0`, limite de `walk` NaT, ponteiro inválido, `burn` duplo | A VM **zera todo o heap e os registradores** e aborta com código ≠ 0 |
 
 ## 8. Sintaxe
 
 A sintaxe segue o estilo C/Java/Rust. O que é próprio do Kestrel vem do ternário (`tri`, `<=>`, `walk` simétrico, `on NaT`) e da posse (`own`, `lend`, `give`, `burn`).
+
+**Convenção de nomes** (a mesma do Java): procs, variáveis e campos em `camelCase` (`readFile`, `idadeMinima`); tipos (`struct`, `enum`) em `PascalCase` (`TokenKind`); `const` em `MAIÚSCULAS` (`MAX_SIZE`). Os built-ins seguem essa convenção. O compilador não obriga, mas a biblioteca padrão e o `ksc.ks` seguem.
 
 ### 8.1 `proc` e `yield`
 
@@ -377,18 +379,18 @@ s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
 | `print(b)` com buffer | Imprime as células: `[-8 -1 0 1 8]`, como o `Arrays.toString` do Java. O buffer é emprestado só durante a impressão, então continua precisando de `burn` |
 | `printf(fmt, args...)` | Imprime texto formatado (§8.6.1) |
 | `len(s)` | Tamanho de um `text` |
-| `to_text(x)` | Converte um número em `text`, em decimal: `to_text(-5)` → `"-5"`, `to_text(1.5)` → `"1.5"`. Com um buffer, gera `"[-8 -1 0 1 8]"` |
-| `to_text(x, 't')` / `to_text(x, 'v')` | Converte um inteiro em `text` ternário (`"0t-++"`) ou heptavintimal (`"0ve"`), como o `Integer.toString(x, base)` do Java |
+| `toText(x)` | Converte um número em `text`, em decimal: `toText(-5)` → `"-5"`, `toText(1.5)` → `"1.5"`. Com um buffer, gera `"[-8 -1 0 1 8]"` |
+| `toText(x, 't')` / `toText(x, 'v')` | Converte um inteiro em `text` ternário (`"0t-++"`) ou heptavintimal (`"0ve"`), como o `Integer.toString(x, base)` do Java |
 | `emit(c)` | Imprime um `tryte` como caractere (tabela §4) |
 | `input()` | Lê um `int` (decimal, `0t` ou `0v`). Entrada inválida é uma conta que falha |
 | `dump("label")` | Mostra os registradores e o heap |
-| `read_file(caminho)` | O arquivo inteiro como `text`. Se não puder ler, **Trap** |
-| `file_exists(caminho)` | `+` se o arquivo existe e pode ser lido |
-| `write_file(caminho, texto)` | Grava o texto (UTF-8), substituindo o arquivo |
-| `write_bytes(caminho, arr)` | Grava cada célula de um array como um byte. Célula fora de `0..255` dispara **Trap** |
-| `read_line()` | Uma linha da entrada padrão, sem o `\n`. No fim da entrada, devolve `""` |
+| `readFile(caminho)` | O arquivo inteiro como `text`. Se não puder ler, **Trap** |
+| `fileExists(caminho)` | `+` se o arquivo existe e pode ser lido |
+| `writeFile(caminho, texto)` | Grava o texto (UTF-8), substituindo o arquivo |
+| `writeBytes(caminho, arr)` | Grava cada célula de um array como um byte. Célula fora de `0..255` dispara **Trap** |
+| `readLine()` | Uma linha da entrada padrão, sem o `\n`. No fim da entrada, devolve `""` |
 | `eof()` | `+` se a entrada padrão acabou |
-| `arg_count()` / `arg(i)` | Argumentos do programa: `ksvm prog.ksb a b c` dá `arg(0) == "a"` |
+| `argCount()` / `arg(i)` | Argumentos do programa: `ksvm prog.ksb a b c` dá `arg(0) == "a"` |
 | `exit(código)` | Encerra o programa com esse código de saída. É um comando que não volta, como `yield`: um `proc` pode terminar nele |
 
 #### 8.6.1 `printf`
@@ -436,7 +438,7 @@ if c == Cor.Azul { ... }
 - Os números começam em 0 e sobem de 1 em 1. Um valor explícito (`= 200`) reinicia a contagem a partir dele. Dois nomes com o mesmo número são erro.
 - Um valor de enum é guardado como o seu número: não ocupa heap e não precisa de `burn`.
 - Aceita só `==` e `!=` com outro valor do **mesmo** enum. Contas e `<`/`>` são erro de tipo. `(int) c` lê o número.
-- `print(c)`, `{c}`, `%s` e `to_text(c)` mostram o **nome**. Por dentro, cada enum ganha uma função escondida que converte número em nome.
+- `print(c)`, `{c}`, `%s` e `toText(c)` mostram o **nome**. Por dentro, cada enum ganha uma função escondida que converte número em nome.
 
 ### 8.8 `match`
 
@@ -461,7 +463,37 @@ match letra {
 - Repetir um valor em dois braços é erro. Um `match` sobre NaT dispara Trap.
 - Por dentro, vira uma cadeia de `if`/`else`, então as regras de posse são as mesmas.
 
-### 8.9 Limites do compilador
+### 8.9 `struct`
+
+```
+struct Ponto {
+    x: int;
+    y: int;
+}
+
+struct Pessoa {
+    nome: text;
+    casa: Ponto;         // um struct dentro de outro
+}
+
+a := Ponto { x: 1, y: 2 };
+b := a;              // cópia: mudar b não muda a
+b.x = 10;
+p := Pessoa { nome: "Ana", casa: Ponto { x: 3, y: 4 } };
+p.casa.y++;
+print(p);            // Pessoa { nome: "Ana", casa: Ponto { x: 3, y: 5 } }
+```
+
+- É declarado fora dos `proc`, como o `enum`. Cada campo termina com `;`, como uma variável.
+- Os campos podem ser números, `text`, enums e outros structs. **Arrays não**: um struct é copiado como um número, e um array tem dono.
+- Um struct não pode conter a si mesmo, nem por meio de outro struct.
+- Para criar, **todos** os campos recebem valor (`Ponto { x: 1, y: 2 }`), em qualquer ordem. Faltar, repetir ou inventar um campo é erro. Os valores são calculados na ordem em que os campos foram declarados.
+- **É copiado**, como um `int`: atribuir, passar para um proc e o `yield` fazem cópias. Não precisa de `burn` e não usa `give`/`lend`.
+- `p.x` lê um campo e `p.x = v` (ou `+=`, `++`...) muda um campo. Com `final`, nem os campos mudam.
+- `print`, `printl`, `{p}` e `%s` mostram o struct inteiro. `==`, `<` e as contas não existem para structs: compare os campos.
+- Por dentro, um struct ocupa um slot por campo (um struct aninhado ocupa os slots dos seus campos). O `dump` mostra cada campo como `p.x`, `p.casa.y`.
+
+### 8.10 Limites do compilador
 
 | Limite | Valor | Ao passar |
 |---|---|---|
@@ -490,7 +522,7 @@ Todos os limites são potências de 3. Os de parâmetros e variáveis também ca
 | Largura | `NARROW6`, `NARROW1`, `ITOF`, `FTOI` (overflow vira NaT) |
 | Modo das falhas | `SOFT` (contas que falham produzem NaT; emitido antes do valor de uma linha com `on NaT`), `HARD` (volta ao padrão: Trap). Cada proc começa em `HARD` |
 | Memória | `ALLOC` (sym), `ALLOCZ` (a partir de 0), `PACK n sym` (literal `{...}`), `LDIDX`, `STIDX`, `PURGE s` |
-| Fluxo | `JMP a`, `JNAT a`, `BR3 a- a0 a+`, `CALL f n`, `RET`, `TRAP str` |
+| Fluxo | `JMP a`, `JNAT a`, `BR3 a- a0 a+`, `CALL f n` (`n` = valores passados; um struct conta um por campo), `RET`, `RETN n` (devolve os `n` valores de um struct), `TRAP str` |
 | E/S | `INPUT`, `EMIT`, `PRINT`, `SHOW`, `SHOWT` (`0t`), `SHOWV` (`0v`), `DUMP str`, `READF`, `FEXISTS`, `WRITEF`, `WRITEB`, `READLN`, `EOF`, `ARGC`, `ARG`, `EXIT` |
 
 **Codificação:** cada instrução tem 1 byte de opcode seguido de operandos de tamanho fixo, em little-endian. Os tipos são `k`, `f` e `a` (`u32`), `s` (`u16`) e `n` (`u8`). As faixas são: pilha `0x0_`, ALU inteira `0x1_`, ALU real `0x2_`, texto e conversão `0x3_`, memória `0x4_`, fluxo `0x5_` e E/S `0x6_`. A tabela completa está em `crates/kestrel-core/src/isa.rs`.
@@ -528,7 +560,8 @@ Os saltos usam um **offset absoluto em bytes** (`u32`) dentro do código da pró
 ## 11. Gramática (EBNF)
 
 ```ebnf
-program    = { const_decl | proc_decl | enum_decl } ;
+program    = { const_decl | proc_decl | enum_decl | struct_decl } ;
+struct_decl = "struct" IDENT "{" { IDENT ":" type ";" } "}" ;
 enum_decl  = "enum" IDENT "{" [ IDENT [ "=" expr ] { "," IDENT [ "=" expr ] } [ "," ] ] "}" ;
 const_decl = "const" IDENT ":" scalar "=" expr ";" ;
 proc_decl  = "proc" IDENT "(" [ param { "," param } ] ")" [ "->" ret_type ] block ;
@@ -556,7 +589,7 @@ stmt       = [ "final" ] IDENT ":" type "=" expr [ on_nat ] ";"
            | io ";"
            | expr ";" ;
 on_nat     = "on" "NaT" block ;
-place      = IDENT [ "[" expr "]" ] ;
+place      = IDENT [ "[" expr "]" ] { "." IDENT } ;
 tri_head   = expr ;
 arm        = ( "-" | "0" | "+" ) "=>" ( block | stmt ) ;
 range      = expr ".." expr | "span" expr ;
@@ -576,6 +609,7 @@ postfix    = primary { "[" expr "]" | "." IDENT } ;
 match_arm  = ( expr { "|" expr } | "else" ) "=>" ( block | stmt ) ;
 primary    = literal | IDENT | IDENT "(" [ arg { "," arg } ] ")"
            | "claim" expr | "{" [ expr { "," expr } [ "," ] ] "}"
+           | IDENT "{" IDENT ":" expr { "," IDENT ":" expr } [ "," ] "}"
            | "input" "(" ")" | "len" "(" expr ")" | "(" expr ")" ;
 arg        = [ "give" | "lend" ] expr ;
 ```

@@ -14,7 +14,7 @@ hoje:  programa.ks ──[ksc em Rust]──────────────
 | Versão | Conteúdo | Estado |
 |---|---|---|
 | 0.1 | Compilador (`ksc`) e VM (`ksvm`) em Rust, de ponta a ponta | ✅ |
-| 0.2 | `int`, cast `(T) x`, `print`/`printl`/`printf`, `to_text`, `final`, impressão de buffers, tabela de caracteres ampliada | ✅ |
+| 0.2 | `int`, cast `(T) x`, `print`/`printl`/`printf`, `toText`, `final`, impressão de buffers, tabela de caracteres ampliada | ✅ |
 | 0.3 | **Controle e arrays:** `if`/`else`, `while`, `for`, comparações (`== != < > <= >=`), `+=`/`++`, enums, `match`, arrays a partir de 0 (`x[]: int`) e simétricos (`sym x[]: int`), literal `{1, 2, 3}` | ✅ |
 | 0.4 | **Textos, E/S e erros:** comparar, cortar, montar e converter textos, classificar caracteres, ler arquivo e stdin, escrever bytes, argumentos de linha de comando, `exit`, contas que falham disparam Trap e `on NaT` trata | ✅ |
 | 0.5 | **Dados:** `struct` (só dados), buffers de structs, buffer que cresce | |
@@ -41,7 +41,7 @@ A biblioteca padrão da 0.7 e o `ksc.ks` (0.8 e 0.9) são escritos como **aulas*
 - **A biblioteca padrão é feita em duas fases:**
   - **Antes da 1.0:** só o que o `ksc.ks` usa: lista que cresce, hash map, montar textos, ler arquivo, erros com mensagem.
   - **Depois da 1.0:** math completo, logging, data e hora, números aleatórios e o que mais aparecer.
-- **Erros:** uma conta que falha (overflow, divisão por zero, `to_int` inválido) dispara Trap com o motivo, e `on NaT` trata o erro na própria linha. `try`/`catch` completo, com o erro subindo de um proc para quem chamou, fica para depois da 1.0, se ainda fizer falta.
+- **Erros:** uma conta que falha (overflow, divisão por zero, `toInt` inválido) dispara Trap com o motivo, e `on NaT` trata o erro na própria linha. `try`/`catch` completo, com o erro subindo de um proc para quem chamou, fica para depois da 1.0, se ainda fizer falta.
 - **Orientação a dados:** a árvore do compilador fica num buffer de nós ligados por índice, sem ponteiros dentro de dados.
 
 ## Como cada parte do `ksc.ks` é validada

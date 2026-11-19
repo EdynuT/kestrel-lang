@@ -41,10 +41,10 @@ proc main() {
     sym s[]: int = {-8, 0, 8};
     for i: int = 0; i < len(a); i++ { if a[i] > 1 && s[0] == 0 { printf("%d ", a[i]); } else { continue; } }
     walk i in span 1 { s[i] += i * 2; }
-    t := "Kes" + "trel"; printl(sub(t, 0, 3) + to_text(len(t)));
+    t := "Kes" + "trel"; printl(sub(t, 0, 3) + toText(len(t)));
     n := 0; while n < 5 { n++; if n == 4 { break; } }
     printf("{n} %s %t %v\n", nome(Cor.Azul), n, n);
-    x := to_int("12") on NaT { burn a; burn s; yield; };
+    x := toInt("12") on NaT { burn a; burn s; yield; };
     r := (real) x / 3.0;
     printl(r);
     burn a; burn s;
@@ -61,6 +61,14 @@ proc main() -> int {
     burn c;
     yield 0;
 }"#,
+    r#"struct Ponto { x: int; y: int; }
+struct Linha { a: Ponto; b: Ponto; nome: text; }
+proc meio(l: Linha) -> Ponto { yield Ponto { x: (l.a.x + l.b.x) / 2, y: (l.a.y + l.b.y) / 2 }; }
+proc main() {
+    l := Linha { a: Ponto { x: 0, y: 0 }, b: Ponto { x: 4, y: 8 }, nome: "d" };
+    m := meio(l); l.b.y -= 2; k := l;
+    printl(m); printf("{l} %d %s\n", meio(k).y, l);
+}"#,
 ];
 
 /// Pieces a mutation may insert.
@@ -70,7 +78,7 @@ const VOCAB: &[&str] = &[
     "{", "}", "(", ")", "[", "]", ";", ",", ".", "..", ":", ":=", "=", "==", "!=", "<", ">", "<=", ">=", "<=>", "+",
     "-", "*", "/", "%", "**", "<<", ">>", "&&", "||", "!", "|", "=>", "->", "++", "--", "+=", "0", "1", "-1", "364",
     "3812798742493", "0t+-0", "0vM", "1.5", "'a'", "\"s\"", "x", "a", "i", "main", "print", "printf", "len", "sub",
-    "to_text", "to_int", "exit",
+    "toText", "toInt", "exit", "struct", "Ponto", "x:",
 ];
 
 /// The source text of each token, using the real lexer (comments are dropped).

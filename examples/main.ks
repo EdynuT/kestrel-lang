@@ -55,7 +55,7 @@ proc main() {
     }
     printf("O mês %d tem %d dias, muita curtição!\n", mes, dias);
 
-    // arrays simétricos e assimétricos e laço de repetição com for
+    // arrays simétricos e assimétricos com laço de repetição usando for e walk
     sym arr[]: int = {1, 2, 3};
     walk i in span 1 {
         printf("%d ", arr[i]);

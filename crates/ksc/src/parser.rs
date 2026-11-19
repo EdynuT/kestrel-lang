@@ -103,7 +103,8 @@ impl Parser {
             Tok::Proc => self.proc_decl().map(Item::Proc),
             Tok::Const => self.const_decl().map(Item::Const),
             Tok::Enum => self.enum_decl().map(Item::Enum),
-            _ => Err(self.unexpected("`proc`, `const` or `enum`")),
+            Tok::Struct => self.struct_decl().map(Item::Struct),
+            _ => Err(self.unexpected("`proc`, `const`, `enum` or `struct`")),
         }
     }
 
@@ -222,7 +223,35 @@ impl Parser {
         Ok(EnumDecl { name, variants })
     }
 
-    /// A type: `int`, `text`, an enum name, or an array type `[sym] T[]`
+    /// `struct Name { a: int; b: text; }`
+    fn struct_decl(&mut self) -> PResult<StructDecl> {
+        self.expect(Tok::Struct)?;
+        let name = self.ident()?;
+        self.expect(Tok::LBrace)?;
+        let mut fields = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            let field = self.ident()?;
+            if self.peek() == &Tok::LBracket {
+                return Err(Diagnostic::new("a struct cannot hold an array", self.span())
+                    .with_note("a struct is plain data that is copied; an array has an owner"));
+            }
+            self.expect(Tok::Colon)?;
+            let ty = self.type_expr()?;
+            if let Type::Own(_) = ty.ty {
+                return Err(Diagnostic::new("a struct cannot hold an array", ty.span)
+                    .with_note("a struct is plain data that is copied; an array has an owner"));
+            }
+            if self.peek() == &Tok::Comma {
+                return Err(self.unexpected("`;`").with_note("struct fields end with `;`, like variables"));
+            }
+            self.expect(Tok::Semi)?;
+            fields.push((field, ty));
+        }
+        self.expect(Tok::RBrace)?;
+        Ok(StructDecl { name, fields })
+    }
+
+    /// A type: `int`, `text`, an enum or struct name, or an array type `[sym] T[]`
     /// (array types are written this way only after `->`).
     fn type_expr(&mut self) -> PResult<TypeExpr> {
         let start = self.span();
@@ -243,7 +272,7 @@ impl Parser {
             return Err(self.unexpected("`tryte[]` or `int[]` after `sym`"));
         }
         if let Tok::Ident(name) = self.peek() {
-            let ty = Type::Enum(intern(name));
+            let ty = Type::Named(intern(name));
             self.bump();
             return Ok(TypeExpr { ty, span: start });
         }
@@ -401,15 +430,24 @@ impl Parser {
         };
         let op_span = self.bump().span;
         let target = lhs.clone();
-        let place = match lhs.kind {
-            ExprKind::Var(name) => Place { name: Ident { name, span: lhs.span }, index: None, span: lhs.span },
-            ExprKind::Index(base, idx) => match base.kind {
-                ExprKind::Var(name) => Place { name: Ident { name, span: base.span }, index: Some(*idx), span: lhs.span },
-                _ => return Err(Diagnostic::new("only a variable can be indexed on the left of `=`", base.span)),
+        // `p.a.b = ...`: peel the fields off, outermost last.
+        let span = lhs.span;
+        let mut fields = Vec::new();
+        let mut base = lhs;
+        while let ExprKind::Member(inner, field) = base.kind {
+            fields.push(field);
+            base = *inner;
+        }
+        fields.reverse();
+        let place = match base.kind {
+            ExprKind::Var(name) => Place { name: Ident { name, span: base.span }, index: None, fields, span },
+            ExprKind::Index(arr, idx) => match arr.kind {
+                ExprKind::Var(name) => Place { name: Ident { name, span: arr.span }, index: Some(*idx), fields, span },
+                _ => return Err(Diagnostic::new("only a variable can be indexed on the left of `=`", arr.span)),
             },
             _ => {
-                return Err(Diagnostic::new("cannot assign to this expression", lhs.span)
-                    .with_note("the left side of `=` must be a variable or `buffer[index]`"));
+                return Err(Diagnostic::new("cannot assign to this expression", span)
+                    .with_note("the left side of `=` must be a variable, `array[index]` or a field like `p.x`"));
             }
         };
         let value = match (compound, op_tok) {
@@ -722,6 +760,22 @@ impl Parser {
         }
     }
 
+    /// `Name { a: 1, b: 2 }`, after the name.
+    fn struct_lit(&mut self, name: Ident, start: Span) -> PResult<Expr> {
+        self.expect(Tok::LBrace)?;
+        let mut fields = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            let field = self.ident()?;
+            self.expect(Tok::Colon)?;
+            fields.push((field, self.nested_expr()?));
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        let close = self.expect(Tok::RBrace)?;
+        Ok(Expr { kind: ExprKind::StructLit { name, fields }, span: start.to(close) })
+    }
+
     fn primary(&mut self) -> PResult<Expr> {
         let start = self.span();
         let kind = match self.peek().clone() {
@@ -790,6 +844,14 @@ impl Parser {
                     let close = self.expect(Tok::RParen)?;
                     return Ok(Expr { kind: ExprKind::Call { name, args }, span: start.to(close) });
                 }
+                // `Name { field: ...`: a struct value (never in a head, where `{` opens the body).
+                if !self.in_head
+                    && self.peek() == &Tok::LBrace
+                    && matches!(self.peek_at(1), Tok::Ident(_))
+                    && self.peek_at(2) == &Tok::Colon
+                {
+                    return self.struct_lit(name, start);
+                }
                 ExprKind::Var(name.name)
             }
             _ => return Err(self.unexpected("an expression")),
@@ -840,6 +902,10 @@ mod tests {
             ExprKind::Claim(n) => format!("(claim {})", sx(n)),
             ExprKind::Give(n) => format!("(give {})", n.name),
             ExprKind::Lend(n) => format!("(lend {})", n.name),
+            ExprKind::StructLit { name, fields } => {
+                let fs: Vec<String> = fields.iter().map(|(f, e)| format!("{}: {}", f.name, sx(e))).collect();
+                format!("{} {{{}}}", name.name, fs.join(", "))
+            }
         }
     }
 
@@ -944,7 +1010,7 @@ mod tests {
         assert!(parse_err("proc main() { if {1} { } }").message.contains("expected an expression, found `{`"));
         assert!(parse_err("proc f() -> lent int[] { } proc main() {}").note.unwrap().contains("declared on the name"));
         assert!(parse_err("proc main() { x := a <=> b <=> c; }").message.contains("cannot be chained"));
-        assert!(parse_err("x := 1;").message.contains("expected `proc`, `const` or `enum`"));
+        assert!(parse_err("x := 1;").message.contains("expected `proc`, `const`, `enum` or `struct`"));
         assert!(parse_err("proc main() { x := ; }").message.contains("expected an expression, found `;`"));
     }
 

@@ -614,6 +614,18 @@ impl Checker {
         Ok(hx(HExprKind::Binary(op, Box::new(ha), Box::new(hb)), ty, span))
     }
 
+    /// Like `expr`, but a buffer name is lent so `print`/`printf`/`to_text`
+    /// can show its cells.
+    fn shown(&mut self, e: &Expr, want: Option<Type>) -> R<HExpr> {
+        if let ExprKind::Var(name) = &e.kind
+            && let Some(id) = self.lookup(name)
+            && let Type::Own(el) | Type::Lent(el) = self.f.locals[id].ty
+        {
+            return Ok(hx(HExprKind::Lend(id), Type::Lent(el), e.span));
+        }
+        self.expr(e, want)
+    }
+
     /// True if `e` is a `+` chain with a text piece in it: `print` then joins
     /// text instead of adding numbers.
     fn is_text_chain(&mut self, e: &Expr) -> bool {
@@ -710,7 +722,7 @@ impl Checker {
                         return Err(err(format!("`{label}` must hold a variable name"), pspan)
                             .with_note("for expressions use `%` and pass them as arguments: `printf(\"%d\", a + b)`"));
                     }
-                    let h = self.expr(&Expr { kind: ExprKind::Var(name.to_string()), span: pspan }, None)?;
+                    let h = self.shown(&Expr { kind: ExprKind::Var(name.to_string()), span: pspan }, None)?;
                     out.push(piece(spec, &label, h)?);
                 }
                 '}' => return Err(err("`}` without a matching `{` in this format", cspan).with_note("write `}}` to print a `}`")),
@@ -735,7 +747,7 @@ impl Checker {
                             .with_note(format!("every `%` takes the next argument, and none is left; to print `{label}` as text, write `%{label}`")));
                     };
                     flush(&mut lit, &mut out)?;
-                    let h = self.expr(a, Some(want))?;
+                    let h = self.shown(a, Some(want))?;
                     out.push(piece(spec, &label, h)?);
                 }
                 _ => lit.push(c),
@@ -766,8 +778,8 @@ impl Checker {
                         self.text_pieces(&args[0], &mut texts)?;
                         pieces.extend(texts.into_iter().map(|h| (Fmt::Plain, h)));
                     } else {
-                        let a = self.expr(&args[0], None)?;
-                        if !matches!(a.ty, Type::Scalar(_) | Type::Text) {
+                        let a = self.shown(&args[0], None)?;
+                        if !matches!(a.ty, Type::Scalar(_) | Type::Text | Type::Lent(_)) {
                             return Err(err(format!("`{}` prints numbers and text, found {}", name.name, a.ty), a.span));
                         }
                         pieces.push((Fmt::Plain, a));
@@ -821,10 +833,10 @@ impl Checker {
                             .with_note("leave it out for decimal: `to_text(x)`"));
                     }
                 };
-                let a = self.expr(x, None)?;
+                let a = self.shown(x, None)?;
                 let ok = match fmt {
-                    Fmt::Plain => matches!(a.ty, Type::Scalar(_)),
-                    _ => a.ty.is_int(),
+                    Fmt::Plain => matches!(a.ty, Type::Scalar(_) | Type::Lent(_)),
+                    _ => a.ty.is_int() || matches!(a.ty, Type::Lent(_)),
                 };
                 if !ok {
                     let wants = if fmt == Fmt::Plain { "a number" } else { "an integer" };
@@ -902,12 +914,13 @@ fn add_chain<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
 /// Checks one `printf` value against its format letter (`' '` for a bare `{x}`).
 fn piece(spec: char, label: &str, h: HExpr) -> R<(Fmt, HExpr)> {
     let ty = h.ty;
+    let buffer = matches!(ty, Type::Lent(_));
     let ok = match spec {
-        'd' | 'i' | 't' | 'v' => ty.is_int(),
+        'd' | 'i' | 't' | 'v' => ty.is_int() || buffer,
         'f' | 'r' => ty == Type::Scalar(Scalar::Real),
         's' => ty == Type::Text,
-        'c' => matches!(ty, Type::Scalar(Scalar::Tryte | Scalar::Trit)),
-        _ => matches!(ty, Type::Scalar(_) | Type::Text),
+        'c' => matches!(ty, Type::Scalar(Scalar::Tryte | Scalar::Trit) | Type::Lent(Elem::Tryte)),
+        _ => matches!(ty, Type::Scalar(_) | Type::Text) || buffer,
     };
     if !ok {
         let wants = match spec {
@@ -917,7 +930,11 @@ fn piece(spec: char, label: &str, h: HExpr) -> R<(Fmt, HExpr)> {
             'c' => "a tryte",
             _ => "a number or text",
         };
-        let d = err(format!("`{label}` prints {wants}, found {ty}"), h.span);
+        let found = match ty {
+            Type::Lent(e) => format!("a buffer of {}", e.scalar()),
+            t => t.to_string(),
+        };
+        let d = err(format!("`{label}` prints {wants}, found {found}"), h.span);
         return Err(match spec {
             'c' if ty.is_int() => d.with_note("cast it: `(tryte) x`"),
             'd' | 'i' if ty == Type::Scalar(Scalar::Real) => d.with_note("use `%f` for reals, or cast: `(int) x`"),
@@ -1086,6 +1103,13 @@ proc main() -> int {
         assert!(err_in("f: text = \"x\"; printf(f, 1);").contains("has no `%`"));
         ok("f: text = \"t\"; n: int = 1; printf(\"a \" + f + \" = %t {n}\" + \"!\", n);");
         assert!(err_in("n: int = 1; printf(\"a\" + n);").contains("joins text only, found int"));
+    }
+
+    #[test]
+    fn print_buffers() {
+        ok("b: own [int] = claim 3; t: own [tryte] = claim 1; printl(b); printf(\"{b} {b:t} %v {t:c} %c\", b, t); s := to_text(b, 'v'); burn b; burn t;");
+        assert!(err_in("b: own [int] = claim 3; printf(\"{b:c}\"); burn b;").contains("found a buffer of int"));
+        assert!(err_in("b: own [int] = claim 3; printf(\"%f\", b); burn b;").contains("prints a real"));
     }
 
     #[test]

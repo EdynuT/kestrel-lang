@@ -39,6 +39,17 @@ fn printf_formats() {
 }
 
 #[test]
+fn print_buffers() {
+    let body = r#"b: own [int] = claim 5; walk i in -2..2 { b[i] = i * i * i; }
+        printl(b); printf("{b:t} %v\n", b);
+        t: own [tryte] = claim 3; t[-1] = 'O'; t[0] = 'l'; t[1] = 'á';
+        printf("{t:c} {t}\n"); print(to_text(b) + "!"); burn b; burn t;"#;
+    let e = ksc::compile("proc main() { b: own [int] = claim 3; burn b; print(b); }").unwrap_err();
+    assert!(e.message.contains("after it was burned"), "{}", e.message);
+    assert_eq!(main_out(body), "[-8 -1 0 1 8]\n[0t-0+ 0t- 0t0 0t+ 0t+0-] [0vh 0va 0v0 0vA 0vH]\nOlá [15 -12 -54]\n[-8 -1 0 1 8]!");
+}
+
+#[test]
 fn to_text_values() {
     let body = r#"n: int = -5; t := to_text(n, 't'); printl("n = " + to_text(n) + " = " + t + " = " + to_text(n, 'v'));
         print(len(t)); print(" "); emit(t[2]); print(" " + to_text(1.0 / 4.0) + " " + to_text(NaT));"#;

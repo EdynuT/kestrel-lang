@@ -310,9 +310,10 @@ s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
 |---|---|
 | `print(x)` | Imprime um número (em decimal) ou um `text`, sem quebra de linha. Aceita `+` entre textos: `print("Olá, " + nome)` |
 | `printl(x)` | Igual ao `print`, seguido de quebra de linha. `printl()` só quebra a linha |
+| `print(b)` com buffer | Imprime as células: `[-8 -1 0 1 8]`, como o `Arrays.toString` do Java. O buffer é emprestado só durante a impressão, então continua precisando de `burn` |
 | `printf(fmt, args...)` | Imprime texto formatado (§8.8.1) |
 | `len(s)` | Tamanho de um `text` |
-| `to_text(x)` | Converte um número em `text`, em decimal: `to_text(-5)` → `"-5"`, `to_text(1.5)` → `"1.5"` |
+| `to_text(x)` | Converte um número em `text`, em decimal: `to_text(-5)` → `"-5"`, `to_text(1.5)` → `"1.5"`. Com um buffer, gera `"[-8 -1 0 1 8]"` |
 | `to_text(x, 't')` / `to_text(x, 'v')` | Converte um inteiro em `text` ternário (`"0t-++"`) ou heptavintimal (`"0ve"`), como o `Integer.toString(x, base)` do Java |
 | `emit(c)` | Imprime um `tryte` como caractere (tabela §4) |
 | `input()` | Lê um `int` (decimal, `0t` ou `0v`). Entrada inválida vira NaT |
@@ -341,6 +342,8 @@ O formato aceita duas formas de colocar valores, que podem ser misturadas:
 | `{x:t}` / `%t` | Ternário sem zeros à esquerda: `-5` → `0t-++` | `trit`, `tryte`, `int` |
 | `{x:v}` / `%v` | Heptavintimal sem zeros à esquerda: `100` → `0vDh` | `trit`, `tryte`, `int` |
 | `{x:c}` / `%c` | Caractere (tabela §4) | `trit`, `tryte` (um `int` precisa de cast: `(tryte) x`) |
+| `{b}`, `{b:t}`, `{b:v}`, `%d`/`%t`/`%v` com buffer | Células entre colchetes: `[0t-0+ 0t- 0t0]` | `own`/`lent [tryte]` ou `[int]` |
+| `{b:c}` / `%c` com buffer de `tryte` | As células como texto, sem colchetes: `Olá` (como o `println(char[])` do Java) | `own`/`lent [tryte]` |
 
 - Tudo é verificado **na compilação**: tipo errado, `%` sem argumento, argumento sobrando ou nome desconhecido é **erro**.
 - `{{`, `}}` e `%%` imprimem `{`, `}` e `%`. Fora do `printf`, esses caracteres são impressos normalmente.

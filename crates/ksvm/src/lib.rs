@@ -322,8 +322,13 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 self.push(Value::Word(parse_input(line.trim())));
             }
             Op::Emit => {
-                let c = self.pop_word()?.get().and_then(tryte_to_char).unwrap_or('\u{FFFD}');
-                write!(self.output, "{c}").map_err(io_err)?;
+                // A tryte buffer prints as the characters of its cells.
+                let s: String = match self.pop()? {
+                    Value::Ptr(p) => self.cells(p)?.iter().map(|&w| tryte_char(w)).collect(),
+                    Value::Word(w) => tryte_char(w).to_string(),
+                    other => return Err(format!("expected an int, found {other:?}")),
+                };
+                self.output.write_all(s.as_bytes()).map_err(io_err)?;
             }
             Op::Print => {
                 let t = self.pop_text()?;
@@ -370,13 +375,14 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             _ => None,
         };
         Ok(match (v, base) {
-            (Value::Word(w), _) if w.is_nat() => "NaT".to_string(),
-            (Value::Word(w), None) => w.to_string(),
-            (Value::Word(w), Some(true)) => Word27::from(w).to_trits_short(),
-            (Value::Word(w), Some(false)) => Word27::from(w).to_hepta_short(),
+            (Value::Word(w), _) => word_text(w, base),
+            // A buffer prints its cells: `[-8 -1 0 1 8]`.
+            (Value::Ptr(p), _) => {
+                let cells: Vec<String> = self.cells(p)?.iter().map(|&w| word_text(w, base)).collect();
+                format!("[{}]", cells.join(" "))
+            }
             (Value::Real(r), None) => r.to_string(),
             (Value::Text(t), None) => self.texts[t as usize].iter().collect(),
-            (Value::Ptr(_), None) => "<buffer>".to_string(),
             (other, Some(_)) => return Err(format!("expected an int, found {other:?}")),
         })
     }
@@ -445,6 +451,14 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         }
     }
 
+    fn cells(&self, p: Ptr) -> Result<&[Word], String> {
+        self.heap
+            .get(p.block as usize)
+            .filter(|b| b.live && b.generation == p.generation)
+            .map(|b| b.cells.as_slice())
+            .ok_or_else(|| "access through a stale pointer (buffer already burned)".to_string())
+    }
+
     fn block(&mut self, p: Ptr) -> Result<&mut Block, String> {
         self.heap
             .get_mut(p.block as usize)
@@ -483,6 +497,20 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         }
         writeln!(out, "===")
     }
+}
+
+/// An integer in decimal, or in ternary (`Some(true)`) / heptavintimal (`Some(false)`).
+fn word_text(w: Word, base: Option<bool>) -> String {
+    match base {
+        _ if w.is_nat() => "NaT".to_string(),
+        None => w.to_string(),
+        Some(true) => Word27::from(w).to_trits_short(),
+        Some(false) => Word27::from(w).to_hepta_short(),
+    }
+}
+
+fn tryte_char(w: Word) -> char {
+    w.get().and_then(tryte_to_char).unwrap_or('\u{FFFD}')
 }
 
 fn cell_index(b: &Block, i: Word) -> Result<usize, String> {

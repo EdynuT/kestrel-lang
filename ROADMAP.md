@@ -15,7 +15,7 @@ hoje:  programa.ks ──[ksc em Rust]──────────────
 |---|---|---|
 | 0.1 | Compilador (`ksc`) e VM (`ksvm`) em Rust, de ponta a ponta | ✅ |
 | 0.2 | `int`, cast `(T) x`, `print`/`printl`/`printf`, `to_text`, `final`, impressão de buffers, tabela de caracteres ampliada | ✅ |
-| 0.3 | **Controle e arrays:** `if`/`else`, `while`, `==` `<` `>` (e `!=` `<=` `>=`), enums, buffers a partir de 0 (qualquer tamanho), literal de array `[1, 2, 3]` | |
+| 0.3 | **Controle e arrays:** `if`/`else`, `while`, `for`, comparações (`== != < > <= >=`), `+=`/`++`, enums, `match`, arrays a partir de 0 (`x[]: int`) e simétricos (`sym x[]: int`), literal `{1, 2, 3}` | ✅ |
 | 0.4 | **Textos e E/S:** comparar, cortar, montar e converter textos, classificar caracteres, ler arquivo e stdin, escrever bytes, argumentos de linha de comando, `exit` | |
 | 0.5 | **Dados:** `struct` (só dados), buffers de structs, buffer que cresce | |
 | 0.6 | **Classes:** `class` com métodos, `private`/`public`, interfaces (sem herança), anotações (`@impl`, `@test`, `@deprecated`) | |

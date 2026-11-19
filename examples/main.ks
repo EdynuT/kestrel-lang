@@ -68,6 +68,5 @@ proc main() {
         printf("%d ", arr[i]);
     }
     burn arr;
-    burn arr;
     print("\n");
 }

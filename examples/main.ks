@@ -35,4 +35,10 @@ proc main() {
     } else {
         printf("{variavel3} é minusculo\n");
     }
+
+    a: int = 0;
+    while a < 10 {
+        printl(a);
+        a++;
+    }
 }

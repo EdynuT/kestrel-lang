@@ -4,7 +4,7 @@
 //! The checker walks each proc tracking every own local as alive, burned or
 //! given. Leaving a block or yielding with a buffer still alive is a leak;
 //! touching a burned or given buffer is a use-after-free; the arms of a `tri`
-//! that fall through must agree; a `walk` body must leave outer buffers as it
+//! that fall through must agree; a loop body (`walk`, `while`) must leave outer buffers as it
 //! found them.
 
 use crate::diag::{Diagnostic, Span};
@@ -220,6 +220,15 @@ impl Checker<'_> {
                 }
                 st = first;
             }
+            HStmtKind::While { cond, body } => {
+                self.expr(cond, &mut st)?;
+                self.loops.push(LoopCx { entry: st.clone(), inner: Vec::new() });
+                let after = self.block(body, st.clone());
+                let l = self.loops.pop().expect("pushed above");
+                if let Some(after) = after? {
+                    self.outer_unchanged(&l.entry, &after, &l.inner, s.span)?;
+                }
+            }
             HStmtKind::Walk { span_tmp, start, end, body, .. } => {
                 if let Some((_, k)) = span_tmp {
                     self.expr(k, &mut st)?;
@@ -245,7 +254,7 @@ impl Checker<'_> {
         for id in 0..entry.len() {
             if !inner.contains(&id) && entry[id] != now[id] && is_own(self.p.locals[id].ty) {
                 return Err(Diagnostic::new(
-                    format!("a `walk` body cannot change `{}`, which lives outside the loop", self.name(id)),
+                    format!("a loop body cannot change `{}`, which lives outside the loop", self.name(id)),
                     span,
                 )
                 .with_note(format!("it was {} before the loop and is {} here", entry[id].describe(), now[id].describe())));
@@ -330,16 +339,16 @@ mod tests {
     fn spec_example_is_sound() {
         let src = r#"
 proc sum(v: lent [int], k: int) -> int {
-    acc: int @R0 = 0;
-    walk i in span k { add acc, v[i]; }
+    acc: int = 0;
+    walk i in span k { acc += v[i]; }
     yield acc;
 }
 proc main() -> int {
     b: own [int] = claim 5;
     walk i in span 2 { b[i] = i * i; }
-    s: int @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
-    shl3 s, 1;
-    tri cmp3 s, 10 { - => print("less"), 0 => print("equal"), + => print("greater"), }
+    s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s = s << 1;
+    tri s <=> 10 { - => print("less"), 0 => print("equal"), + => print("greater"), }
     burn b;
     yield 0;
 }"#;

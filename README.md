@@ -10,9 +10,9 @@ Kestrel targets the BET-VM, a simulated 27-trit processor where every digit is `
 
 ```
 proc sum(v: lent [int], k: int) -> int {
-    acc: int @R0 = 0;             // pin acc to register R0
+    acc: int = 0;
     walk i in span k {             // i goes from -k to +k
-        add acc, v[i];             // acc = acc + v[i]
+        acc += v[i];
     }
     yield acc;
 }

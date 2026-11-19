@@ -4,9 +4,9 @@ const GREETING: text = "Hello from the BET-VM!\n";
 
 // Sum of a symmetric buffer with indices -k..+k.
 proc sum(v: lent [int], k: int) -> int {
-    acc: int @R0 = 0;
+    acc: int = 0;
     walk i in span k {
-        add acc, v[i];             // acc = acc + v[i]
+        acc += v[i];
     }
     yield acc;
 }
@@ -30,7 +30,7 @@ proc main() -> int {
     print("cubes: ");
     walk i in span 2 { print(b[i]); print(" "); }
     print("\nsum = ");
-    s: int @R+1 = sum(lend b, 2) on NaT { burn b; yield 1; };
+    s: int = sum(lend b, 2) on NaT { burn b; yield 1; };
     print(s);
     print(" (");
     describe(s);

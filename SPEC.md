@@ -62,7 +62,7 @@ valor = (mantissa / 3²⁰) × 3^expoente
 - `len(s)` devolve o tamanho como `int`.
 - `print(s)` imprime o texto. Dentro do `print`, `+` junta textos: `print("Olá, " + nome + "\n")`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo**. Fora do `print`, `+` com texto também é erro (o texto não pode ser criado em tempo de execução).
 - Cada caractere precisa existir na tabela §4. Um caractere fora dela, como `&` ou `ñ`, é **erro de compilação**.
-- `to_text(x)` cria um texto novo a partir de um número (§8.8). Os textos criados assim duram até o fim do programa (limite de 2²⁴ caracteres no total). Para montar texto caractere por caractere, use um `own [tryte]`, como um array de `char` em C.
+- `to_text(x)` cria um texto novo a partir de um número (§8.6). Os textos criados assim duram até o fim do programa (limite de 2²⁴ caracteres no total). Para montar texto caractere por caractere, use um `own [tryte]`, como um array de `char` em C.
 
 ---
 
@@ -193,18 +193,18 @@ Erros de compilação:
 
 - **`tri`**: todos os ramos que não divergem devem terminar com o **mesmo** estado linear. Um ramo que diverge (`yield`, `break`, `continue`) precisa ter consumido o que for exigido naquele ponto de saída.
 - **`walk`**: o corpo não pode consumir um `own` declarado fora do laço. Antes de `break` ou `continue`, todo `own` declarado dentro do corpo deve estar consumido.
-- **`on NaT`**: o bloco é obrigado a divergir (§8.6).
+- **`on NaT`**: o bloco é obrigado a divergir (§8.5).
 
 ## 7. Classes de falha
 
 | Classe | Causas | Efeito |
 |---|---|---|
 | **NaT** (dado) | Overflow, divisão por zero, cast fora do intervalo, `input` inválido | O valor vira NaT e pode ser interceptado por `on NaT` |
-| **Trap** (estrutura) | `claim` inválido, índice fora dos limites, `tri`/`if` sobre NaT, `if` sobre `0`, limite de `walk` NaT, ponteiro inválido, `burn` duplo | A VM **zera todo o heap e os registradores** e aborta com código ≠ 0 |
+| **Trap** (estrutura) | `claim` inválido, índice fora dos limites, `tri`/`if`/`while` sobre NaT, `if`/`while` sobre `0`, limite de `walk` NaT, ponteiro inválido, `burn` duplo | A VM **zera todo o heap e os registradores** e aborta com código ≠ 0 |
 
 ## 8. Sintaxe
 
-A proporção é cerca de 80% C++/Rust para 20% pseudo-assembly. Os toques de assembly são **opcionais**, e cada um tem uma forma equivalente em C++/Rust.
+A sintaxe segue o estilo C/Java/Rust. O que é próprio do Kestrel vem do ternário (`tri`, `<=>`, `walk` simétrico, `on NaT`) e da posse (`own`, `lend`, `give`, `burn`).
 
 ### 8.1 `proc` e `yield`
 
@@ -221,7 +221,13 @@ O ponto de entrada é `main`. Um `proc` sem `-> T` usa `yield;` sem valor.
 x: int = 5;          // tipo explícito
 y := x * 3;           // tipo inferido do valor
 x = x + 1;            // atribuição
+x += 1;               // o mesmo que x = x + 1  (também -=  *=  /=  %=)
+x++;                  // o mesmo que x += 1     (também x--)
 ```
+
+- `++` e `--` são **comandos**, não expressões (como em Go): `x = i++;` é erro, e não existe `++i`.
+- Valem também em células de buffer: `b[i] += 2;`, `b[i]++;`.
+- Em tri arms, escreva `- =>` com espaço: `-=>` seria lido como `-=` seguido de `>`.
 
 Cada declaração ocupa um slot próprio, então um `x` declarado num bloco interno não sobrescreve o `x` de fora.
 
@@ -246,29 +252,7 @@ proc main() {
 - Num buffer `final`, as **células** continuam mudando (`b[0] = 5`), como num array `final` do Java. O que fica fixo é o nome. O `burn` continua obrigatório.
 - Um bloco interno pode declarar outro `x`, que é uma variável nova.
 
-### 8.3 Registrador fixo `@R` (assembly)
-
-```
-acc: int @R0 = 0;    // acc mora no registrador R0
-```
-
-- Os registradores válidos são `@R-4` .. `@R+4`, e cada um aceita no máximo uma variável fixada por `proc`.
-- A fixação vale só para escalares. Sem `@R`, o compilador escolhe o lugar.
-- O `dump` mostra o nome da variável ao lado do registrador.
-
-### 8.4 Instruções como comandos (assembly)
-
-| Forma | Significa |
-|---|---|
-| `add d, s;` | `d = d + s` |
-| `add d, a, b;` | `d = a + b` |
-| `sub`, `mul`, `div`, `mod`, `pow`, `shl3`, `shr3` | Mesma forma de 2 ou 3 operandos |
-| `neg d;` | `d = -d` |
-| `mov d, s;` | `d = s` |
-
-`d` é uma variável ou um `b[i]`. A semântica é a mesma das expressões (overflow vira NaT etc.). É só outra forma de escrever.
-
-### 8.5 `tri` (desvio triplo)
+### 8.3 `tri` (desvio triplo)
 
 ```
 tri s <=> 10 {
@@ -276,14 +260,13 @@ tri s <=> 10 {
     0 => print("equal"),
     + => { print("greater"); print(s); }
 }
-tri cmp3 s, 10 { ... }     // forma assembly, idêntica
 ```
 
 - A expressão é do tipo `trit`. Os três ramos são obrigatórios e cada um aparece uma única vez.
 - Um ramo é um comando seguido de `,` ou um bloco `{ }`.
 - Se a expressão for NaT, ocorre **Trap**.
 
-### 8.5.1 `if` / `else`
+### 8.3.1 `if` / `else`
 
 ```
 if x < 0 {
@@ -300,7 +283,7 @@ if x < 0 {
 - Os parênteses são opcionais: `if (x < 0) { ... }` também vale. As chaves são obrigatórias.
 - Por dentro, `if c { A } else { B }` é `tri c { - => B, 0 => trap, + => A }`. As regras de posse são as do `tri`: os dois ramos que continuam precisam deixar cada buffer no mesmo estado.
 
-### 8.6 `walk` (laço simétrico)
+### 8.4 `walk` (laço simétrico)
 
 ```
 walk i in -2..5 { ... }
@@ -312,7 +295,22 @@ walk i in span k { ... }   // o mesmo que -k..+k
 - `break` e `continue` são permitidos.
 - `i` é `int` e só pode ser lido dentro do laço.
 
-### 8.7 `on NaT` (barreira de veneno)
+### 8.4.1 `while`
+
+```
+i := 0;
+while i < 10 {
+    print(i);
+    i = i + 1;
+}
+while + { ... }            // laço infinito; saia com `break` ou `yield`
+```
+
+- A condição é um `trit`, reavaliada antes de cada volta. `+` executa o corpo, `−` sai do laço. **`0` e NaT disparam Trap**, como no `if`.
+- `break` sai do laço, e `continue` volta para a condição.
+- Regra de posse igual à do `walk`: o corpo não pode consumir nem criar buffers que vivem fora do laço.
+
+### 8.5 `on NaT` (barreira de veneno)
 
 ```
 s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
@@ -322,14 +320,14 @@ s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
 - Caso contrário, executa o bloco, que precisa divergir (`yield`, `break` ou `continue`).
 - Depois do `;`, `s` com certeza não é NaT.
 
-### 8.8 E/S
+### 8.6 E/S
 
 | Comando | Efeito |
 |---|---|
 | `print(x)` | Imprime um número (em decimal) ou um `text`, sem quebra de linha. Aceita `+` entre textos: `print("Olá, " + nome)` |
 | `printl(x)` | Igual ao `print`, seguido de quebra de linha. `printl()` só quebra a linha |
 | `print(b)` com buffer | Imprime as células: `[-8 -1 0 1 8]`, como o `Arrays.toString` do Java. O buffer é emprestado só durante a impressão, então continua precisando de `burn` |
-| `printf(fmt, args...)` | Imprime texto formatado (§8.8.1) |
+| `printf(fmt, args...)` | Imprime texto formatado (§8.6.1) |
 | `len(s)` | Tamanho de um `text` |
 | `to_text(x)` | Converte um número em `text`, em decimal: `to_text(-5)` → `"-5"`, `to_text(1.5)` → `"1.5"`. Com um buffer, gera `"[-8 -1 0 1 8]"` |
 | `to_text(x, 't')` / `to_text(x, 'v')` | Converte um inteiro em `text` ternário (`"0t-++"`) ou heptavintimal (`"0ve"`), como o `Integer.toString(x, base)` do Java |
@@ -337,7 +335,7 @@ s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
 | `input()` | Lê um `int` (decimal, `0t` ou `0v`). Entrada inválida vira NaT |
 | `dump("label")` | Mostra os registradores e o heap |
 
-#### 8.8.1 `printf`
+#### 8.6.1 `printf`
 
 O primeiro argumento é o **formato**: um texto literal, ou vários textos unidos com `+`. Os **literais** são lidos como formato. Uma **variável `text`** entra como está: um `%t` guardado nela é impresso literalmente. Somar um número ao formato é **erro de tipo**.
 
@@ -428,27 +426,24 @@ param      = IDENT ":" type ;
 type       = scalar | "text" | ( "own" | "lent" ) "[" elem "]" ;
 scalar     = "trit" | "tryte" | "int" | "real" ;
 elem       = "tryte" | "int" ;
-REG        = "R-4" | "R-3" | "R-2" | "R-1" | "R0" | "R+1" | "R+2" | "R+3" | "R+4" ;
 
 block      = "{" { stmt } "}" ;
-stmt       = [ "final" ] IDENT ":" type [ "@" REG ] "=" expr [ on_nat ] ";"
+stmt       = [ "final" ] IDENT ":" type "=" expr [ on_nat ] ";"
            | [ "final" ] IDENT ":=" expr [ on_nat ] ";"
-           | place "=" expr ";"
-           | instr ";"
+           | place ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr ";"
+           | place ( "++" | "--" ) ";"
            | "burn" IDENT ";"
            | "yield" [ expr ] ";"
            | "break" ";" | "continue" ";"
            | "tri" tri_head "{" arm arm arm "}"
            | "if" expr block [ "else" ( block | if_stmt ) ]
            | "walk" IDENT "in" range block
+           | "while" expr block
            | io ";"
            | expr ";" ;
 on_nat     = "on" "NaT" block ;
 place      = IDENT [ "[" expr "]" ] ;
-instr      = ( "add" | "sub" | "mul" | "div" | "mod" | "pow" | "shl3" | "shr3" ) place "," expr [ "," expr ]
-           | "neg" place
-           | "mov" place "," expr ;
-tri_head   = expr | "cmp3" expr "," expr ;
+tri_head   = expr ;
 arm        = ( "-" | "0" | "+" ) "=>" ( block | stmt_noterm "," ) ;
 range      = expr ".." expr | "span" expr ;
 io         = "print" "(" expr ")" | "printl" "(" [ expr ] ")" | "emit" "(" expr ")"
@@ -475,9 +470,9 @@ arg        = [ "give" | "lend" ] expr ;
 
 ```
 proc sum(v: lent [int], k: int) -> int {
-    acc: int @R0 = 0;
+    acc: int = 0;
     walk i in span k {
-        add acc, v[i];             // acc = acc + v[i]
+        acc += v[i];
     }
     yield acc;
 }
@@ -488,10 +483,10 @@ proc main() -> int {
         b[i] = i * i;
     }
 
-    s: int @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
-    shl3 s, 1;                     // s = s * 3
+    s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s = s << 1;                    // s = s * 3
 
-    tri cmp3 s, 10 {
+    tri s <=> 10 {
         - => print("less"),
         0 => print("equal"),
         + => print("greater"),

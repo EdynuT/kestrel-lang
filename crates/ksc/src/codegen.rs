@@ -1,8 +1,8 @@
 //! Code generator: checked [`Hir`] -> `.ksb` [`Module`].
 //!
 //! The VM is a stack machine, so expressions compile to postfix order.
-//! Locals become frame slots: parameters first, `@R` pins at their register
-//! slot (R-4 = slot 0 ... R+4 = slot 8), everything else in the free slots.
+//! Locals become frame slots (slot 0..8 is shown as R-4..R+4): parameters
+//! first, then everything else.
 
 use std::collections::HashMap;
 
@@ -76,24 +76,6 @@ impl<'a> ProcGen<'a> {
         for (i, slot) in slots.iter_mut().enumerate().take(p.params) {
             *slot = i as Slot;
             taken.insert(i as Slot, i);
-        }
-        for (i, l) in p.locals.iter().enumerate() {
-            if let Some(r) = l.reg {
-                let s = (r + 4) as Slot;
-                if let Some(&other) = taken.get(&s) {
-                    return Err(Diagnostic::new(
-                        format!(
-                            "register @{} is already used by parameter `{}` in this proc",
-                            crate::lexer::reg_name(r),
-                            p.locals[other].name
-                        ),
-                        l.span,
-                    )
-                    .with_note("parameters occupy the first registers; pick another one"));
-                }
-                slots[i] = s;
-                taken.insert(s, i);
-            }
         }
         // User variables get the low registers; walk variables and compiler
         // temporaries go last so `dump` shows what the programmer wrote first.
@@ -299,6 +281,7 @@ impl<'a> ProcGen<'a> {
                     self.patch(at, 0, end);
                 }
             }
+            HStmtKind::While { cond, body } => self.while_loop(cond, body)?,
             HStmtKind::Walk { var, span_tmp, start, end, end_tmp, body } => self.walk(*var, span_tmp, start, end, *end_tmp, body)?,
             HStmtKind::Expr(e) => {
                 self.expr(e)?;
@@ -367,6 +350,37 @@ impl<'a> ProcGen<'a> {
         }
         for at in labels.continues {
             self.patch(at, 0, cont);
+        }
+        Ok(())
+    }
+
+    /// ```text
+    /// TOP:  cond; br3 EXIT, UNKNOWN, BODY     (NaT traps in br3)
+    /// UNKNOWN: trap "while condition is 0 (unknown)"
+    /// BODY: body; jmp TOP                      (continue -> TOP, break -> EXIT)
+    /// EXIT:
+    /// ```
+    fn while_loop(&mut self, cond: &HExpr, body: &HBlock) -> R<()> {
+        let top = self.here();
+        self.expr(cond)?;
+        let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
+        let unknown = self.here();
+        let k = self.pools.string("while condition is 0 (unknown)");
+        self.emit(Op::Trap(k));
+        let body_at = self.here();
+        self.loops.push(LoopLabels { breaks: Vec::new(), continues: Vec::new() });
+        self.block(body)?;
+        let labels = self.loops.pop().expect("pushed above");
+        self.emit(Op::Jmp(top));
+        let exit = self.here();
+        self.patch(br, 0, exit);
+        self.patch(br, 1, unknown);
+        self.patch(br, 2, body_at);
+        for at in labels.breaks {
+            self.patch(at, 0, exit);
+        }
+        for at in labels.continues {
+            self.patch(at, 0, top);
         }
         Ok(())
     }

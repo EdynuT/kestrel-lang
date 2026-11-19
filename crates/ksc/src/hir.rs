@@ -42,8 +42,6 @@ pub enum LocalKind {
 pub struct Local {
     pub name: String,
     pub ty: Type,
-    /// Pinned register `@R-4..@R+4`, if any.
-    pub reg: Option<i8>,
     pub kind: LocalKind,
     pub span: Span,
     /// Declared with `final`: it can never be assigned again.
@@ -76,6 +74,8 @@ pub enum HStmtKind {
     /// Arms in order `-`, `0`, `+`.
     /// `from_if`: lowered from `if`/`else` (arms are else, trap, then).
     Tri { head: HExpr, arms: Box<[HBlock; 3]>, from_if: bool },
+    /// `while cond { body }`: `-` leaves, `0` traps, `+` runs the body again.
+    While { cond: HExpr, body: HBlock },
     /// Stop the program with a trap carrying this reason.
     Trap(String),
     /// `walk var in start..end`. Bounds are evaluated once into hidden locals;

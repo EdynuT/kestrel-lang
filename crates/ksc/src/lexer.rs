@@ -22,8 +22,6 @@ pub enum Tok {
     Char(i64),
     Str(String),
     Ident(String),
-    /// Register `@R-4` .. `@R+4`, stored as -4..=4.
-    Reg(i8),
 
     // Keywords
     Proc,
@@ -71,6 +69,14 @@ pub enum Tok {
     Ge,
     If,
     Else,
+    While,
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    PercentEq,
+    PlusPlus,
+    MinusMinus,
     Eq,
     ColonEq,
     Colon,
@@ -108,6 +114,7 @@ const KEYWORDS: &[(&str, Tok)] = &[
     ("tri", Tok::Tri),
     ("if", Tok::If),
     ("else", Tok::Else),
+    ("while", Tok::While),
     ("walk", Tok::Walk),
     ("in", Tok::In),
     ("span", Tok::Span),
@@ -128,6 +135,13 @@ const OPERATORS: &[(&str, Tok)] = &[
     ("**", Tok::StarStar),
     ("<<", Tok::Shl),
     (">>", Tok::Shr),
+    ("+=", Tok::PlusEq),
+    ("-=", Tok::MinusEq),
+    ("*=", Tok::StarEq),
+    ("/=", Tok::SlashEq),
+    ("%=", Tok::PercentEq),
+    ("++", Tok::PlusPlus),
+    ("--", Tok::MinusMinus),
     ("<=", Tok::Le),
     (">=", Tok::Ge),
     ("==", Tok::EqEq),
@@ -166,7 +180,6 @@ impl fmt::Display for Tok {
             Tok::Char(_) => f.write_str("character literal"),
             Tok::Str(_) => f.write_str("string literal"),
             Tok::Ident(name) => write!(f, "`{name}`"),
-            Tok::Reg(r) => write!(f, "register `@{}`", reg_name(*r)),
             Tok::Eof => f.write_str("end of file"),
             other => {
                 let text = KEYWORDS
@@ -177,15 +190,6 @@ impl fmt::Display for Tok {
                 write!(f, "`{text}`")
             }
         }
-    }
-}
-
-/// `R-4` .. `R0` .. `R+4`.
-pub fn reg_name(r: i8) -> String {
-    match r {
-        0 => "R0".to_string(),
-        r if r > 0 => format!("R+{r}"),
-        r => format!("R{r}"),
     }
 }
 
@@ -251,7 +255,6 @@ impl Lexer<'_> {
                         .map_or_else(|| Tok::Ident(word.clone()), |(_, t)| t.clone());
                     self.push(tok, start);
                 }
-                '@' => self.register()?,
                 '\'' => self.char_lit()?,
                 '"' => self.string_lit()?,
                 _ => {
@@ -326,29 +329,7 @@ impl Lexer<'_> {
         self.err(msg, start).with_note(note)
     }
 
-    fn register(&mut self) -> Result<(), Diagnostic> {
-        let start = self.pos;
-        self.bump(); // '@'
-        let name = self.take_while(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-');
-        let reg = match name.as_str() {
-            "R0" => Some(0),
-            _ => name
-                .strip_prefix('R')
-                .and_then(|r| r.parse::<i8>().ok().filter(|_| r.starts_with(['+', '-'])))
-                .filter(|r| (-4..=4).contains(r) && *r != 0),
-        };
-        match reg {
-            Some(r) => {
-                self.push(Tok::Reg(r), start);
-                Ok(())
-            }
-            None => Err(self
-                .err(format!("`@{name}` is not a register"), start)
-                .with_note("registers are @R-4, @R-3, @R-2, @R-1, @R0, @R+1, @R+2, @R+3, @R+4")),
-        }
-    }
 
-    /// One character of a char or string literal, with `\n` and `\t` escapes.
     fn literal_char(&mut self, quote: char, start: usize) -> Result<Option<char>, Diagnostic> {
         let c_start = self.pos;
         let c = match self.bump() {
@@ -423,20 +404,16 @@ mod tests {
     }
 
     #[test]
-    fn declaration_with_register() {
+    fn declaration() {
         assert_eq!(
-            toks("acc: int @R0 = 0; // comment"),
-            vec![id("acc"), Tok::Colon, Tok::Int, Tok::Reg(0), Tok::Eq, n(0), Tok::Semi, Tok::Eof]
+            toks("acc: int = 0; // comment"),
+            vec![id("acc"), Tok::Colon, Tok::Int, Tok::Eq, n(0), Tok::Semi, Tok::Eof]
         );
-        assert_eq!(toks("@R-4 @R+4 @R+1"), vec![Tok::Reg(-4), Tok::Reg(4), Tok::Reg(1), Tok::Eof]);
+        assert_eq!(toks("i++; x += 2;"), vec![id("i"), Tok::PlusPlus, Tok::Semi, id("x"), Tok::PlusEq, n(2), Tok::Semi, Tok::Eof]);
     }
 
     #[test]
-    fn instruction_and_tri() {
-        assert_eq!(
-            toks("add acc, v[i];"),
-            vec![id("add"), id("acc"), Tok::Comma, id("v"), Tok::LBracket, id("i"), Tok::RBracket, Tok::Semi, Tok::Eof]
-        );
+    fn tri() {
         assert_eq!(
             toks("tri s <=> 10 { - => x, 0 => y, + => z, }")[..8],
             [Tok::Tri, id("s"), Tok::Spaceship, n(10), Tok::LBrace, Tok::Minus, Tok::FatArrow, id("x")]
@@ -467,8 +444,7 @@ mod tests {
         assert!(err("0vN").contains("`N` is not a valid digit"));
         assert!(err("0t").contains("no digits"));
         assert!(err("12abc").contains("right after a number"));
-        assert!(err("@R5").contains("not a register"));
-        assert!(err("@R1").contains("not a register"));
+        assert!(err("x: int @R0 = 1;").contains("unexpected character `@`"));
         assert!(err(r#""a & b""#).contains("'&' is not in the Kestrel character table"));
         assert!(err(r#""niño""#).contains("'ñ'"));
         assert!(err(r#""open"#).contains("unterminated string"));
@@ -492,9 +468,9 @@ mod tests {
     fn spec_example_lexes() {
         let src = r#"
 proc sum(v: lent [int], k: int) -> int {
-    acc: int @R0 = 0;
+    acc: int = 0;
     walk i in span k {
-        add acc, v[i];             // acc = acc + v[i]
+        acc += v[i];
     }
     yield acc;
 }
@@ -505,10 +481,10 @@ proc main() -> int {
         b[i] = i * i;
     }
 
-    s: int @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
-    shl3 s, 1;                     // s = s * 3
+    s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s = s << 1;                    // s = s * 3
 
-    tri cmp3 s, 10 {
+    tri s <=> 10 {
         - => print("less"),
         0 => print("equal"),
         + => print("greater"),
@@ -519,7 +495,6 @@ proc main() -> int {
 "#;
         let t = toks(src);
         assert_eq!(t.last(), Some(&Tok::Eof));
-        assert!(t.contains(&Tok::Reg(1)));
         assert_eq!(t.iter().filter(|t| **t == Tok::Burn).count(), 2);
     }
 }

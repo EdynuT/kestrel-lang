@@ -65,16 +65,16 @@ fn print_concatenation() {
 fn spec_example() {
     let src = r#"
 proc sum(v: lent [int], k: int) -> int {
-    acc: int @R0 = 0;
-    walk i in span k { add acc, v[i]; }
+    acc: int = 0;
+    walk i in span k { acc += v[i]; }
     yield acc;
 }
 proc main() -> int {
     b: own [int] = claim 5;
     walk i in span 2 { b[i] = i * i; }
-    s: int @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
-    shl3 s, 1;
-    tri cmp3 s, 10 { - => print("less"), 0 => print("equal"), + => print("greater"), }
+    s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s = s << 1;
+    tri s <=> 10 { - => print("less"), 0 => print("equal"), + => print("greater"), }
     burn b;
     yield 0;
 }"#;
@@ -97,12 +97,6 @@ fn arithmetic_and_overflow() {
 fn reals_and_conversions() {
     assert_eq!(main_out(r#"print(0.2 + 0.1); print(" "); print(1.0 / 3.0); print(" "); print(2.0 ** 10);"#), "0.3 0.333333333 1024.0");
     assert_eq!(main_out(r#"print((int) 6.9); print(" "); print((int) -6.9); print(" "); print((real) 7 / 2.0); print(" "); print((tryte) 500);"#), "6 -6 3.5 NaT");
-}
-
-#[test]
-fn instructions() {
-    assert_eq!(main_out("x: int @R-2 = 5; add x, 3; mul x, x, 2; neg x; print(x);"), "-16");
-    assert_eq!(main_out("b: own [int] = claim 3; mov b[1], 7; add b[1], 1; shl3 b[1], 1; print(b[1]); burn b;"), "24");
 }
 
 #[test]
@@ -133,7 +127,7 @@ fn walks() {
 fn procs_buffers_and_ownership() {
     let src = r#"
 proc fill(v: lent [int], k: int) { walk i in span k { v[i] = i * 10; } }
-proc total(v: lent [int], k: int) -> int { s := 0; walk i in span k { add s, v[i]; } yield s; }
+proc total(v: lent [int], k: int) -> int { s := 0; walk i in span k { s += v[i]; } yield s; }
 proc make(n: int) -> own [int] { b: own [int] = claim 2 * n + 1; yield b; }
 proc consume(b: own [int]) -> int { x := b[0]; burn b; yield x; }
 proc main() {
@@ -179,11 +173,11 @@ fn traps() {
     let (r, _) = run_with("proc main() { n := 4; b: own [int] = claim n; burn b; }", "");
     assert!(r.unwrap_err().reason.contains("odd"));
     let (r, _) = run_with("proc main() { t: trit = NaT; tri t { - => {} 0 => {} + => {} } }", "");
-    assert_eq!(r.unwrap_err().reason, "tri/if condition is NaT");
+    assert_eq!(r.unwrap_err().reason, "tri/if/while condition is NaT");
     let (r, _) = run_with("proc main() { t: trit = 0; if t { print(1); } }", "");
     assert_eq!(r.unwrap_err().reason, "if condition is 0 (unknown)");
     let (r, _) = run_with("proc main() { x: int = NaT; if x > 0 { print(1); } }", "");
-    assert_eq!(r.unwrap_err().reason, "tri/if condition is NaT");
+    assert_eq!(r.unwrap_err().reason, "tri/if/while condition is NaT");
 }
 
 #[test]
@@ -200,6 +194,34 @@ fn if_and_comparisons() {
 }
 
 #[test]
+fn while_loops() {
+    let body = r#"i := 0; while i < 5 { print(i); i = i + 1; }
+        n := 0; while + { n = n + 1; if n == 3 { continue; } if n > 5 { break; } print(" "); print(n); }
+        while i > 100 { print("never"); }"#;
+    assert_eq!(main_out(body), "01234 1 2 4 5");
+    let (r, _) = run_with("proc main() { t: trit = 0; while t { } }", "");
+    assert_eq!(r.unwrap_err().reason, "while condition is 0 (unknown)");
+    // collatz(27) takes 111 steps
+    let src = r#"proc steps(n: int) -> int { k := 0; while n != 1 { if n % 2 == 0 { n = n / 2; } else { n = 3 * n + 1; } k = k + 1; } yield k; }
+        proc main() { print(steps(27)); }"#;
+    assert_eq!(out(src), "111");
+}
+
+#[test]
+fn compound_assignment() {
+    let body = r#"i := 0; while i < 3 { print(i); i++; }
+        x := 10; x += 5; x -= 3; x *= 2; x /= 5; x %= 3; printf(" %d", x);
+        n := 5; n--; printf(" %d", n);
+        r := 1.5; r *= 2.0; r -= 0.5; printf(" %f", r);
+        b: own [int] = claim 3; b[1] += 7; b[1]++; b[-1] -= 1; printf(" {b}", ); burn b;"#;
+    assert_eq!(main_out(body), "012 1 4 2.5 [-1 0 8]");
+    let e = ksc::compile("proc main() { i := 0; final f := 1; f++; }").unwrap_err();
+    assert!(e.message.contains("is final"), "{}", e.message);
+    let e = ksc::compile("proc main() { i := 0; x := i++; }").unwrap_err();
+    assert!(e.message.contains("expected `;`"), "{}", e.message);
+}
+
+#[test]
 fn short_circuit() {
     // The right side is skipped when the left decides: no index trap on an empty text.
     let body = r#"s: text = ""; if len(s) > 0 && s[0] == 'a' { print("a"); } else { print("empty"); }
@@ -210,9 +232,8 @@ fn short_circuit() {
 }
 
 #[test]
-fn registers_and_dump() {
-    let o = main_out("acc: int @R0 = 8; low: int @R-4 = -1; dump(\"here\");");
+fn dump_shows_variables() {
+    let o = main_out("low: int = -1; acc: int = 8; dump(\"here\");");
     assert!(o.contains("R-4  low"), "{o}");
-    assert!(o.contains("R0   acc        = 8"), "{o}");
-    assert!(ksc::compile("proc f(a: int, b: int) { x: int @R-3 = 1; } proc main() {}").unwrap_err().message.contains("already used by parameter `b`"));
+    assert!(o.contains("R-3  acc        = 8"), "{o}");
 }

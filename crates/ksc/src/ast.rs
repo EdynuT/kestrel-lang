@@ -150,14 +150,12 @@ pub enum StmtKind {
         is_final: bool,
         name: Ident,
         ty: Option<TypeExpr>,
-        reg: Option<(i8, Span)>,
         value: Expr,
         on_nat: Option<Block>,
     },
     /// `x = e;` or `b[i] = e;`
     Assign { place: Place, value: Expr },
     /// `add d, s;`, `add d, a, b;`, `neg d;`, `mov d, s;`
-    Instr { op: InstrOp, op_span: Span, dest: Place, args: Vec<Expr> },
     Burn(Ident),
     Yield(Option<Expr>),
     Break,
@@ -167,6 +165,8 @@ pub enum StmtKind {
     /// `if cond { } else { }`; `else if` is an `else` block holding one `If`.
     If { cond: Expr, then: Block, otherwise: Option<Block> },
     Walk { var: Ident, range: Range, body: Block },
+    /// `while cond { }`
+    While { cond: Expr, body: Block },
     Expr(Expr),
 }
 
@@ -175,53 +175,6 @@ pub struct Place {
     pub name: Ident,
     pub index: Option<Expr>,
     pub span: Span,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InstrOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
-    Pow,
-    Shl3,
-    Shr3,
-    Neg,
-    Mov,
-}
-
-impl InstrOp {
-    pub fn from_name(name: &str) -> Option<InstrOp> {
-        Some(match name {
-            "add" => InstrOp::Add,
-            "sub" => InstrOp::Sub,
-            "mul" => InstrOp::Mul,
-            "div" => InstrOp::Div,
-            "mod" => InstrOp::Mod,
-            "pow" => InstrOp::Pow,
-            "shl3" => InstrOp::Shl3,
-            "shr3" => InstrOp::Shr3,
-            "neg" => InstrOp::Neg,
-            "mov" => InstrOp::Mov,
-            _ => return None,
-        })
-    }
-
-    /// The binary operator an arithmetic instruction stands for.
-    pub fn bin_op(self) -> Option<BinOp> {
-        Some(match self {
-            InstrOp::Add => BinOp::Add,
-            InstrOp::Sub => BinOp::Sub,
-            InstrOp::Mul => BinOp::Mul,
-            InstrOp::Div => BinOp::Div,
-            InstrOp::Mod => BinOp::Mod,
-            InstrOp::Pow => BinOp::Pow,
-            InstrOp::Shl3 => BinOp::Shl,
-            InstrOp::Shr3 => BinOp::Shr,
-            InstrOp::Neg | InstrOp::Mov => return None,
-        })
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

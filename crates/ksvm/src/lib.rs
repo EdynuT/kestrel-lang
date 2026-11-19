@@ -301,7 +301,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 }
             }
             Op::Br3 { neg, zero, pos } => {
-                let t = self.pop_word()?.get().ok_or("tri/if condition is NaT")?;
+                let t = self.pop_word()?.get().ok_or("tri/if/while condition is NaT")?;
                 self.frame().pc = match t.signum() {
                     -1 => neg,
                     0 => zero,
@@ -681,7 +681,7 @@ mod tests {
         assert!(trap_reason(&stale).contains("stale pointer"));
 
         let tri_nat = module(vec![func("main", 0, 0, &[c(1), c(0), Op::Div, Op::Br3 { neg: 0, zero: 0, pos: 0 }])], &[]);
-        assert_eq!(trap_reason(&tri_nat), "tri/if condition is NaT");
+        assert_eq!(trap_reason(&tri_nat), "tri/if/while condition is NaT");
 
         let moved = module(vec![func("main", 0, 2, &[c(1), Op::Alloc, Op::Store(0), Op::Move(0), Op::Store(1), Op::Load(0), c(0), Op::LdIdx, c(0), Op::Ret])], &[]);
         assert!(trap_reason(&moved).contains("burned or given away"));

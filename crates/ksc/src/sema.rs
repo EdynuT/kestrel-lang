@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use kestrel_core::charset::char_to_tryte;
 use kestrel_core::word::{TRIT_MAX, TRYTE_MAX};
 
-use crate::ast::{self, Expr, ExprKind, InstrOp, Item, Place, Program, Range, StmtKind, UnOp};
+use crate::ast::{self, Expr, ExprKind, Item, Place, Program, Range, StmtKind, UnOp};
 use crate::diag::{Diagnostic, Span};
 use crate::hir::*;
 
@@ -56,12 +56,11 @@ struct FnCx {
     scopes: Vec<Vec<(String, LocalId)>>,
     ret: Type,
     loops: usize,
-    regs: HashMap<i8, Span>,
 }
 
 impl FnCx {
     fn new(ret: Type) -> FnCx {
-        FnCx { locals: Vec::new(), scopes: vec![Vec::new()], ret, loops: 0, regs: HashMap::new() }
+        FnCx { locals: Vec::new(), scopes: vec![Vec::new()], ret, loops: 0 }
     }
 }
 
@@ -144,7 +143,7 @@ impl Checker {
         let sig = self.sigs[self.proc_ids[&p.name.name]].clone();
         self.f = FnCx::new(sig.ret);
         for (param, (_, ty)) in p.params.iter().zip(&sig.params) {
-            self.new_local(&param.name.name, *ty, None, LocalKind::Param, param.name.span);
+            self.new_local(&param.name.name, *ty, LocalKind::Param, param.name.span);
         }
         let body = self.block(&p.body)?;
         if sig.ret != Type::Void && !body.diverges() {
@@ -157,9 +156,9 @@ impl Checker {
 
     // ---- scopes ----
 
-    fn new_local(&mut self, name: &str, ty: Type, reg: Option<i8>, kind: LocalKind, span: Span) -> LocalId {
+    fn new_local(&mut self, name: &str, ty: Type, kind: LocalKind, span: Span) -> LocalId {
         let id = self.f.locals.len();
-        self.f.locals.push(Local { name: name.to_string(), ty, reg, kind, span, is_final: false });
+        self.f.locals.push(Local { name: name.to_string(), ty, kind, span, is_final: false });
         if kind != LocalKind::Hidden {
             self.f.scopes.last_mut().expect("a scope is open").push((name.to_string(), id));
         }
@@ -198,7 +197,7 @@ impl Checker {
 
     fn stmt(&mut self, s: &ast::Stmt) -> R<HStmt> {
         let kind = match &s.kind {
-            StmtKind::Let { is_final, name, ty, reg, value, on_nat } => {
+            StmtKind::Let { is_final, name, ty, value, on_nat } => {
                 let (value, lty) = match ty {
                     Some(t) => {
                         if let Type::Lent(_) = t.ty {
@@ -216,17 +215,6 @@ impl Checker {
                         (h, t)
                     }
                 };
-                if let Some((r, rspan)) = reg {
-                    if !lty.is_numeric() {
-                        return Err(err("only numbers can be pinned to a register", *rspan));
-                    }
-                    if self.f.regs.insert(*r, *rspan).is_some() {
-                        return Err(err(
-                            format!("register @{} is already pinned to another variable", crate::lexer::reg_name(*r)),
-                            *rspan,
-                        ));
-                    }
-                }
                 let on_nat = match on_nat {
                     Some(b) => {
                         if !value.ty.is_numeric() {
@@ -248,37 +236,11 @@ impl Checker {
                     return Err(err(format!("`{}` is final and cannot be declared again", name.name), name.span)
                         .with_note("pick another name, or declare the first one without `final`"));
                 }
-                let local = self.new_local(&name.name, lty, reg.map(|(r, _)| r), LocalKind::Let, name.span);
+                let local = self.new_local(&name.name, lty, LocalKind::Let, name.span);
                 self.f.locals[local].is_final = *is_final;
                 HStmtKind::Let { local, value, on_nat }
             }
             StmtKind::Assign { place, value } => self.assign(place, value)?,
-            StmtKind::Instr { op, dest, args, .. } => {
-                let place_expr = match &dest.index {
-                    None => Expr { kind: ExprKind::Var(dest.name.name.clone()), span: dest.span },
-                    Some(i) => Expr {
-                        kind: ExprKind::Index(
-                            Box::new(Expr { kind: ExprKind::Var(dest.name.name.clone()), span: dest.name.span }),
-                            Box::new(i.clone()),
-                        ),
-                        span: dest.span,
-                    },
-                };
-                let value = match (op, args.as_slice()) {
-                    (InstrOp::Mov, [src]) => src.clone(),
-                    (InstrOp::Neg, []) => Expr { kind: ExprKind::Unary(UnOp::Neg, Box::new(place_expr)), span: s.span },
-                    (op, args) => {
-                        let bin = op.bin_op().expect("arithmetic instruction");
-                        let (l, r) = match args {
-                            [src] => (place_expr, src.clone()),
-                            [a, b] => (a.clone(), b.clone()),
-                            _ => unreachable!("operand count checked by the parser"),
-                        };
-                        Expr { kind: ExprKind::Binary(bin, Box::new(l), Box::new(r)), span: s.span }
-                    }
-                };
-                self.assign(dest, &value)?
-            }
             StmtKind::Burn(name) => {
                 let id = self.lookup(&name.name).ok_or_else(|| self.unknown(&name.name, name.span))?;
                 match self.f.locals[id].ty {
@@ -306,7 +268,8 @@ impl Checker {
             StmtKind::Break | StmtKind::Continue => {
                 if self.f.loops == 0 {
                     let word = if s.kind == StmtKind::Break { "break" } else { "continue" };
-                    return Err(err(format!("`{word}` outside of a `walk`"), s.span));
+                    return Err(err(format!("`{word}` outside of a loop"), s.span)
+                        .with_note("`break` and `continue` work inside `walk` and `while`"));
                 }
                 if s.kind == StmtKind::Break { HStmtKind::Break } else { HStmtKind::Continue }
             }
@@ -335,21 +298,32 @@ impl Checker {
                 let arms = [self.block(neg)?, self.block(zero)?, self.block(pos)?];
                 HStmtKind::Tri { head: h, arms: Box::new(arms), from_if: false }
             }
+            StmtKind::While { cond, body } => {
+                let h = self.expr(cond, Some(Type::Scalar(Scalar::Trit)))?;
+                if h.ty != Type::Scalar(Scalar::Trit) {
+                    return Err(err(format!("`while` needs a trit, found {}", h.ty), cond.span)
+                        .with_note("compare first, e.g. `while i < 10 { ... }`"));
+                }
+                self.f.loops += 1;
+                let body = self.block(body);
+                self.f.loops -= 1;
+                HStmtKind::While { cond: h, body: body? }
+            }
             StmtKind::Walk { var, range, body } => {
                 let word = Type::Scalar(Scalar::Int);
                 let (span_tmp, start, end) = match range {
                     Range::Between(a, b) => (None, self.expect(a, word)?, self.expect(b, word)?),
                     Range::Span(k) => {
                         let hk = self.expect(k, word)?;
-                        let tmp = self.new_local("$span", word, None, LocalKind::Hidden, k.span);
+                        let tmp = self.new_local("$span", word, LocalKind::Hidden, k.span);
                         let local = hx(HExprKind::Local(tmp), word, k.span);
                         let start = hx(HExprKind::Neg(Box::new(local.clone())), word, k.span);
                         (Some((tmp, hk)), start, local)
                     }
                 };
-                let end_tmp = self.new_local("$end", word, None, LocalKind::Hidden, var.span);
+                let end_tmp = self.new_local("$end", word, LocalKind::Hidden, var.span);
                 self.f.scopes.push(Vec::new());
-                let v = self.new_local(&var.name, word, None, LocalKind::WalkVar, var.span);
+                let v = self.new_local(&var.name, word, LocalKind::WalkVar, var.span);
                 self.f.loops += 1;
                 let body = self.block(body);
                 self.f.loops -= 1;
@@ -998,9 +972,9 @@ mod tests {
 
     const SPEC_EXAMPLE: &str = r#"
 proc sum(v: lent [int], k: int) -> int {
-    acc: int @R0 = 0;
+    acc: int = 0;
     walk i in span k {
-        add acc, v[i];
+        acc += v[i];
     }
     yield acc;
 }
@@ -1010,9 +984,9 @@ proc main() -> int {
     walk i in span 2 {
         b[i] = i * i;
     }
-    s: int @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
-    shl3 s, 1;
-    tri cmp3 s, 10 {
+    s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s = s << 1;
+    tri s <=> 10 {
         - => print("less"),
         0 => print("equal"),
         + => print("greater"),
@@ -1029,8 +1003,7 @@ proc main() -> int {
         let sum = &hir.procs[0];
         assert_eq!(sum.params, 2);
         assert_eq!(sum.locals[2].name, "acc");
-        assert_eq!(sum.locals[2].reg, Some(0));
-        // `add acc, v[i]` became `acc = acc + v[i]`.
+        // `acc += v[i]` became `acc = acc + v[i]`.
         let HStmtKind::Walk { body, .. } = &sum.body.stmts[1].kind else { panic!() };
         let HStmtKind::Assign { local: 2, index: None, value } = &body.stmts[0].kind else { panic!() };
         assert!(matches!(value.kind, HExprKind::Binary(BinOp::Add, ..)));
@@ -1072,13 +1045,11 @@ proc main() -> int {
         assert_eq!(*local, 0);
         assert!(err_in("walk i in 0..3 { i = 1; }").contains("read-only"));
         assert!(err_of("const L: int = 3; proc main() { L = 4; }").contains("cannot assign to const"));
-        assert!(err_in("break;").contains("outside of a `walk`"));
+        assert!(err_in("break;").contains("outside of a loop"));
     }
 
     #[test]
     fn registers() {
-        assert!(err_in("a: int @R0 = 1; b: int @R0 = 2;").contains("@R0 is already pinned"));
-        assert!(err_in("b: own [int] @R+1 = claim 3; burn b;").contains("only numbers"));
     }
 
     #[test]
@@ -1130,6 +1101,8 @@ proc main() -> int {
         ok("x := 1; if x > 0 { print(x); } else if x == 0 { } else { print(-x); }");
         assert!(err_in("x := 1; if x { }").contains("`if` needs a trit, found int"));
         assert!(err_in("x := 1; y := !x;").contains("`!` works on trits"));
+        assert!(err_in("x := 1; while x { }").contains("`while` needs a trit, found int"));
+        ok("i := 0; while i < 3 { i = i + 1; }");
         assert!(err_in("x := 1; t: trit = x == \"a\";").contains("found text"));
         assert!(err_in("x := 1.5; t: trit = x < 2;").contains("integer literal where a real is expected"));
     }
@@ -1147,7 +1120,7 @@ proc main() -> int {
         ok("final b: own [int] = claim 3; b[0] = 5; burn b;");
         ok("final x := 1; tri x <=> 0 { - => {}, 0 => {}, + => { x := 2; print(x); } }");
         assert!(err_in("final x := 1; x = 2;").contains("`x` is final and cannot change"));
-        assert!(err_in("final x := 1; add x, 2;").contains("is final"));
+        assert!(err_in("final x := 1; x += 2;").contains("is final"));
         assert!(err_in("final x := 1; x := 2;").contains("cannot be declared again"));
     }
 

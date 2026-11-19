@@ -229,16 +229,16 @@ impl Parser {
             }
             Tok::Tri => return self.tri(),
             Tok::If => return self.if_stmt(),
+            Tok::While => {
+                self.bump();
+                let cond = self.expr()?;
+                let body = self.block()?;
+                return Ok(StmtKind::While { cond, body });
+            }
             Tok::Walk => return self.walk(),
-            Tok::Ident(name) => match self.peek_at(1) {
+            Tok::Ident(_) => match self.peek_at(1) {
                 Tok::Colon | Tok::ColonEq => {
                     let kind = self.let_stmt()?;
-                    end(self)?;
-                    kind
-                }
-                // Two names in a row can only be an instruction: `add acc, x;`
-                Tok::Ident(_) if InstrOp::from_name(&name).is_some() => {
-                    let kind = self.instr()?;
                     end(self)?;
                     kind
                 }
@@ -259,20 +259,13 @@ impl Parser {
 
     fn let_stmt(&mut self) -> PResult<StmtKind> {
         let name = self.ident()?;
-        let (ty, reg) = if self.eat(&Tok::ColonEq) {
-            (None, None)
+        let ty = if self.eat(&Tok::ColonEq) {
+            None
         } else {
             self.expect(Tok::Colon)?;
             let ty = self.type_expr()?;
-            let reg = match self.peek() {
-                Tok::Reg(r) => {
-                    let r = *r;
-                    Some((r, self.bump().span))
-                }
-                _ => None,
-            };
             self.expect(Tok::Eq)?;
-            (Some(ty), reg)
+            Some(ty)
         };
         let value = self.expr()?;
         let on_nat = if self.eat(&Tok::On) {
@@ -281,55 +274,23 @@ impl Parser {
         } else {
             None
         };
-        Ok(StmtKind::Let { is_final: false, name, ty, reg, value, on_nat })
-    }
-
-    fn instr(&mut self) -> PResult<StmtKind> {
-        let mnemonic = self.ident()?;
-        let op = InstrOp::from_name(&mnemonic.name).expect("checked by the caller");
-        let dest = self.place()?;
-        let mut args = Vec::new();
-        while self.eat(&Tok::Comma) {
-            args.push(self.expr()?);
-        }
-        let (min, max, form) = match op {
-            InstrOp::Neg => (0, 0, "neg d"),
-            InstrOp::Mov => (1, 1, "mov d, s"),
-            _ => (1, 2, "op d, s  or  op d, a, b"),
-        };
-        if args.len() < min || args.len() > max {
-            let takes = if min == max {
-                format!("{} operand{}", min + 1, if min == 0 { "" } else { "s" })
-            } else {
-                format!("{} or {} operands", min + 1, max + 1)
-            };
-            return Err(Diagnostic::new(
-                format!("`{}` takes {takes}, found {}", mnemonic.name, args.len() + 1),
-                mnemonic.span.to(self.tokens[self.pos - 1].span),
-            )
-            .with_note(format!("form: {form}")));
-        }
-        Ok(StmtKind::Instr { op, op_span: mnemonic.span, dest, args })
-    }
-
-    fn place(&mut self) -> PResult<Place> {
-        let name = self.ident()?;
-        let index = if self.eat(&Tok::LBracket) {
-            let e = self.expr()?;
-            self.expect(Tok::RBracket)?;
-            Some(e)
-        } else {
-            None
-        };
-        let span = name.span.to(self.tokens[self.pos - 1].span);
-        Ok(Place { name, index, span })
+        Ok(StmtKind::Let { is_final: false, name, ty, value, on_nat })
     }
 
     fn expr_or_assign(&mut self) -> PResult<StmtKind> {
         let lhs = self.expr()?;
-        if !self.eat(&Tok::Eq) {
-            return Ok(StmtKind::Expr(lhs));
-        }
+        let op_tok = self.peek().clone();
+        let compound = match op_tok {
+            Tok::Eq => None,
+            Tok::PlusEq | Tok::PlusPlus => Some(BinOp::Add),
+            Tok::MinusEq | Tok::MinusMinus => Some(BinOp::Sub),
+            Tok::StarEq => Some(BinOp::Mul),
+            Tok::SlashEq => Some(BinOp::Div),
+            Tok::PercentEq => Some(BinOp::Mod),
+            _ => return Ok(StmtKind::Expr(lhs)),
+        };
+        let op_span = self.bump().span;
+        let target = lhs.clone();
         let place = match lhs.kind {
             ExprKind::Var(name) => Place { name: Ident { name, span: lhs.span }, index: None, span: lhs.span },
             ExprKind::Index(base, idx) => match base.kind {
@@ -341,7 +302,18 @@ impl Parser {
                     .with_note("the left side of `=` must be a variable or `buffer[index]`"));
             }
         };
-        let value = self.expr()?;
+        let value = match (compound, op_tok) {
+            (None, _) => self.expr()?,
+            (Some(op), Tok::PlusPlus | Tok::MinusMinus) => {
+                let one = Expr { kind: ExprKind::Num(Word::ONE), span: op_span };
+                Expr { kind: ExprKind::Binary(op, Box::new(target), Box::new(one)), span: place.span.to(op_span) }
+            }
+            (Some(op), _) => {
+                let rhs = self.expr()?;
+                let span = place.span.to(rhs.span);
+                Expr { kind: ExprKind::Binary(op, Box::new(target), Box::new(rhs)), span }
+            }
+        };
         Ok(StmtKind::Assign { place, value })
     }
 
@@ -364,17 +336,7 @@ impl Parser {
 
     fn tri(&mut self) -> PResult<StmtKind> {
         let tri_span = self.expect(Tok::Tri)?;
-        // `tri cmp3 a, b { ... }` is the assembly spelling of `tri a <=> b { ... }`.
-        let head = if matches!(self.peek(), Tok::Ident(n) if n == "cmp3") {
-            self.bump();
-            let a = self.expr()?;
-            self.expect(Tok::Comma)?;
-            let b = self.expr()?;
-            let span = a.span.to(b.span);
-            Expr { kind: ExprKind::Binary(BinOp::Cmp3, Box::new(a), Box::new(b)), span }
-        } else {
-            self.expr()?
-        };
+        let head = self.expr()?;
         self.expect(Tok::LBrace)?;
         let mut arms: [Option<Block>; 3] = [None, None, None];
         while self.peek() != &Tok::RBrace {
@@ -483,7 +445,7 @@ impl Parser {
             Tok::Bang => Some(UnOp::Not),
             Tok::Minus | Tok::Plus => {
                 // A lone `-` or `+` before a delimiter is a trit literal: `x: trit = +;`
-                if matches!(self.peek_at(1), Tok::Semi | Tok::Comma | Tok::RParen | Tok::RBracket | Tok::RBrace) {
+                if matches!(self.peek_at(1), Tok::Semi | Tok::Comma | Tok::RParen | Tok::RBracket | Tok::RBrace | Tok::LBrace) {
                     let v = if self.bump().tok == Tok::Minus { Word::NEG_ONE } else { Word::ONE };
                     return Ok(Expr { kind: ExprKind::Num(v), span: start });
                 }
@@ -680,9 +642,9 @@ mod tests {
 
     #[test]
     fn declarations() {
-        let stmts = body("acc: int @R+1 = 0; y := claim 2 * k + 1; s: int = f() on NaT { yield; };");
-        let StmtKind::Let { name, ty, reg, .. } = &stmts[0] else { panic!() };
-        assert_eq!((name.name.as_str(), ty.unwrap().ty, reg.unwrap().0), ("acc", Type::Scalar(Scalar::Int), 1));
+        let stmts = body("acc: int = 0; y := claim 2 * k + 1; s: int = f() on NaT { yield; };");
+        let StmtKind::Let { name, ty, .. } = &stmts[0] else { panic!() };
+        assert_eq!((name.name.as_str(), ty.unwrap().ty), ("acc", Type::Scalar(Scalar::Int)));
         let StmtKind::Let { ty: None, value, .. } = &stmts[1] else { panic!() };
         assert_eq!(sx(value), "(claim (+ (* 2 k) 1))");
         let StmtKind::Let { on_nat: Some(b), .. } = &stmts[2] else { panic!() };
@@ -690,22 +652,21 @@ mod tests {
     }
 
     #[test]
-    fn instructions_and_assignment() {
-        let stmts = body("add acc, v[i]; mul d, a, b; neg x; mov b[0], 5; x = 1; b[-1] = 2; add(1, 2);");
-        assert!(matches!(&stmts[0], StmtKind::Instr { op: InstrOp::Add, args, .. } if args.len() == 1));
-        assert!(matches!(&stmts[1], StmtKind::Instr { op: InstrOp::Mul, args, .. } if args.len() == 2));
-        assert!(matches!(&stmts[2], StmtKind::Instr { op: InstrOp::Neg, args, .. } if args.is_empty()));
-        assert!(matches!(&stmts[3], StmtKind::Instr { op: InstrOp::Mov, dest, .. } if dest.index.is_some()));
-        assert!(matches!(&stmts[4], StmtKind::Assign { place, .. } if place.index.is_none()));
-        assert!(matches!(&stmts[5], StmtKind::Assign { place, .. } if place.index.is_some()));
-        // `add(...)` with parentheses is an ordinary call, not an instruction.
-        assert!(matches!(&stmts[6], StmtKind::Expr(Expr { kind: ExprKind::Call { .. }, .. })));
+    fn assignment() {
+        let stmts = body("x = 1; b[-1] = 2; add(1, 2); x += 3; b[0]++;");
+        assert!(matches!(&stmts[0], StmtKind::Assign { place, .. } if place.index.is_none()));
+        assert!(matches!(&stmts[1], StmtKind::Assign { place, .. } if place.index.is_some()));
+        assert!(matches!(&stmts[2], StmtKind::Expr(Expr { kind: ExprKind::Call { .. }, .. })));
+        let StmtKind::Assign { value, .. } = &stmts[3] else { panic!() };
+        assert_eq!(sx(value), "(+ x 3)");
+        let StmtKind::Assign { value, .. } = &stmts[4] else { panic!() };
+        assert_eq!(sx(value), "(+ b[0] 1)");
     }
 
     #[test]
     fn tri_and_walk() {
         let stmts = body(
-            "tri cmp3 s, 10 { + => print(\"big\"), - => { x = 1; } 0 => yield, }
+            "tri s <=> 10 { + => print(\"big\"), - => { x = 1; } 0 => yield, }
              walk i in span 2 { b[i] = i; }
              walk j in -1..k + 1 { break; }",
         );
@@ -738,8 +699,6 @@ mod tests {
 
         assert!(parse_err("proc main() { tri x { - => a, + => b, } }").message.contains("missing the 0 arm"));
         assert!(parse_err("proc main() { tri x { - => a, - => b, 0 => c, + => d, } }").message.contains("appears twice"));
-        assert!(parse_err("proc main() { mov x, 1, 2; }").message.contains("`mov` takes 2 operands, found 3"));
-        assert!(parse_err("proc main() { neg x, 1; }").message.contains("`neg` takes 1 operand, found 2"));
         assert!(parse_err("proc main() { x + 1 = 3; }").message.contains("cannot assign"));
         assert!(parse_err("proc main() { b: own [real] = claim 3; }").note.unwrap().contains("trytes or ints"));
         assert!(parse_err("proc main() { x := a <=> b <=> c; }").message.contains("cannot be chained"));
@@ -751,9 +710,9 @@ mod tests {
     fn spec_example_parses() {
         let src = r#"
 proc sum(v: lent [int], k: int) -> int {
-    acc: int @R0 = 0;
+    acc: int = 0;
     walk i in span k {
-        add acc, v[i];
+        acc += v[i];
     }
     yield acc;
 }
@@ -763,9 +722,9 @@ proc main() -> int {
     walk i in span 2 {
         b[i] = i * i;
     }
-    s: int @R+1 = sum(lend b, 2) on NaT { burn b; yield -1; };
-    shl3 s, 1;
-    tri cmp3 s, 10 {
+    s: int = sum(lend b, 2) on NaT { burn b; yield -1; };
+    s = s << 1;
+    tri s <=> 10 {
         - => print("less"),
         0 => print("equal"),
         + => print("greater"),

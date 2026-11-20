@@ -74,7 +74,7 @@ valor = (mantissa / 3²⁰) × 3^expoente
 - É um literal imutável guardado no pool de strings do `.ksb`, como o `const char*` do C. É copiável e **não precisa de `burn`**.
 - `s[i]` devolve o `tryte` da posição `i`. **O índice começa em 0**, como em C (como os arrays sem `sym`). Índice fora de `0 .. len(s)-1` dispara **Trap**.
 - `len(s)` devolve o tamanho como `int`.
-- `a + b` cria um texto novo: `saudacao := "Olá, " + nome + "!";`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo** (use `toText(5)`).
+- `a + b` cria um texto novo: `saudacao: text = "Olá, " + nome + "!";`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo** (use `toText(5)`).
 - `a == b` e `a != b` comparam caractere por caractere. `<` e `>` não valem para textos.
 - `sub(s, início, fim)` devolve os caracteres de `início` até `fim - 1`, como o `substring` do Java: `sub("Kestrel", 0, 3)` é `"Kes"`. Fora de `0 ≤ início ≤ fim ≤ len(s)` dispara **Trap**.
 - `toInt(s)` e `toReal(s)` leem um número (`"123"`, `"-7"`, `"0t+0-"`, `"2.5"`). Texto inválido é uma conta que falha (§1.3): use `on NaT` para tratar.
@@ -171,7 +171,7 @@ a[]: int = claim 4;                  // índices 0..3, células zeradas
 a[]: int = {1, 2, 3, 4};             // o mesmo, já preenchido
 sym s[]: int = claim 5;              // índices -2..+2
 sym s[]: int = {-8, -1, 0, 1, 8};    // s[0] == 0, o valor do meio
-n := len(a);                         // 4
+n: int = len(a);                         // 4
 ```
 
 Há dois tipos de array, e o tipo decide como os índices funcionam:
@@ -276,13 +276,17 @@ O ponto de entrada é `main`. Um `proc` sem `-> T` usa `return;` sem valor.
 ### 8.2 Declaração e atribuição
 
 ```
-x: int = 5;          // tipo explícito
-y := x * 3;           // tipo inferido do valor
+x: int = 5;          // declaração: o tipo é sempre escrito
+total: int;          // declarada sem valor: vale NaT até receber um
 x = x + 1;            // atribuição
 x += 1;               // o mesmo que x = x + 1  (também -=  *=  /=  %=)
 x++;                  // o mesmo que x += 1     (também x--)
 ```
 
+- **Toda variável tem o tipo escrito.** O compilador nunca adivinha o tipo pelo valor (não existe o `var` do Java).
+- **Sem valor = NaT**, o `null` do Kestrel: `total: int;` vale NaT. Imprimir mostra `NaT`; usar numa conta dispara Trap (como o `NullPointerException`), a não ser com `on NaT`. Vale para números, `bool`, `text` e structs (cada campo fica NaT).
+- Qualquer comparação com NaT dá NaT (`x == NaT` também), como o `NaN` de outras linguagens. Para perguntar se algo está sem valor, use **`isNaT(x)`**, que devolve `bool` e nunca dispara Trap (o `x == null` do Java). Vale para números, `bool`, `text` e enums.
+- Arrays e objetos declarados sem valor (`c: Conta;`) não podem ser usados antes de receber um: isso é **erro de compilação** (`c has no value yet`), porque o compilador acompanha a posse deles. `final` precisa de valor na declaração.
 - `++` e `--` são **comandos**, não expressões (como em Go): `x = i++;` é erro, e não existe `++i`.
 - Valem também em células de buffer: `b[i] += 2;`, `b[i]++;`.
 - Em tri arms, escreva `- =>` com espaço: `-=>` seria lido como `-=` seguido de `>`.
@@ -303,7 +307,7 @@ const MAX: int = 100;
 proc main() {
     final idade: int = input();
     idade = 5;            // erro: `idade` is final and cannot change
-    idade := 6;           // erro: não pode ser declarada de novo no mesmo bloco
+    idade: int = 6;       // erro: não pode ser declarada de novo no mesmo bloco
 }
 ```
 
@@ -356,7 +360,7 @@ walk i in span k { ... }   // o mesmo que -k..+k
 ### 8.4.1 `while`
 
 ```
-i := 0;
+i: int = 0;
 while i < 10 {
     print(i);
     i = i + 1;
@@ -379,7 +383,7 @@ for i: int = 10; i > 0; i -= 2 { ... }   // passo de -2
 ```
 
 - É o `for` do Java sem os parênteses, como o do Go. As três partes são separadas por `;`.
-- **Começo:** sempre declara o contador com o tipo escrito (`i: int = 0`). `:=` e reaproveitar uma variável de fora (`i = 0`) são erros.
+- **Começo:** sempre declara o contador com o tipo escrito (`i: int = 0`). Reaproveitar uma variável de fora (`i = 0`) é erro.
 - **Escopo:** o contador e tudo o que é declarado no corpo só existem dentro do laço, como em qualquer bloco `{ }`.
 - **Condição:** um `trit`, testado antes de cada volta, com as regras do `while` (`0` e NaT disparam Trap).
 - **Passo:** muda uma variável (`i++`, `i += 2`, `i = i * 3`). Roda depois do corpo e também no `continue`.
@@ -503,10 +507,10 @@ struct Pessoa {
     casa: Ponto;         // um struct dentro de outro
 }
 
-a := Ponto { x: 1, y: 2 };
-b := a;              // cópia: mudar b não muda a
+a: Ponto = Ponto { x: 1, y: 2 };
+b: Ponto = a;              // cópia: mudar b não muda a
 b.x = 10;
-p := Pessoa { nome: "Ana", casa: Ponto { x: 3, y: 4 } };
+p: Pessoa = Pessoa { nome: "Ana", casa: Ponto { x: 3, y: 4 } };
 p.casa.y++;
 print(p);            // Pessoa { nome: "Ana", casa: Ponto { x: 3, y: 5 } }
 ```
@@ -520,14 +524,86 @@ print(p);            // Pessoa { nome: "Ana", casa: Ponto { x: 3, y: 5 } }
 - `print`, `printl`, `{p}` e `%s` mostram o struct inteiro. `==`, `<` e as contas não existem para structs: compare os campos.
 - Por dentro, um struct ocupa um slot por campo (um struct aninhado ocupa os slots dos seus campos). O `dump` mostra cada campo como `p.x`, `p.casa.y`.
 
-### 8.10 Limites do compilador
+### 8.10 `class`
+
+```
+class Conta {
+    public nome: text;           // visível fora da classe
+    saldo: real;                 // privado (o padrão)
+    hist[]: real;                // um array que pertence ao objeto
+
+    // Método sem `self`: "static". É o construtor: só dentro da classe se escreve `Conta { ... }`.
+    public proc nova(nome: text) -> Conta {
+        return Conta { nome: nome, saldo: 0.0, hist: {} };
+    }
+    public proc depositar(lent self, v: real) {   // usa o objeto
+        self.saldo += v;
+        append(self.hist, v);
+    }
+    public proc fechar(own self) -> real {        // consome o objeto
+        s: real = self.saldo;
+        burn self;
+        return s;
+    }
+}
+
+c: Conta = Conta.nova("Ana");
+c.depositar(10.0);
+printl(c);           // Conta { nome: "Ana", saldo: 10.0, hist: [10.0] }
+total: real = c.fechar(); // depois disto, `c` não existe mais
+```
+
+- Uma classe junta dados e métodos. É declarada fora dos `proc`, e um arquivo pode ter várias.
+- Campos e métodos são **privados** por padrão: só os métodos da própria classe os usam. `public` os deixa visíveis fora.
+- O objeto vive no heap e **tem dono**, como um array: não é copiado (`d: Conta = c;` é erro), passa com `give`/`lend` (parâmetros `own c: Conta` / `lent c: Conta`) e precisa de `burn`, `give` ou `return`.
+- `burn c` libera também os arrays e objetos que os campos de `c` possuem.
+- Um método recebe o objeto como primeiro parâmetro: `lent self` (empresta: pode ler e mudar os campos) ou `own self` (consome: precisa terminar com `burn self`, `give` ou `return`). `c.metodo(...)` passa `c` sozinho. Um método `own self` só pode ser chamado numa variável que é dona do objeto.
+- Método sem `self` é da classe ("static"): `Conta.nova(...)`. Não há construtor especial; o objeto é criado preenchendo todos os campos, e só dentro da classe.
+- Campos podem ser de qualquer tipo, inclusive arrays e outros objetos. Um campo que possui algo (array ou objeto) não pode ser trocado, só alterado por dentro (`append(self.hist, x)`, `self.hist[i] = ...`). Lido de fora, ele vem emprestado.
+- Uma classe não pode conter a si mesma (nem por outra classe), porque o primeiro objeto nunca poderia ser criado. Um struct não pode conter objetos. Arrays de objetos ainda não existem.
+- Emprestar o mesmo objeto (ou um campo dele) duas vezes na mesma chamada é erro: `c.f(lend c.hist)`.
+- `print(c)`, `{c}` e `%s` mostram todos os campos, inclusive os privados (para depurar).
+
+### 8.11 `interface`, `@impl` e `@override`
+
+```
+interface Forma {
+    proc area(lent self) -> real;
+    proc nome(lent self) -> text;
+}
+
+@impl(Forma)
+class Circulo {
+    raio: real;
+    @override
+    public proc area(lent self) -> real { return 3.0 * self.raio * self.raio; }
+    @override
+    public proc nome(lent self) -> text { return "circulo"; }
+}
+
+proc mostrar(lent f: Forma) {          // aceita qualquer classe que implemente Forma
+    printf("{f.nome()}: {f.area()}\n");
+}
+
+c: Circulo = Circulo.novo(1.0);
+mostrar(lend c);
+```
+
+- Uma `interface` lista métodos sem corpo, cada um terminado em `;`. Todos recebem `self` e são públicos.
+- `@impl(A, B)` em cima da classe diz quais interfaces ela cumpre. O compilador confere que a classe tem **todos** os métodos de cada uma, públicos e com a mesma assinatura (`self`, parâmetros e retorno).
+- **`@override` é obrigatório** em cada método que cumpre uma interface, e um `@override` que não cumpre nada é erro (pega erros de digitação). Não há herança: cada classe escreve os seus métodos.
+- Por enquanto um valor de interface só existe **emprestado**: parâmetros `lent f: Forma`, passados com `lend c` (de qualquer classe que implemente `Forma`) ou repassados com `lend f`. Por dentro, ele leva o ponteiro do objeto e o número da sua classe, e `f.area()` chama o `area` daquela classe.
+- Pela interface só se chamam métodos dela: os campos e os outros métodos da classe não aparecem. Métodos `own self` não podem ser chamados por uma interface (o objeto está emprestado).
+- Variáveis, `own` e arrays de interfaces (uma lista com formas diferentes) chegam junto com os arrays de objetos.
+
+### 8.12 Limites do compilador
 
 | Limite | Valor | Ao passar |
 |---|---|---|
 | Aninhamento (blocos, parênteses, operadores em sequência) | 729 = 3⁶ níveis (um tryte) | Erro de compilação: "nested too deeply" |
 | Variáveis por `proc` (slots: um struct ocupa um por campo) | 59.049 = 3¹⁰ | Erro de compilação |
 | Tamanho de um struct (campos, contando os aninhados) | 59.049 = 3¹⁰ | Erro de compilação: "is too big" |
-| Campos de um struct usado como elemento de array | 243 = 3⁵ | Erro de compilação |
+| Campos de um struct usado como elemento de array, ou de uma classe | 243 = 3⁵ | Erro de compilação |
 | Parâmetros por `proc` (valores: um struct conta um por campo) | 243 = 3⁵ | Erro de compilação |
 | Chamadas aninhadas na execução | 6.561 = 3⁸ | Trap: "call stack overflow" |
 
@@ -590,12 +666,17 @@ Os saltos usam um **offset absoluto em bytes** (`u32`) dentro do código da pró
 ## 11. Gramática (EBNF)
 
 ```ebnf
-program    = { const_decl | proc_decl | enum_decl | struct_decl } ;
+program    = { const_decl | proc_decl | enum_decl | struct_decl | class_decl | iface_decl } ;
+iface_decl = "interface" IDENT "{" { "proc" IDENT "(" ( "lent" | "own" ) "self" { "," param } ")" [ "->" ret_type ] ";" } "}" ;
+class_decl = { annotation } "class" IDENT "{" { member } "}" ;
+member     = [ "public" | "private" ] ( field | proc_decl ) ;
+field      = [ "sym" ] IDENT [ "[" "]" ] ":" type ";" ;
+annotation = "@" IDENT [ "(" IDENT { "," IDENT } ")" ] ;
 struct_decl = "struct" IDENT "{" { IDENT ":" type ";" } "}" ;
 enum_decl  = "enum" IDENT "{" [ IDENT [ "=" expr ] { "," IDENT [ "=" expr ] } [ "," ] ] "}" ;
 const_decl = "const" IDENT ":" scalar "=" expr ";" ;
 proc_decl  = "proc" IDENT "(" [ param { "," param } ] ")" [ "->" ret_type ] block ;
-param      = IDENT ":" type | ( "own" | "lent" ) [ "sym" ] IDENT "[" "]" ":" elem ;
+param      = IDENT ":" type | ( "own" | "lent" ) ( [ "sym" ] IDENT "[" "]" ":" elem | IDENT ":" IDENT | "self" ) ;
 ret_type   = type | [ "sym" ] elem "[" "]" ;
 type       = scalar | "bool" | "text" | IDENT ;
 scalar     = "trit" | "tryte" | "int" | "real" ;
@@ -604,7 +685,8 @@ elem       = "tryte" | "int" ;
 block      = "{" { stmt } "}" ;
 stmt       = [ "final" ] IDENT ":" type "=" expr [ on_nat ] ";"
            | [ "final" ] [ "sym" ] IDENT "[" "]" ":" elem "=" expr ";"
-           | [ "final" ] IDENT ":=" expr [ on_nat ] ";"
+           | IDENT ":" type ";"
+           | [ "sym" ] IDENT "[" "]" ":" elem ";"
            | place ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr ";"
            | place ( "++" | "--" ) ";"
            | "burn" IDENT ";"

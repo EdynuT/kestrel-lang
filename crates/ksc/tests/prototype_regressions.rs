@@ -27,7 +27,7 @@ fn bug1_copy_creates_two_owners() {
 #[test]
 fn bug2_claim_into_plain_variable() {
     // Prototype: `let x = alloc(3);` leaked silently.
-    assert!(compile_error("proc main() { x := claim 3; }").contains("needs to know the array type"));
+    assert!(compile_error("proc main() { x: int = claim 3; }").contains("needs to know the array type"));
     assert!(compile_error("proc main() { sym x[]: int = claim 3; }").contains("never burned"));
 }
 
@@ -58,14 +58,14 @@ fn bug5_tri_arm_leaks_when_another_diverges() {
 #[test]
 fn bug8_wrong_number_of_arguments() {
     // Prototype: `f(1, 2, 3)` for `fn f(x)` panicked inside the VM.
-    let e = compile_error("proc f(x: int) -> int { return x; } proc main() { y := f(1, 2, 3); }");
+    let e = compile_error("proc f(x: int) -> int { return x; } proc main() { y: int = f(1, 2, 3); }");
     assert!(e.contains("takes 1 argument, found 3"), "{e}");
 }
 
 #[test]
 fn bug9_poison_guard_that_falls_through() {
     // Prototype: a guard whose else did not diverge produced NaT anyway.
-    let e = compile_error("proc main() { x := 1 / 0 on NaT { print(\"oops\"); }; print(x); }");
+    let e = compile_error("proc main() { x: int = 1 / 0 on NaT { print(\"oops\"); }; print(x); }");
     assert!(e.contains("must end with `return`"), "{e}");
 }
 

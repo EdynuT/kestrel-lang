@@ -1,0 +1,108 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Kestrel",
+  "scopeName": "source.kestrel",
+  "patterns": [{ "include": "#code" }],
+  "repository": {
+    "code": {
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#string" },
+        { "include": "#char" },
+        { "include": "#annotation" },
+        { "include": "#declaration" },
+        { "include": "#keywords" },
+        { "include": "#number" },
+        { "include": "#call" },
+        { "include": "#type-name" },
+        { "include": "#operator" }
+      ]
+    },
+    "comment": {
+      "name": "comment.line.double-slash.kestrel",
+      "match": "//.*$"
+    },
+    "string": {
+      "name": "string.quoted.double.kestrel",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.kestrel", "match": "\\\\.|\\{\\{|\\}\\}|%%" },
+        {
+          "name": "meta.interpolation.kestrel",
+          "begin": "\\{",
+          "end": "\\}",
+          "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.kestrel" } },
+          "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.kestrel" } },
+          "contentName": "source.kestrel",
+          "patterns": [{ "include": "#code" }]
+        }
+      ]
+    },
+    "char": {
+      "name": "string.quoted.single.kestrel",
+      "match": "'(\\\\.|[^'\\\\])'"
+    },
+    "annotation": {
+      "match": "(@)([A-Za-z_]\\w*)",
+      "captures": {
+        "1": { "name": "punctuation.definition.annotation.kestrel" },
+        "2": { "name": "entity.name.function.decorator.kestrel" }
+      }
+    },
+    "declaration": {
+      "patterns": [
+        {
+          "match": "\\b(proc)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": { "name": "storage.type.function.kestrel" },
+            "2": { "name": "entity.name.function.kestrel" }
+          }
+        },
+        {
+          "match": "\\b(struct|class|interface|enum)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": { "name": "storage.type.kestrel" },
+            "2": { "name": "entity.name.type.kestrel" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "keyword.control.kestrel", "match": "\\b(if|else|while|for|walk|in|match|tri|on|span|return|break|continue)\\b" },
+        { "name": "keyword.other.ownership.kestrel", "match": "\\b(claim|burn|give|lend|own|lent)\\b" },
+        { "name": "storage.type.kestrel", "match": "\\b(proc|struct|class|interface|enum|sym|const|final)\\b" },
+        { "name": "storage.modifier.kestrel", "match": "\\b(public|private)\\b" },
+        { "name": "support.type.primitive.kestrel", "match": "\\b(trit|bool|tryte|int|real|text)\\b" },
+        { "name": "constant.language.kestrel", "match": "\\b(true|false|NaT)\\b" },
+        { "name": "variable.language.self.kestrel", "match": "\\bself\\b" }
+      ]
+    },
+    "number": {
+      "patterns": [
+        { "name": "constant.numeric.ternary.kestrel", "match": "\\b0t[+0-]+" },
+        { "name": "constant.numeric.heptavintimal.kestrel", "match": "\\b0v[0A-Ma-m?]+" },
+        { "name": "constant.numeric.real.kestrel", "match": "\\b\\d+\\.\\d+\\b" },
+        { "name": "constant.numeric.integer.kestrel", "match": "\\b\\d+\\b" }
+      ]
+    },
+    "call": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.kestrel",
+          "match": "\\b(print|printl|printf|toText|emit|input|len|dump|sub|toInt|toReal|isDigit|isLetter|isUpper|isLower|isSpace|readFile|fileExists|writeFile|writeBytes|readLine|eof|argCount|arg|exit|append|pop|insert|remove|resize|clear|replace|isNaT)\\b(?=\\s*\\()"
+        },
+        { "name": "entity.name.function.call.kestrel", "match": "\\b[A-Za-z_]\\w*(?=\\s*\\()" }
+      ]
+    },
+    "type-name": {
+      "name": "entity.name.type.kestrel",
+      "match": "\\b[A-Z]\\w*\\b"
+    },
+    "operator": {
+      "name": "keyword.operator.kestrel",
+      "match": "<=>|\\*\\*|<<|>>|[-+*/%]=|\\+\\+|--|<=|>=|==|!=|&&|\\|\\||\\.\\.|=>|->|[-+*/%!<>=|]"
+    }
+  }
+}

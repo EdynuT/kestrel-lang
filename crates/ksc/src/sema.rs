@@ -10,16 +10,17 @@ use kestrel_core::limits::MAX_LOCALS;
 use kestrel_core::word::{TRIT_MAX, TRYTE_MAX};
 use kestrel_core::Word;
 
-use crate::ast::{self, Expr, ExprKind, Item, Place, Program, Range, StmtKind, UnOp};
+use crate::ast::{self, Expr, ExprKind, Item, Program, Range, StmtKind, UnOp};
 use crate::diag::{Diagnostic, Span};
 use crate::hir::*;
 
 type R<T> = Result<T, Diagnostic>;
 
-const BUILTINS: [&str; 32] = [
+const BUILTINS: [&str; 33] = [
     "print", "printl", "printf", "toText", "emit", "input", "len", "dump", "sub", "toInt", "toReal", "isDigit",
     "isLetter", "isUpper", "isLower", "isSpace", "readFile", "fileExists", "writeFile", "writeBytes",
     "readLine", "eof", "argCount", "arg", "exit", "append", "pop", "insert", "remove", "resize", "clear", "replace",
+    "isNaT",
 ];
 /// Built-ins that change the size of the array they get first.
 const RESIZERS: [&str; 6] = ["append", "pop", "insert", "remove", "resize", "clear"];
@@ -36,6 +37,10 @@ pub fn check(program: &Program) -> R<Hir> {
         consts: HashMap::new(),
         enums: HashMap::new(),
         structs: Structs::new(),
+        classes: HashMap::new(),
+        ifaces: HashMap::new(),
+        class_tags: HashMap::new(),
+        class: None,
         f: FnCx::new(Type::Void),
     };
     // Enums first, so types like `c: Cor` resolve anywhere. Each enum gets a
@@ -49,13 +54,32 @@ pub fn check(program: &Program) -> R<Hir> {
     // Struct names next, so a field can name any struct; then their fields.
     let decls: Vec<&ast::StructDecl> =
         program.items.iter().filter_map(|i| if let Item::Struct(s) = i { Some(s) } else { None }).collect();
-    for s in &decls {
-        let name = &s.name.name;
-        if cx.structs.contains_key(name.as_str()) || cx.enums.contains_key(name) {
-            return Err(err(format!("type `{name}` is defined twice"), s.name.span));
+    let classes: Vec<&ast::ClassDecl> =
+        program.items.iter().filter_map(|i| if let Item::Class(c) = i { Some(c) } else { None }).collect();
+    let ifaces: Vec<&ast::InterfaceDecl> =
+        program.items.iter().filter_map(|i| if let Item::Interface(d) = i { Some(d) } else { None }).collect();
+    let names = decls.iter().map(|s| &s.name).chain(classes.iter().map(|c| &c.name)).chain(ifaces.iter().map(|d| &d.name));
+    for (k, n) in names.enumerate() {
+        let name = &n.name;
+        if cx.structs.contains_key(name.as_str())
+            || cx.enums.contains_key(name)
+            || cx.classes.contains_key(name)
+            || cx.ifaces.contains_key(name)
+        {
+            return Err(err(format!("type `{name}` is defined twice"), n.span));
         }
-        cx.structs.insert(ast::intern(name), Vec::new());
+        if k < decls.len() {
+            cx.structs.insert(ast::intern(name), Vec::new());
+        } else if k < decls.len() + classes.len() {
+            let info = ClassInfo { name: ast::intern(name), fields: Vec::new(), methods: HashMap::new() };
+            cx.classes.insert(name.clone(), info);
+        } else {
+            cx.ifaces.insert(name.clone(), IfaceInfo { name: ast::intern(name), methods: Vec::new(), impls: Vec::new() });
+        }
     }
+    let mut tagged: Vec<&'static str> = cx.classes.values().map(|c| c.name).collect();
+    tagged.sort_unstable();
+    cx.class_tags = tagged.into_iter().zip(1..).collect();
     for s in &decls {
         cx.declare_struct(s)?;
     }
@@ -63,11 +87,27 @@ pub fn check(program: &Program) -> R<Hir> {
     for s in &decls {
         cx.struct_width(s.name.name.as_str(), &mut widths, &mut Vec::new(), s.name.span)?;
     }
+    for c in &classes {
+        cx.declare_class_fields(c)?;
+    }
+    for c in &classes {
+        cx.class_cycle(&c.name.name, &mut Vec::new(), c.name.span)?;
+    }
+    for d in &ifaces {
+        cx.declare_iface(d)?;
+    }
+    let mut method_decls = Vec::new();
+    for c in &classes {
+        method_decls.extend(cx.declare_methods(c)?);
+    }
+    for c in &classes {
+        cx.check_impls(c)?;
+    }
     for item in &program.items {
         match item {
             Item::Const(c) => cx.declare_const(c)?,
             Item::Proc(p) => cx.declare_proc(p)?,
-            Item::Enum(_) | Item::Struct(_) => {}
+            Item::Enum(_) | Item::Struct(_) | Item::Class(_) | Item::Interface(_) => {}
         }
     }
     for p in &name_procs {
@@ -90,10 +130,18 @@ pub fn check(program: &Program) -> R<Hir> {
             procs.push(cx.check_proc(p)?);
         }
     }
+    for (class, p) in &method_decls {
+        cx.class = Some(class);
+        procs.push(cx.check_proc(p)?);
+        cx.class = None;
+    }
     for p in &name_procs {
         procs.push(cx.check_proc(p)?);
     }
-    Ok(Hir { procs, entry, structs: cx.structs })
+    // Procs were declared in another order than they were checked: put each at its id.
+    procs.sort_by_key(|p| cx.proc_ids[&p.name]);
+    let classes = cx.classes.values().map(|c| (c.name, c.fields.iter().map(|(n, t, _)| (n.clone(), *t)).collect())).collect();
+    Ok(Hir { procs, entry, structs: cx.structs, classes })
 }
 
 #[derive(Clone)]
@@ -135,7 +183,43 @@ struct Checker {
     consts: HashMap<String, HExpr>,
     enums: HashMap<String, EnumInfo>,
     structs: Structs,
+    classes: HashMap<String, ClassInfo>,
+    ifaces: HashMap<String, IfaceInfo>,
+    /// Each class's number, carried by interface values to pick the method.
+    class_tags: HashMap<&'static str, i64>,
+    /// The class whose method is being checked (it may use private members).
+    class: Option<&'static str>,
     f: FnCx,
+}
+
+/// A class: its fields (with visibility) and methods.
+struct ClassInfo {
+    name: &'static str,
+    fields: Vec<(String, Type, bool)>,
+    methods: HashMap<String, Method>,
+}
+
+#[derive(Clone, Copy)]
+struct Method {
+    id: ProcId,
+    this: Option<ast::SelfMode>,
+    public: bool,
+}
+
+/// An interface: the methods a class must have to `@impl` it.
+struct IfaceInfo {
+    name: &'static str,
+    methods: Vec<IfaceMethod>,
+    /// Classes that implement it.
+    impls: Vec<&'static str>,
+}
+
+#[derive(Clone)]
+struct IfaceMethod {
+    name: String,
+    this: Option<ast::SelfMode>,
+    params: Vec<(String, Type)>,
+    ret: Type,
 }
 
 struct EnumInfo {
@@ -243,7 +327,8 @@ impl Checker {
         let int = ast::TypeExpr { ty: Type::Scalar(Scalar::Int), span: sp };
         let decl = ast::ProcDecl {
             name: ast::Ident { name: name_proc.clone(), span: sp },
-            params: vec![ast::Param { name: ast::Ident { name: "v".into(), span: sp }, ty: int }],
+            this: None,
+            params: vec![ast::Param { name: ast::Ident { name: "v".into(), span: sp }, ty: int, mode: None }],
             ret: Some(ast::TypeExpr { ty: Type::Text, span: sp }),
             body: ast::Block { stmts, span: sp },
         };
@@ -255,10 +340,14 @@ impl Checker {
     fn resolve(&self, t: &ast::TypeExpr) -> R<Type> {
         let buf = match t.ty {
             Type::Own(b) | Type::Lent(b) => b,
-            Type::Named(_) => return self.resolve_name(t),
+            Type::Named(_) | Type::LentNamed(_) => return self.resolve_name(t),
             other => return Ok(other),
         };
         let elem_ty = self.resolve(&ast::TypeExpr { ty: buf.ty(), span: t.span })?;
+        if let Type::Class(n) = elem_ty {
+            return Err(err(format!("arrays of objects (`{n}[]`) are not supported yet"), t.span)
+                .with_note("each element would need its own burn; they come after interfaces"));
+        }
         if let Type::Struct(n) = elem_ty {
             let w = width(&self.structs, elem_ty);
             if w > MAX_ELEM_WIDTH {
@@ -270,7 +359,24 @@ impl Checker {
     }
 
     fn resolve_name(&self, t: &ast::TypeExpr) -> R<Type> {
+        if let Type::LentNamed(n) = t.ty {
+            if let Some(i) = self.ifaces.get(n) {
+                return Ok(Type::LentIface(i.name));
+            }
+            return match self.classes.get(n) {
+                Some(c) => Ok(Type::LentClass(c.name)),
+                None => Err(err(format!("`lent {n}`: `{n}` is not a class"), t.span)
+                    .with_note("`lent` and `own` apply to arrays and objects; numbers, texts and structs are copied")),
+            };
+        }
         let Type::Named(n) = t.ty else { return Ok(t.ty) };
+        if let Some(c) = self.classes.get(n) {
+            return Ok(Type::Class(c.name));
+        }
+        if self.ifaces.contains_key(n) {
+            return Err(err(format!("an interface is used borrowed: `lent x: {n}`"), t.span)
+                .with_note("owned interface values (`own`, variables, arrays) come with arrays of objects"));
+        }
         if let Some(info) = self.enums.get(n) {
             return Ok(Type::Enum(info.name));
         }
@@ -279,6 +385,341 @@ impl Checker {
         }
         Err(err(format!("unknown type `{n}`"), t.span)
             .with_note("types are trit, tryte, int, real, text, arrays (`x[]: int`), or a declared enum or struct"))
+    }
+
+    fn declare_class_fields(&mut self, c: &ast::ClassDecl) -> R<()> {
+        let mut fields: Vec<(String, Type, bool)> = Vec::new();
+        for f in &c.fields {
+            if fields.iter().any(|(n, _, _)| *n == f.name.name) {
+                return Err(err(format!("field `{}` appears twice in class `{}`", f.name.name, c.name.name), f.name.span));
+            }
+            let ty = self.resolve(&f.ty)?;
+            fields.push((f.name.name.clone(), ty, f.public));
+        }
+        let w: usize = fields.iter().map(|(_, t, _)| width(&self.structs, *t)).sum();
+        if w > MAX_ELEM_WIDTH {
+            return Err(err(format!("class `{}` has {w} fields (counting nested ones); a class can have at most {MAX_ELEM_WIDTH}", c.name.name), c.name.span));
+        }
+        self.classes.get_mut(&c.name.name).expect("registered").fields = fields;
+        Ok(())
+    }
+
+    /// An object holding an object of its own class could never be created
+    /// (there is no null to start from).
+    fn class_cycle(&self, name: &str, path: &mut Vec<String>, span: Span) -> R<()> {
+        if let Some(at) = path.iter().position(|p| p == name) {
+            let mut cycle = path[at..].to_vec();
+            cycle.push(name.to_string());
+            return Err(err(format!("class `{name}` contains itself"), span).with_note(format!(
+                "{}: such an object could never be created; keep the others in an array instead",
+                cycle.join(" -> ")
+            )));
+        }
+        path.push(name.to_string());
+        for (_, t, _) in &self.classes[name].fields {
+            if let Type::Class(inner) = t {
+                self.class_cycle(inner, path, span)?;
+            }
+        }
+        path.pop();
+        Ok(())
+    }
+
+    /// Each method becomes a proc `Class.method`; `self` is its first parameter.
+    fn declare_methods(&mut self, c: &ast::ClassDecl) -> R<Vec<(&'static str, ast::ProcDecl)>> {
+        let class = self.classes[&c.name.name].name;
+        for a in &c.annotations {
+            if a.name.name != "impl" {
+                return Err(err(format!("unknown annotation `@{}` on a class", a.name.name), a.name.span)
+                    .with_note("a class takes `@impl(Interface)`"));
+            }
+            if a.args.is_empty() {
+                return Err(err("`@impl` names the interfaces: `@impl(Desenhavel)`", a.name.span));
+            }
+        }
+        let mut out = Vec::new();
+        for m in &c.methods {
+            let mname = &m.decl.name;
+            if let Some(a) = m.annotations.iter().find(|a| a.name.name != "override" || !a.args.is_empty()) {
+                return Err(err(format!("unknown annotation `@{}` on a method", a.name.name), a.name.span)
+                    .with_note("a method takes `@override` when it fills in an interface method"));
+            }
+            if self.classes[class].methods.contains_key(&mname.name) {
+                return Err(err(format!("method `{}` is defined twice in `{class}`", mname.name), mname.span));
+            }
+            if self.classes[class].fields.iter().any(|(n, _, _)| *n == mname.name) {
+                return Err(err(format!("`{}` is both a field and a method of `{class}`", mname.name), mname.span));
+            }
+            let mut decl = m.decl.clone();
+            decl.name.name = format!("{class}.{}", mname.name);
+            if let Some(mode) = decl.this {
+                let ty = if mode == ast::SelfMode::Lent { Type::LentNamed(class) } else { Type::Named(class) };
+                let sp = mname.span;
+                let this = ast::Param { name: ast::Ident { name: "self".into(), span: sp }, ty: ast::TypeExpr { ty, span: sp }, mode: Some(mode) };
+                decl.params.insert(0, this);
+            }
+            self.declare_proc(&decl)?;
+            let id = self.proc_ids[&decl.name.name];
+            let method = Method { id, this: m.decl.this, public: m.public };
+            self.classes.get_mut(class).expect("registered").methods.insert(mname.name.clone(), method);
+            out.push((class, decl));
+        }
+        Ok(out)
+    }
+
+    fn declare_iface(&mut self, d: &ast::InterfaceDecl) -> R<()> {
+        let mut methods: Vec<IfaceMethod> = Vec::new();
+        for m in &d.methods {
+            if methods.iter().any(|x| x.name == m.name.name) {
+                return Err(err(format!("method `{}` appears twice in interface `{}`", m.name.name, d.name.name), m.name.span));
+            }
+            if m.this.is_none() {
+                return Err(err(format!("interface method `{}` needs `self`", m.name.name), m.name.span)
+                    .with_note("an interface describes what objects do: `proc area(lent self) -> real;`"));
+            }
+            let mut params = Vec::new();
+            for p in &m.params {
+                params.push((p.name.name.clone(), self.resolve(&p.ty)?));
+            }
+            let ret = match &m.ret {
+                Some(t) => self.resolve(t)?,
+                None => Type::Void,
+            };
+            methods.push(IfaceMethod { name: m.name.name.clone(), this: m.this, params, ret });
+        }
+        self.ifaces.get_mut(&d.name.name).expect("registered").methods = methods;
+        Ok(())
+    }
+
+    /// `@impl(I)`: the class has every method of `I` with the same signature,
+    /// each marked `@override`; and every `@override` fills in some interface.
+    fn check_impls(&mut self, c: &ast::ClassDecl) -> R<()> {
+        let class = self.classes[&c.name.name].name;
+        let mut filled: Vec<String> = Vec::new();
+        for a in &c.annotations {
+            for i in &a.args {
+                let Some(iface) = self.ifaces.get(&i.name) else {
+                    return Err(err(format!("`{}` is not an interface", i.name), i.span));
+                };
+                let iname = iface.name;
+                for im in iface.methods.clone() {
+                    let Some(m) = self.classes[class].methods.get(&im.name).copied() else {
+                        return Err(err(format!("`{class}` implements `{iname}` but has no method `{}`", im.name), c.name.span)
+                            .with_note(format!("add `@override public proc {}(...)`", im.name)));
+                    };
+                    let sig = &self.sigs[m.id];
+                    let params: Vec<Type> = sig.params.iter().skip(1).map(|(_, t)| *t).collect();
+                    let want: Vec<Type> = im.params.iter().map(|(_, t)| *t).collect();
+                    let decl = c.methods.iter().find(|d| d.decl.name.name == im.name).expect("declared");
+                    if m.this != im.this || params != want || sig.ret != im.ret {
+                        return Err(err(format!("`{class}.{}` does not match `{iname}.{}`", im.name, im.name), decl.decl.name.span)
+                            .with_note("the `self`, the parameter types and the return type must be the same"));
+                    }
+                    if !m.public {
+                        return Err(err(format!("`{class}.{}` must be public: it fills in `{iname}`", im.name), decl.decl.name.span));
+                    }
+                    if !decl.annotations.iter().any(|a| a.name.name == "override") {
+                        return Err(err(format!("`{}` comes from `{iname}`; mark it `@override`", im.name), decl.decl.name.span));
+                    }
+                    filled.push(im.name.clone());
+                }
+                self.ifaces.get_mut(&i.name).expect("checked").impls.push(class);
+            }
+        }
+        for m in &c.methods {
+            if let Some(a) = m.annotations.iter().find(|a| a.name.name == "override")
+                && !filled.contains(&m.decl.name.name)
+            {
+                return Err(err(format!("`{}` overrides nothing", m.decl.name.name), a.name.span)
+                    .with_note(format!("no interface in `@impl(...)` of `{class}` has a method `{}`", m.decl.name.name)));
+            }
+        }
+        Ok(())
+    }
+
+    /// Field `f` of class `c`: offset and type. Private fields only inside `c`.
+    fn class_field(&self, c: &str, f: &ast::Ident) -> R<(usize, Type)> {
+        let info = &self.classes[c];
+        let mut off = 0;
+        for (n, t, public) in &info.fields {
+            if *n == f.name {
+                if !public && self.class != Some(info.name) {
+                    return Err(err(format!("`{}` is private in `{c}`", f.name), f.span)
+                        .with_note(format!("only `{c}`'s methods can use it; mark it `public` to allow")));
+                }
+                return Ok((off, *t));
+            }
+            off += width(&self.structs, *t);
+        }
+        let names: Vec<&str> = info.fields.iter().map(|(n, _, _)| n.as_str()).collect();
+        Err(err(format!("class `{c}` has no field `{}`", f.name), f.span).with_note(format!("its fields are {}", names.join(", "))))
+    }
+
+    /// How a field looks when read through its object: something it owns is lent.
+    fn view(ty: Type) -> Type {
+        match ty {
+            Type::Own(b) => Type::Lent(b),
+            Type::Class(n) => Type::LentClass(n),
+            t => t,
+        }
+    }
+
+    /// Whether `e` is an object (for `e.field`), without reporting errors.
+    fn is_object(&mut self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Var(n) => self.lookup(n).is_some_and(|id| matches!(self.f.locals[id].ty, Type::Class(_) | Type::LentClass(_))),
+            _ => self.expr(e, None).is_ok_and(|h| matches!(h.ty, Type::Class(_) | Type::LentClass(_))),
+        }
+    }
+
+    /// The object `e` refers to, for `e.field` and `e.method()`: a local, or a
+    /// field holding an object. A new object (`f().x`) would be lost.
+    fn object(&mut self, e: &Expr) -> R<Option<(HExpr, &'static str)>> {
+        let h = match &e.kind {
+            ExprKind::Var(n) if self.lookup(n).is_some_and(|id| matches!(self.f.locals[id].ty, Type::Class(_) | Type::LentClass(_))) => {
+                let id = self.lookup(n).expect("checked");
+                hx(HExprKind::Local(id), self.f.locals[id].ty, e.span)
+            }
+            ExprKind::Var(n) if self.lookup(n).is_none() && (self.enums.contains_key(n) || self.classes.contains_key(n)) => return Ok(None),
+            _ => self.expr(e, None)?,
+        };
+        let (Type::Class(c) | Type::LentClass(c)) = h.ty else { return Ok(None) };
+        if !matches!(h.kind, HExprKind::Local(_) | HExprKind::ElemField(..)) {
+            return Err(err("the object made here would be lost", e.span).with_note("store it in a variable first, then use it and burn it"));
+        }
+        Ok(Some((h, c)))
+    }
+
+    fn method(&self, c: &str, name: &ast::Ident) -> R<Method> {
+        let info = &self.classes[c];
+        let Some(m) = info.methods.get(&name.name) else {
+            let mut names: Vec<&str> = info.methods.keys().map(String::as_str).collect();
+            names.sort_unstable();
+            let note = if names.is_empty() { "it has no methods".to_string() } else { format!("its methods are {}", names.join(", ")) };
+            return Err(err(format!("class `{c}` has no method `{}`", name.name), name.span).with_note(note));
+        };
+        if !m.public && self.class != Some(info.name) {
+            return Err(err(format!("method `{}` is private in `{c}`", name.name), name.span)
+                .with_note(format!("only `{c}`'s methods can call it; mark it `public` to allow")));
+        }
+        Ok(*m)
+    }
+
+    /// An object prints like a struct: `Conta { saldo: 10.0, hist: [10.0] }`.
+    /// `obj` is a local or a field (reading it twice is harmless).
+    fn displayed_object(&mut self, obj: HExpr, c: &'static str) -> HExpr {
+        let span = obj.span;
+        let text = |s: &str| (Fmt::Plain, hx(HExprKind::Text(s.to_string()), Type::Text, span));
+        let mut pieces = vec![text(&format!("{c} {{ "))];
+        let mut off = 0;
+        let fields: Vec<(String, Type)> = self.classes[c].fields.iter().map(|(n, t, _)| (n.clone(), *t)).collect();
+        for (i, (fname, fty)) in fields.into_iter().enumerate() {
+            pieces.push(text(&format!("{}{fname}: ", if i > 0 { ", " } else { "" })));
+            let zero = hx(HExprKind::Word(Word::ZERO), Type::Scalar(Scalar::Int), span);
+            let f = hx(HExprKind::ElemField(Box::new(obj.clone()), Box::new(zero), off), Self::view(fty), span);
+            match f.ty {
+                Type::Text => pieces.push((Fmt::Quoted, f)),
+                Type::Lent(b) if !matches!(b.ty(), Type::Scalar(_) | Type::Text) => pieces.push(text("[...]")),
+                _ => pieces.push((Fmt::Plain, self.displayed(f))),
+            }
+            off += width(&self.structs, fty);
+        }
+        pieces.push(text(" }"));
+        hx(HExprKind::Print(pieces), Type::Void, span)
+    }
+
+    /// `Conta { saldo: 0.0, ... }`: only inside the class, every field given.
+    fn new_object(&mut self, name: &ast::Ident, fields: &[(ast::Ident, Expr)], span: Span) -> R<HExpr> {
+        let c = self.classes[&name.name].name;
+        if self.class != Some(c) {
+            return Err(err(format!("`{c}` objects are created inside the class"), name.span)
+                .with_note(format!("call one of its methods, like `{c}.new(...)`")));
+        }
+        let decl: Vec<(String, Type)> = self.classes[c].fields.iter().map(|(n, t, _)| (n.clone(), *t)).collect();
+        if decl.is_empty() {
+            return Err(err(format!("`{c}` has no fields, so it cannot be created"), name.span));
+        }
+        for (i, (f, _)) in fields.iter().enumerate() {
+            if !decl.iter().any(|(n, _)| *n == f.name) {
+                self.class_field(c, f)?;
+            }
+            if fields[..i].iter().any(|(g, _)| g.name == f.name) {
+                return Err(err(format!("field `{}` is given twice", f.name), f.span));
+            }
+        }
+        let missing: Vec<String> = decl.iter().filter(|(n, _)| !fields.iter().any(|(f, _)| f.name == *n)).map(|(n, _)| format!("`{n}`")).collect();
+        if !missing.is_empty() {
+            let s = if missing.len() == 1 { "" } else { "s" };
+            return Err(err(format!("missing field{s} {} in `{c}`", missing.join(", ")), span).with_note("every field must get a value"));
+        }
+        let mut values = Vec::new();
+        for (n, t) in &decl {
+            let (_, e) = fields.iter().find(|(f, _)| f.name == *n).expect("checked above");
+            let h = match (t, &e.kind) {
+                (Type::Own(_) | Type::Class(_), ExprKind::Give(x)) => {
+                    let lid = self.lookup(&x.name).ok_or_else(|| self.unknown(&x.name, x.span))?;
+                    let h = self.give(lid, e.span)?;
+                    self.coerce(h, *t)?
+                }
+                _ => self.expect(e, *t)?,
+            };
+            values.push(h);
+        }
+        Ok(hx(HExprKind::NewObj(values), Type::Class(c), span))
+    }
+
+    /// `obj.method(args)` or `Class.method(args)`.
+    fn method_call(&mut self, recv: &Expr, name: &ast::Ident, args: &[Expr], span: Span) -> R<HExpr> {
+        if let ExprKind::Var(c) = &recv.kind
+            && self.lookup(c).is_none()
+            && self.classes.contains_key(c)
+        {
+            let m = self.method(c, name)?;
+            if m.this.is_some() {
+                return Err(err(format!("`{}` needs an object", name.name), name.span)
+                    .with_note(format!("call it on one: `x.{}(...)`", name.name)));
+            }
+            return self.call_proc(m.id, &format!("{c}.{}", name.name), args, None, span);
+        }
+        if let ExprKind::Var(n) = &recv.kind
+            && let Some(id) = self.lookup(n)
+            && let Type::LentIface(i) = self.f.locals[id].ty
+        {
+            let info = &self.ifaces[i];
+            let Some(m) = info.methods.iter().find(|m| m.name == name.name).cloned() else {
+                let names: Vec<&str> = info.methods.iter().map(|m| m.name.as_str()).collect();
+                return Err(err(format!("interface `{i}` has no method `{}`", name.name), name.span)
+                    .with_note(format!("its methods are {}", names.join(", "))));
+            };
+            if m.this == Some(ast::SelfMode::Own) {
+                return Err(err(format!("`{}` consumes the object (`own self`)", name.name), recv.span)
+                    .with_note("an object seen through an interface is lent and cannot be given away"));
+            }
+            let impls: Vec<(i64, ProcId)> = info.impls.iter().map(|c| (self.class_tags[c], self.classes[*c].methods[&name.name].id)).collect();
+            let hargs = self.call_args(&format!("{i}.{}", name.name), &m.params, args, None, span)?;
+            return Ok(hx(HExprKind::DynCall { recv: id, impls, args: hargs }, m.ret, span));
+        }
+        let Some((obj, c)) = self.object(recv)? else {
+            let ty = self.expr(recv, None).map(|h| h.ty.to_string()).unwrap_or_else(|_| "this".into());
+            return Err(err(format!("{ty} has no methods"), recv.span));
+        };
+        let m = self.method(c, name)?;
+        let this = match (m.this, &obj.kind) {
+            (None, _) => {
+                return Err(err(format!("`{}` is static", name.name), name.span)
+                    .with_note(format!("call it on the class: `{c}.{}(...)`", name.name)));
+            }
+            (Some(ast::SelfMode::Lent), HExprKind::Local(id)) => hx(HExprKind::Lend(*id), Type::LentClass(c), recv.span),
+            (Some(ast::SelfMode::Lent), _) => HExpr { ty: Type::LentClass(c), ..obj },
+            (Some(ast::SelfMode::Own), HExprKind::Local(id)) if matches!(obj.ty, Type::Class(_)) => {
+                hx(HExprKind::Give(*id), Type::Class(c), recv.span)
+            }
+            (Some(ast::SelfMode::Own), _) => {
+                return Err(err(format!("`{}` consumes the object (`own self`)", name.name), recv.span)
+                    .with_note("call it on a variable you own; a lent object or a field cannot be given away"));
+            }
+        };
+        self.call_proc(m.id, &format!("{c}.{}", name.name), args, Some(this), span)
     }
 
     fn declare_struct(&mut self, s: &ast::StructDecl) -> R<()> {
@@ -290,7 +731,12 @@ impl Checker {
             if fields.iter().any(|(n, _)| *n == f.name) {
                 return Err(err(format!("field `{}` appears twice in struct `{}`", f.name, s.name.name), f.span));
             }
-            fields.push((f.name.clone(), self.resolve(t)?));
+            let ty = self.resolve(t)?;
+            if let Type::Class(c) = ty {
+                return Err(err(format!("a struct cannot hold an object (`{c}`)"), t.span)
+                    .with_note("a struct is copied, and an object has one owner; use a class instead"));
+            }
+            fields.push((f.name.clone(), ty));
         }
         *self.structs.get_mut(s.name.name.as_str()).expect("names come first") = fields;
         Ok(())
@@ -351,10 +797,7 @@ impl Checker {
                 hx(HExprKind::Bind(tmp, value, Box::new(body)), ty, span)
             }
             // `pts[i].x`: read just that field of the element.
-            HExprKind::Index(arr, idx) if matches!(arr.kind, HExprKind::Local(_)) => {
-                let HExprKind::Local(a) = arr.kind else { unreachable!() };
-                hx(HExprKind::ElemField(a, idx, off), ty, span)
-            }
+            HExprKind::Index(arr, idx) if arr.ty != Type::Text => hx(HExprKind::ElemField(arr, idx, off), ty, span),
             HExprKind::ElemField(a, idx, o) => hx(HExprKind::ElemField(a, idx, o + off), ty, span),
             _ => {
                 let tmp = self.new_local("$struct", base.ty, LocalKind::Hidden, span);
@@ -369,6 +812,9 @@ impl Checker {
         if h.ty == Type::Bool {
             let span = h.span;
             return hx(HExprKind::Builtin(Builtin::ToText(Fmt::Plain), vec![h]), Type::Text, span);
+        }
+        if let Type::Class(c) | Type::LentClass(c) = h.ty {
+            return self.displayed_object(h, c);
         }
         let Type::Struct(sname) = h.ty else { return self.named(h) };
         let span = h.span;
@@ -386,7 +832,7 @@ impl Checker {
             pieces.push(text(&format!("{}{fname}: ", if i > 0 { ", " } else { "" })));
             let f = self.field_of(base.clone(), off, fty, span);
             if fty == Type::Text {
-                pieces.extend([text("\""), (Fmt::Plain, f), text("\"")]);
+                pieces.push((Fmt::Quoted, f));
             } else {
                 pieces.push((Fmt::Plain, self.displayed(f)));
             }
@@ -421,7 +867,17 @@ impl Checker {
             if params.iter().any(|(n, _)| *n == param.name.name) {
                 return Err(err(format!("parameter `{}` appears twice", param.name.name), param.name.span));
             }
-            params.push((param.name.name.clone(), self.resolve(&param.ty)?));
+            let ty = self.resolve(&param.ty)?;
+            if let Type::Class(c) = ty
+                && param.mode.is_none()
+            {
+                return Err(err("an object parameter needs `lent` or `own`", param.name.span)
+                    .with_note(format!("`lent {0}: {c}` borrows it, `own {0}: {c}` takes it", param.name.name)));
+            }
+            if param.mode.is_some() && !matches!(ty, Type::Own(_) | Type::Lent(_) | Type::Class(_) | Type::LentClass(_) | Type::LentIface(_)) {
+                return Err(err("`lent` and `own` only apply to arrays and objects", param.name.span));
+            }
+            params.push((param.name.name.clone(), ty));
         }
         let ret = match &p.ret {
             Some(t) => self.resolve(t)?,
@@ -446,7 +902,9 @@ impl Checker {
                 }
             }
             ExprKind::Lend(n) => {
-                resized.insert(n.name.clone());
+                if let ExprKind::Var(n) = &n.kind {
+                    resized.insert(n.clone());
+                }
             }
             _ => {}
         });
@@ -508,7 +966,19 @@ impl Checker {
 
     fn stmt(&mut self, s: &ast::Stmt) -> R<HStmt> {
         let kind = match &s.kind {
-            StmtKind::Let { is_final, name, ty, value, on_nat } => {
+            StmtKind::Let { is_final, name, ty: Some(t), value: None, .. } => {
+                let ty = self.resolve(t)?;
+                if let Type::Lent(_) | Type::LentClass(_) = ty {
+                    return Err(err("a variable cannot hold something lent", t.span).with_note("lent values exist only as proc parameters"));
+                }
+                if *is_final {
+                    return Err(err(format!("final `{}` needs a value", name.name), name.span).with_note("a final variable can never be assigned later"));
+                }
+                let local = self.new_local(&name.name, ty, LocalKind::Let, name.span);
+                HStmtKind::Declare(local)
+            }
+            StmtKind::Let { value: None, .. } => unreachable!("the parser always gives `x: T;` a type"),
+            StmtKind::Let { is_final, name, ty, value: Some(value), on_nat } => {
                 let (value, lty) = match ty {
                     Some(t) => {
                         let ty = self.resolve(t)?;
@@ -553,11 +1023,14 @@ impl Checker {
                 self.f.locals[local].is_final = *is_final;
                 HStmtKind::Let { local, value, on_nat }
             }
-            StmtKind::Assign { place, value } => self.assign(place, value)?,
+            StmtKind::Assign { target, value } => self.assign(target, value)?,
             StmtKind::Burn(name) => {
                 let id = self.lookup(&name.name).ok_or_else(|| self.unknown(&name.name, name.span))?;
                 match self.f.locals[id].ty {
-                    Type::Own(_) => HStmtKind::Burn(id),
+                    Type::Own(_) | Type::Class(_) => HStmtKind::Burn(id),
+                    Type::LentClass(_) => {
+                        return Err(err("cannot burn a lent object", name.span).with_note("only its owner can burn it"));
+                    }
                     Type::Lent(_) => {
                         return Err(err("cannot burn a lent buffer", name.span).with_note("only its owner can burn it"));
                     }
@@ -570,11 +1043,11 @@ impl Checker {
                     return Err(err("this proc has no return type, so it returns nothing", e.span).with_note("write `return;`"));
                 }
                 (t, None) => return Err(err(format!("this proc must return a {t}"), s.span)),
-                (Type::Own(e), Some(Expr { kind: ExprKind::Var(name), span })) => {
+                (t @ (Type::Own(_) | Type::Class(_)), Some(Expr { kind: ExprKind::Var(name), span })) => {
                     // `return b` hands ownership back to the caller.
                     let id = self.lookup(name).ok_or_else(|| self.unknown(name, *span))?;
                     let h = self.give(id, *span)?;
-                    HStmtKind::Return(Some(self.coerce(h, Type::Own(e))?))
+                    HStmtKind::Return(Some(self.coerce(h, t)?))
                 }
                 (t, Some(e)) => HStmtKind::Return(Some(self.expect(e, t)?)),
             },
@@ -628,7 +1101,7 @@ impl Checker {
             StmtKind::For { init, cond, step, body } => {
                 if !matches!(init.kind, StmtKind::Let { .. } | StmtKind::Assign { .. }) {
                     return Err(err("the first part of `for` must declare or assign a variable", init.span)
-                        .with_note("e.g. `for i := 0; i < 10; i++ { ... }`"));
+                        .with_note("e.g. `for i: int = 0; i < 10; i++ { ... }`"));
                 }
                 if !matches!(step.kind, StmtKind::Assign { .. }) {
                     return Err(err("the last part of `for` must change a variable", step.span)
@@ -693,11 +1166,11 @@ impl Checker {
                     };
                 }
                 let h = self.expr(e, None)?;
-                if !matches!(h.kind, HExprKind::Call(..) | HExprKind::Builtin(..) | HExprKind::Print(_)) {
+                if !matches!(h.kind, HExprKind::Call(..) | HExprKind::DynCall { .. } | HExprKind::Builtin(..) | HExprKind::Print(_)) {
                     return Err(err("this expression does nothing", e.span).with_note("only calls can be used as statements"));
                 }
-                if let Type::Own(_) = h.ty {
-                    return Err(err("the buffer returned by this call would be lost", e.span)
+                if let Type::Own(_) | Type::Class(_) = h.ty {
+                    return Err(err("the buffer or object returned by this call would be lost", e.span)
                         .with_note("store it, e.g. `sym b[]: int = f(...);`, then burn it"));
                 }
                 HStmtKind::Expr(h)
@@ -706,62 +1179,97 @@ impl Checker {
         Ok(HStmt { kind, span: s.span })
     }
 
-    fn assign(&mut self, place: &Place, value: &Expr) -> R<HStmtKind> {
-        let name = &place.name.name;
-        let Some(id) = self.lookup(name) else {
-            if self.consts.contains_key(name) {
-                return Err(err(format!("cannot assign to const `{name}`"), place.name.span));
-            }
-            return Err(self.unknown(name, place.name.span));
-        };
-        let local = &self.f.locals[id];
-        if local.kind == LocalKind::WalkVar {
-            return Err(err(format!("`{name}` is the walk variable and is read-only"), place.name.span));
-        }
-        if local.is_final && place.index.is_none() {
-            return Err(err(format!("`{name}` is final and cannot change"), place.name.span)
-                .with_note("declare it without `final` if it needs to change"));
-        }
-        if !place.fields.is_empty() {
-            let (mut off, mut ty) = (0, local.ty);
-            let index = match (&place.index, local.ty) {
-                (Some(idx), Type::Own(b) | Type::Lent(b)) => {
-                    ty = b.ty();
-                    let hidx = self.index(idx)?;
-                    self.check_index(id, &hidx)?;
-                    Some(hidx)
+    fn assign(&mut self, target: &Expr, value: &Expr) -> R<HStmtKind> {
+        match self.lvalue(target)? {
+            LVal::Local { id, off, ty } => {
+                let local = &self.f.locals[id];
+                if local.is_final {
+                    return Err(err(format!("`{}` is final and cannot change", local.name), target.span)
+                        .with_note("declare it without `final` if it needs to change"));
                 }
-                (Some(_), t) => return Err(err(format!("cannot index a {t}"), place.name.span)),
-                (None, _) => None,
-            };
-            for f in &place.fields {
-                let Type::Struct(sname) = ty else {
-                    return Err(err(format!("{ty} has no fields"), f.span));
+                let whole = off == 0 && ty == local.ty;
+                if whole && let Type::Lent(_) | Type::LentClass(_) = ty {
+                    return Err(err("cannot replace something lent", target.span).with_note("change what is inside it instead: `v[i] = ...`, `c.x = ...`"));
+                }
+                let hv = self.expect(value, ty)?;
+                if whole {
+                    self.f.sizes.remove(&id);
+                    self.note_size(id, &hv);
+                }
+                Ok(HStmtKind::Assign { local: id, index: None, field: off, value: hv })
+            }
+            LVal::Elem { arr, idx, off, ty } => {
+                if let Type::Own(_) | Type::Class(_) = ty {
+                    return Err(err("a field that owns an array or an object cannot be replaced", target.span)
+                        .with_note("change what is inside it instead (`append(self.items, x)`, `self.items[i] = ...`)"));
+                }
+                let hv = self.expect(value, ty)?;
+                Ok(match arr.kind {
+                    HExprKind::Local(id) => HStmtKind::Assign { local: id, index: Some(idx), field: off, value: hv },
+                    _ => HStmtKind::SetElem { arr, index: idx, field: off, value: hv },
+                })
+            }
+        }
+    }
+
+    /// What the left side of `=` writes to.
+    fn lvalue(&mut self, e: &Expr) -> R<LVal> {
+        match &e.kind {
+            ExprKind::Var(name) => {
+                let Some(id) = self.lookup(name) else {
+                    if self.consts.contains_key(name) {
+                        return Err(err(format!("cannot assign to const `{name}`"), e.span));
+                    }
+                    return Err(self.unknown(name, e.span));
+                };
+                if self.f.locals[id].kind == LocalKind::WalkVar {
+                    return Err(err(format!("`{name}` is the walk variable and is read-only"), e.span));
+                }
+                Ok(LVal::Local { id, off: 0, ty: self.f.locals[id].ty })
+            }
+            ExprKind::Member(base, f) => {
+                let lv = self.lvalue(base)?;
+                if let Type::Class(c) | Type::LentClass(c) = lv.ty() {
+                    // A field of an object: a cell of its heap block.
+                    let (off, ty) = self.class_field(c, f)?;
+                    let obj = match lv {
+                        LVal::Local { id, ty, .. } => hx(HExprKind::Local(id), ty, base.span),
+                        LVal::Elem { arr, idx, off, .. } => {
+                            hx(HExprKind::ElemField(Box::new(arr), Box::new(idx), off), Type::LentClass(c), base.span)
+                        }
+                    };
+                    let zero = hx(HExprKind::Word(Word::ZERO), Type::Scalar(Scalar::Int), base.span);
+                    return Ok(LVal::Elem { arr: obj, idx: zero, off, ty });
+                }
+                let Type::Struct(sname) = lv.ty() else {
+                    return Err(err(format!("{} has no fields", lv.ty()), f.span));
                 };
                 let (o, t) = self.field(sname, f)?;
-                off += o;
-                ty = t;
+                Ok(match lv {
+                    LVal::Local { id, off, .. } => LVal::Local { id, off: off + o, ty: t },
+                    LVal::Elem { arr, idx, off, .. } => LVal::Elem { arr, idx, off: off + o, ty: t },
+                })
             }
-            let hv = self.expect(value, ty)?;
-            return Ok(HStmtKind::Assign { local: id, index, field: off, value: hv });
-        }
-        match (&place.index, local.ty) {
-            (Some(idx), Type::Own(e) | Type::Lent(e)) => {
-                let hidx = self.index(idx)?;
-                self.check_index(id, &hidx)?;
-                let hv = self.expect(value, e.ty())?;
-                Ok(HStmtKind::Assign { local: id, index: Some(hidx), field: 0, value: hv })
+            ExprKind::Index(base, idx) => {
+                let lv = self.lvalue(base)?;
+                match lv.ty() {
+                    Type::Own(b) | Type::Lent(b) => {
+                        let hidx = self.index(idx)?;
+                        let arr = match lv {
+                            LVal::Local { id, ty, .. } => {
+                                self.check_index(id, &hidx)?;
+                                hx(HExprKind::Local(id), ty, base.span)
+                            }
+                            LVal::Elem { arr, idx, off, ty } => hx(HExprKind::ElemField(Box::new(arr), Box::new(idx), off), ty, base.span),
+                        };
+                        Ok(LVal::Elem { arr, idx: hidx, off: 0, ty: b.ty() })
+                    }
+                    Type::Text => Err(err("text is read-only", e.span)),
+                    t => Err(err(format!("cannot index a {t}"), base.span)),
+                }
             }
-            (Some(_), Type::Text) => Err(err("text is read-only", place.span)),
-            (Some(_), t) => Err(err(format!("cannot index a {t}"), place.name.span)),
-            (None, Type::Lent(_)) => Err(err("cannot replace a lent buffer", place.span)
-                .with_note("assign to its cells instead: `v[i] = ...`")),
-            (None, t) => {
-                let hv = self.expect(value, t)?;
-                self.f.sizes.remove(&id);
-                self.note_size(id, &hv);
-                Ok(HStmtKind::Assign { local: id, index: None, field: 0, value: hv })
-            }
+            _ => Err(err("cannot assign to this expression", e.span)
+                .with_note("the left side of `=` must be a variable, `array[index]` or a field like `p.x`")),
         }
     }
 
@@ -835,7 +1343,8 @@ impl Checker {
     fn give(&self, id: LocalId, span: Span) -> R<HExpr> {
         match self.f.locals[id].ty {
             Type::Own(e) => Ok(hx(HExprKind::Give(id), Type::Own(e), span)),
-            Type::Lent(_) => Err(err("cannot give away a lent buffer", span).with_note("only its owner can give it")),
+            Type::Class(c) => Ok(hx(HExprKind::Give(id), Type::Class(c), span)),
+            Type::Lent(_) | Type::LentClass(_) => Err(err("cannot give away something lent", span).with_note("only its owner can give it")),
             t => Err(err(format!("only an own buffer can be given, this is {t}"), span)),
         }
     }
@@ -913,6 +1422,10 @@ impl Checker {
             ExprKind::Var(name) => {
                 if let Some(id) = self.lookup(name) {
                     let ty = self.f.locals[id].ty;
+                    if let Type::Class(_) | Type::LentClass(_) = ty {
+                        return Err(err(format!("object `{name}` cannot be copied"), span)
+                            .with_note(format!("pass it with `lend {name}` or `give {name}`; read its fields with `{name}.x`")));
+                    }
                     if let Type::Own(_) | Type::Lent(_) = ty {
                         return Err(err(format!("buffer `{name}` cannot be used as a value"), span)
                             .with_note(format!("index it (`{name}[i]`), pass it with `lend {name}` or `give {name}`, or burn it")));
@@ -946,6 +1459,13 @@ impl Checker {
                 }
             }
             ExprKind::Binary(op, a, b) => self.binary(*op, a, b, want, span)?,
+            ExprKind::Member(base, field) if self.is_object(base) => {
+                let (obj, c) = self.object(base)?.expect("checked by the guard");
+                let (off, ty) = self.class_field(c, field)?;
+                let zero = hx(HExprKind::Word(Word::ZERO), Type::Scalar(Scalar::Int), span);
+                hx(HExprKind::ElemField(Box::new(obj), Box::new(zero), off), Self::view(ty), span)
+            }
+            ExprKind::MethodCall { recv, name, args } => self.method_call(recv, name, args, span)?,
             ExprKind::Member(base, field) => {
                 let enum_name = match &base.kind {
                     ExprKind::Var(n) if self.lookup(n).is_none() && self.enums.contains_key(n) => Some(n),
@@ -994,6 +1514,10 @@ impl Checker {
                     return Ok(hx(HExprKind::Index(Box::new(hb), Box::new(hidx)), el.ty(), span));
                 }
                 let hb = self.expr(base, None)?;
+                if let Type::Own(el) | Type::Lent(el) = hb.ty {
+                    let hidx = self.index(idx)?;
+                    return Ok(hx(HExprKind::Index(Box::new(hb), Box::new(hidx)), el.ty(), span));
+                }
                 if hb.ty != Type::Text {
                     return Err(err(format!("cannot index {}", hb.ty), base.span));
                 }
@@ -1036,6 +1560,7 @@ impl Checker {
                 return Err(err("a range `a..b` only works as an argument of `replace` here", span)
                     .with_note("in loops, write `walk i in a..b { ... }`"));
             }
+            ExprKind::StructLit { name, fields } if self.classes.contains_key(&name.name) => self.new_object(name, fields, span)?,
             ExprKind::StructLit { name, fields } => {
                 let Some((&sname, decl)) = self.structs.get_key_value(name.name.as_str()) else {
                     return Err(err(format!("unknown struct `{}`", name.name), name.span));
@@ -1254,6 +1779,16 @@ impl Checker {
     fn array_arg(&mut self, e: &Expr, op: &str) -> R<(HExpr, ast::Buf)> {
         let found = match &e.kind {
             ExprKind::Var(name) => self.lookup(name).map(|id| (id, self.f.locals[id].ty)),
+            // An array held in an object's field (`self.items`).
+            _ if self.expr(e, None).is_ok_and(|h| matches!(h.ty, Type::Lent(_))) => {
+                let h = self.expr(e, None)?;
+                let Type::Lent(buf) = h.ty else { unreachable!() };
+                if buf.sym && op != "replace" {
+                    return Err(err(format!("`{op}` does not work on a sym array"), e.span)
+                        .with_note("a sym array must stay odd and centered on index 0"));
+                }
+                return Ok((h, buf));
+            }
             _ => None,
         };
         let Some((id, Type::Own(buf) | Type::Lent(buf))) = found else {
@@ -1282,6 +1817,10 @@ impl Checker {
     /// Like `viewed`, for `print`/`printf`/`toText`: only arrays of numbers
     /// and texts print whole.
     fn shown(&mut self, e: &Expr, want: Option<Type>) -> R<HExpr> {
+        if self.is_object(e) {
+            let (h, _) = self.object(e)?.expect("checked");
+            return Ok(h);
+        }
         if let ExprKind::Var(name) = &e.kind
             && let Some(id) = self.lookup(name)
             && let Type::Own(el) | Type::Lent(el) = self.f.locals[id].ty
@@ -1467,7 +2006,7 @@ impl Checker {
                         pieces.extend(texts.into_iter().map(|h| (Fmt::Plain, h)));
                     } else {
                         let a = self.shown(arg, None)?;
-                        if !matches!(a.ty, Type::Scalar(_) | Type::Bool | Type::Text | Type::Lent(_) | Type::Enum(_) | Type::Struct(_)) {
+                        if !matches!(a.ty, Type::Scalar(_) | Type::Bool | Type::Text | Type::Lent(_) | Type::Enum(_) | Type::Struct(_) | Type::Class(_) | Type::LentClass(_)) {
                             return Err(err(format!("`{}` prints numbers and text, found {}", name.name, a.ty), a.span));
                         }
                         pieces.push((Fmt::Plain, self.displayed(a)));
@@ -1613,6 +2152,19 @@ impl Checker {
                 let i = self.expect(&args[0], Type::Scalar(Scalar::Int))?;
                 return Ok(builtin(Builtin::Arg, vec![i], text));
             }
+            "isNaT" => {
+                // The only test that a NaT does not poison: `x == NaT` is NaT itself.
+                arity(1)?;
+                let x = self.expr(&args[0], None)?;
+                if !matches!(x.ty, Type::Scalar(_) | Type::Bool | Type::Text | Type::Enum(_)) {
+                    let note = match x.ty {
+                        Type::Struct(_) => "test one field: `isNaT(p.x)`",
+                        _ => "arrays and objects are checked by the compiler: they always have a value when used",
+                    };
+                    return Err(err(format!("`isNaT` takes a number, bool, text or enum value, found {}", x.ty), x.span).with_note(note));
+                }
+                return Ok(builtin(Builtin::IsNaT, vec![x], Type::Bool));
+            }
             "append" | "pop" | "insert" | "remove" | "resize" | "clear" | "replace" => {
                 let n = match name.name.as_str() {
                     "pop" | "clear" => 1,
@@ -1667,12 +2219,28 @@ impl Checker {
                 }
             });
         };
+        self.call_proc(id, &name.name, args, None, span)
+    }
+
+    /// A call to a user proc or method. `this` is the method's `self`
+    /// argument, already checked.
+    fn call_proc(&mut self, id: ProcId, shown: &str, args: &[Expr], this: Option<HExpr>, span: Span) -> R<HExpr> {
         let sig = self.sigs[id].clone();
-        arity(sig.params.len())?;
-        let mut hargs = Vec::new();
-        for (arg, (pname, pty)) in args.iter().zip(&sig.params) {
+        let params = &sig.params[usize::from(this.is_some())..];
+        let hargs = self.call_args(shown, params, args, this, span)?;
+        Ok(hx(HExprKind::Call(id, hargs), sig.ret, span))
+    }
+
+    /// Checks call arguments against `params` (`this` already checked).
+    fn call_args(&mut self, shown: &str, params: &[(String, Type)], args: &[Expr], this: Option<HExpr>, span: Span) -> R<Vec<HExpr>> {
+        if args.len() != params.len() {
+            let s = if params.len() == 1 { "" } else { "s" };
+            return Err(err(format!("`{shown}` takes {} argument{s}, found {}", params.len(), args.len()), span));
+        }
+        let mut hargs: Vec<HExpr> = this.into_iter().collect();
+        for (arg, (pname, pty)) in args.iter().zip(params) {
             let h = match (pty, &arg.kind) {
-                (Type::Own(_), ExprKind::Give(x)) => {
+                (Type::Own(_) | Type::Class(_), ExprKind::Give(x)) => {
                     let lid = self.lookup(&x.name).ok_or_else(|| self.unknown(&x.name, x.span))?;
                     let h = self.give(lid, arg.span)?;
                     self.coerce(h, *pty)?
@@ -1682,9 +2250,9 @@ impl Checker {
                         .with_note("pass it with `give b`"));
                 }
                 (Type::Lent(el), ExprKind::Lend(x)) => {
-                    let lid = self.lookup(&x.name).ok_or_else(|| self.unknown(&x.name, x.span))?;
-                    match self.f.locals[lid].ty {
-                        Type::Own(e2) | Type::Lent(e2) if e2 == *el => hx(HExprKind::Lend(lid), *pty, arg.span),
+                    let h = self.lent_arg(x)?;
+                    match h.ty {
+                        Type::Own(e2) | Type::Lent(e2) if e2 == *el => HExpr { ty: *pty, span: arg.span, ..h },
                         t => {
                             let d = err(format!("expected {}, found {t}", Type::Lent(*el)), arg.span);
                             return Err(match t {
@@ -1699,11 +2267,74 @@ impl Checker {
                 (Type::Lent(_), _) => {
                     return Err(err(format!("parameter `{pname}` borrows a buffer"), arg.span).with_note("pass it with `lend b`"));
                 }
+                (Type::LentClass(c), ExprKind::Lend(x)) => {
+                    let h = self.lent_arg(x)?;
+                    match h.ty {
+                        Type::Class(c2) | Type::LentClass(c2) if c2 == *c => HExpr { ty: *pty, span: arg.span, ..h },
+                        t => return Err(err(format!("expected {pty}, found {t}"), arg.span)),
+                    }
+                }
+                (Type::LentClass(_), _) => {
+                    return Err(err(format!("parameter `{pname}` borrows an object"), arg.span).with_note("pass it with `lend c`"));
+                }
+                (Type::LentIface(i), ExprKind::Lend(x)) => {
+                    let h = self.lent_arg(x)?;
+                    match h.ty {
+                        Type::LentIface(j) if j == *i => HExpr { span: arg.span, ..h },
+                        Type::Class(c) | Type::LentClass(c) if self.ifaces[*i].impls.contains(&c) => {
+                            let h = HExpr { ty: Type::LentClass(c), ..h };
+                            hx(HExprKind::ToIface(Box::new(h), self.class_tags[c]), *pty, arg.span)
+                        }
+                        Type::Class(c) | Type::LentClass(c) => {
+                            return Err(err(format!("`{c}` does not implement `{i}`"), arg.span)
+                                .with_note(format!("add `@impl({i})` to class `{c}`")));
+                        }
+                        t => return Err(err(format!("expected {pty}, found {t}"), arg.span)),
+                    }
+                }
+                (Type::LentIface(_), _) => {
+                    return Err(err(format!("parameter `{pname}` borrows an object"), arg.span).with_note("pass it with `lend x`"));
+                }
                 _ => self.expect(arg, *pty)?,
             };
             hargs.push(h);
         }
-        Ok(hx(HExprKind::Call(id, hargs), sig.ret, span))
+        Ok(hargs)
+    }
+
+    /// What `lend x` / `lend a.b` passes: a local array or object, or one held in a field.
+    fn lent_arg(&mut self, x: &Expr) -> R<HExpr> {
+        if let ExprKind::Var(name) = &x.kind {
+            let lid = self.lookup(name).ok_or_else(|| self.unknown(name, x.span))?;
+            let ty = self.f.locals[lid].ty;
+            if !matches!(ty, Type::Own(_) | Type::Lent(_) | Type::Class(_) | Type::LentClass(_) | Type::LentIface(_)) {
+                return Err(err(format!("only arrays and objects are lent; `{name}` is {ty}"), x.span)
+                    .with_note("numbers, texts and structs are copied: pass them without `lend`"));
+            }
+            return Ok(hx(HExprKind::Lend(lid), ty, x.span));
+        }
+        let h = self.expr(x, None)?;
+        if !matches!(h.ty, Type::Lent(_) | Type::LentClass(_)) {
+            return Err(err(format!("only arrays and objects are lent; this is {}", h.ty), x.span));
+        }
+        Ok(h)
+    }
+}
+
+/// The target of an assignment: slots of a local (a struct field is an
+/// offset), or cells of an array element.
+// Built once per assignment and consumed right away: the size does not matter.
+#[allow(clippy::large_enum_variant)]
+enum LVal {
+    Local { id: LocalId, off: usize, ty: Type },
+    Elem { arr: HExpr, idx: HExpr, off: usize, ty: Type },
+}
+
+impl LVal {
+    fn ty(&self) -> Type {
+        match self {
+            LVal::Local { ty, .. } | LVal::Elem { ty, .. } => *ty,
+        }
     }
 }
 
@@ -1717,15 +2348,15 @@ fn visit_block(b: &ast::Block, f: &mut dyn FnMut(&Expr)) {
 fn visit_stmt(s: &ast::Stmt, f: &mut dyn FnMut(&Expr)) {
     match &s.kind {
         StmtKind::Let { value, on_nat, .. } => {
-            visit_expr(value, f);
+            if let Some(v) = value {
+                visit_expr(v, f);
+            }
             if let Some(b) = on_nat {
                 visit_block(b, f);
             }
         }
-        StmtKind::Assign { place, value } => {
-            if let Some(i) = &place.index {
-                visit_expr(i, f);
-            }
+        StmtKind::Assign { target, value } => {
+            visit_expr(target, f);
             visit_expr(value, f);
         }
         StmtKind::Return(Some(e)) | StmtKind::Expr(e) => visit_expr(e, f),
@@ -1805,9 +2436,9 @@ fn piece(spec: char, label: &str, h: HExpr) -> R<(Fmt, HExpr)> {
     let ok = match spec {
         'd' | 'i' | 't' | 'v' => ty.is_int() || buffer,
         'f' | 'r' => ty == Type::Scalar(Scalar::Real),
-        's' => matches!(ty, Type::Text | Type::Enum(_) | Type::Struct(_) | Type::Bool),
+        's' => matches!(ty, Type::Text | Type::Enum(_) | Type::Struct(_) | Type::Bool | Type::Class(_) | Type::LentClass(_)),
         'c' => matches!(ty, Type::Scalar(Scalar::Tryte | Scalar::Trit) | Type::Lent(ast::Buf { elem: Elem::Scalar(Scalar::Tryte), .. })),
-        _ => matches!(ty, Type::Scalar(_) | Type::Text | Type::Enum(_) | Type::Struct(_) | Type::Bool) || buffer,
+        _ => matches!(ty, Type::Scalar(_) | Type::Text | Type::Enum(_) | Type::Struct(_) | Type::Bool | Type::Class(_) | Type::LentClass(_)) || buffer,
     };
     if !ok {
         let wants = match spec {
@@ -1916,27 +2547,27 @@ proc main() -> int {
 
     #[test]
     fn mixing_and_narrowing() {
-        assert!(err_in("x := 1; r := 2.0; y := x + r;").contains("cannot mix int and real"));
+        assert!(err_in("x: int = 1; r: real = 2.0; y: int = x + r;").contains("cannot mix int and real"));
         assert!(err_in("w: int = 5; t: tryte = w;").contains("narrow explicitly with `as tryte`"));
-        ok("w: int = 5; t: tryte = (tryte) w; r := (real) w; back := (int) r;");
-        assert!(err_in("r := 2.0 % 1.0;").contains("`%` works on integers"));
-        assert!(err_in("r := 2.0 << 1;").contains("`<<` works on integers"));
-        ok("r := 2.0 ** 3; t: tryte = 3; u := t * 2;");
+        ok("w: int = 5; t: tryte = (tryte) w; r: real = (real) w; back: int = (int) r;");
+        assert!(err_in("r: real = 2.0 % 1.0;").contains("`%` works on integers"));
+        assert!(err_in("r: real = 2.0 << 1;").contains("`<<` works on integers"));
+        ok("r: real = 2.0 ** 3; t: tryte = 3; u: tryte = t * 2;");
     }
 
     #[test]
     fn logic_and_tri() {
-        assert!(err_in("x := 1; y := x && x;").contains("`&&` works on bools and trits, found int"));
-        ok("a: trit = +; b: trit = 0; c := a && b || -;");
-        assert!(err_in("x := 5; tri x { - => return; 0 => return; + => return; }").contains("`tri` needs a trit"));
-        ok("x := 5; tri x <=> 0 { - => return; 0 => return; + => return; }");
+        assert!(err_in("x: int = 1; y: bool = x && x;").contains("`&&` works on bools and trits, found int"));
+        ok("a: trit = +; b: trit = 0; c: trit = a && b || -;");
+        assert!(err_in("x: int = 5; tri x { - => return; 0 => return; + => return; }").contains("`tri` needs a trit"));
+        ok("x: int = 5; tri x <=> 0 { - => return; 0 => return; + => return; }");
     }
 
     #[test]
     fn names_and_scopes() {
         assert_eq!(err_in("y = 1;"), "unknown name `y`");
         // An inner `x` shadows the outer one only inside its block.
-        let hir = ok("x := 1; t: trit = +; tri t { - => { x := 2; } 0 => return; + => return; } x = 3;");
+        let hir = ok("x: int = 1; t: trit = +; tri t { - => { x: int = 2; } 0 => return; + => return; } x = 3;");
         assert_eq!(hir.procs[0].locals.len(), 3);
         let HStmtKind::Assign { local, .. } = &hir.procs[0].body.stmts[3].kind else { panic!() };
         assert_eq!(*local, 0);
@@ -1947,37 +2578,37 @@ proc main() -> int {
 
     #[test]
     fn buffers() {
-        assert!(err_in("b := claim 5;").contains("needs to know the array type"));
-        assert!(err_in("sym b[]: int = claim 5; c := b;").contains("cannot be used as a value"));
-        assert!(err_in("x := 1; burn x;").contains("only an own buffer can be burned"));
+        assert!(err_in("b: int = claim 5;").contains("needs to know the array type"));
+        assert!(err_in("sym b[]: int = claim 5; c: int = b;").contains("cannot be used as a value"));
+        assert!(err_in("x: int = 1; burn x;").contains("only an own buffer can be burned"));
         assert!(err_of("proc f(lent sym v[]: int) { burn v; } proc main() {}").contains("cannot burn a lent buffer"));
-        assert!(err_of("proc f(lent sym v[]: int) { v = v; } proc main() {}").contains("cannot replace a lent buffer"));
-        assert!(err_in("sym b[]: int = claim 3; x := lend b;").contains("only allowed as a call argument"));
-        assert!(err_in("b := {1, 2};").contains("needs to know the array type"));
+        assert!(err_of("proc f(lent sym v[]: int) { v = v; } proc main() {}").contains("cannot replace something lent"));
+        assert!(err_in("sym b[]: int = claim 3; x: int = lend b;").contains("only allowed as a call argument"));
+        assert!(err_in("b: int = {1, 2};").contains("needs to know the array type"));
         assert!(err_in("sym b[]: int = {1, 2}; burn b;").contains("odd number of values"));
-        ok("a[]: int = {1, 2, 3, 4}; n := len(a); z[]: tryte = claim 0; burn a; burn z;");
+        ok("a[]: int = {1, 2, 3, 4}; n: int = len(a); z[]: tryte = claim 0; burn a; burn z;");
         // literal indices are checked against arrays of known size
-        assert!(err_in("sym a[]: int = {1, 2, 3}; x := a[2]; burn a;").contains("valid indices of `a` are -1..+1"));
+        assert!(err_in("sym a[]: int = {1, 2, 3}; x: int = a[2]; burn a;").contains("valid indices of `a` are -1..+1"));
         assert!(err_in("a[]: int = claim 4; a[4] = 1; burn a;").contains("are 0..3"));
-        assert!(err_in("a[]: int = {1}; x := a[-1]; burn a;").contains("out of bounds"));
-        assert!(err_in("a[]: int = claim 0; x := a[0]; burn a;").contains("it is empty"));
-        ok("sym a[]: int = {1, 2, 3}; x := a[1] + a[-1]; i := 5; burn a; a = claim 11; y := a[5]; burn a;");
-        ok("n := 3; a[]: int = claim n; x := a[7]; burn a;"); // size unknown here: checked at run time
-        assert!(err_in("s := \"hi\"; s[0] = 'A';").contains("text is read-only"));
-        ok("s := \"hi\"; c := s[1]; n := len(s); sym b[]: tryte = claim 3; b[0] = c; burn b;");
+        assert!(err_in("a[]: int = {1}; x: int = a[-1]; burn a;").contains("out of bounds"));
+        assert!(err_in("a[]: int = claim 0; x: int = a[0]; burn a;").contains("it is empty"));
+        ok("sym a[]: int = {1, 2, 3}; x: int = a[1] + a[-1]; i: int = 5; burn a; a = claim 11; y: int = a[5]; burn a;");
+        ok("n: int = 3; a[]: int = claim n; x: int = a[7]; burn a;"); // size unknown here: checked at run time
+        assert!(err_in("s: text = \"hi\"; s[0] = 'A';").contains("text is read-only"));
+        ok("s: text = \"hi\"; c: tryte = s[1]; n: int = len(s); sym b[]: tryte = claim 3; b[0] = c; burn b;");
     }
 
     #[test]
     fn calls() {
         let defs = "proc take(own sym b[]: int) { burn b; } proc peek(lent sym v[]: int) -> int { return v[0]; }";
         assert!(err_of(&format!("{defs} proc main() {{ sym b[]: int = claim 3; take(b); }}")).contains("pass it with `give b`"));
-        assert!(err_of(&format!("{defs} proc main() {{ sym b[]: int = claim 3; x := peek(b); }}")).contains("pass it with `lend b`"));
-        assert!(err_of(&format!("{defs} proc main() {{ x := peek(); }}")).contains("takes 1 argument, found 0"));
+        assert!(err_of(&format!("{defs} proc main() {{ sym b[]: int = claim 3; x: int = peek(b); }}")).contains("pass it with `lend b`"));
+        assert!(err_of(&format!("{defs} proc main() {{ x: int = peek(); }}")).contains("takes 1 argument, found 0"));
         assert!(err_of("proc mk() -> sym int[] { sym b[]: int = claim 1; return b; } proc main() { mk(); }").contains("would be lost"));
-        assert!(err_in("x := 1; x + 1;").contains("does nothing"));
-        assert!(err_in("x := print(\"a\");").contains("has no value"));
+        assert!(err_in("x: int = 1; x + 1;").contains("does nothing"));
+        assert!(err_in("x: int = print(\"a\");").contains("no value"));
         assert!(err_in("emit(1000);").contains("does not fit in a tryte"));
-        ok("emit('A'); print(1.5); printl(\"hi\"); printl(); print(1 + 2); x := input(); dump(\"here\");");
+        ok("emit('A'); print(1.5); printl(\"hi\"); printl(); print(1 + 2); x: int = input(); dump(\"here\");");
     }
 
     #[test]
@@ -2001,63 +2632,63 @@ proc main() -> int {
     #[test]
     fn enum_checks() {
         let e = |src: &str| err_of(src);
-        assert!(e("enum A { X, Y } proc main() { a := A.Z; }").contains("has no value `Z`"));
+        assert!(e("enum A { X, Y } proc main() { a: A = A.Z; }").contains("has no value `Z`"));
         assert!(e("enum A { X, Y = 0 } proc main() {}").contains("both have the value 0"));
         assert!(e("enum A { X } enum A { Y } proc main() {}").contains("defined twice"));
         assert!(e("proc main() { c: Cor = 1; }").contains("unknown type `Cor`"));
         assert!(e("enum A { X } proc main() { a: A = 0; }").contains("expected A, found int"));
         assert!(e("enum A { X } enum B { Y } proc main() { t: trit = A.X == B.Y; }").contains("cannot compare A with B"));
         assert!(e("enum A { X } proc main() { printf(\"%d\", A.X); }").contains("cast it"));
-        assert!(e("proc main() { x := 1; y := x.z; }").contains("int has no fields"));
+        assert!(e("proc main() { x: int = 1; y: int = x.z; }").contains("int has no fields"));
         assert!(e("proc main() { match 5 { 1 => print(1); } }").contains("needs an `else` arm"));
         assert!(e("proc main() { match 5 { else => print(1); 1 => print(2); } }").contains("must be the last"));
         assert!(e("proc main() { match 5 { 1 | 1 => print(1); else => {} } }").contains("already appears"));
-        assert!(e("proc main() { x := 2; match 5 { x => print(1); else => {} } }").contains("must be a literal or an enum value"));
-        assert!(check_src("enum A { X, Y } proc f(a: A) -> A { return a; } proc main() { b := f(A.Y); print(b); }").is_ok());
+        assert!(e("proc main() { x: int = 2; match 5 { x => print(1); else => {} } }").contains("must be a literal or an enum value"));
+        assert!(check_src("enum A { X, Y } proc f(a: A) -> A { return a; } proc main() { b: A = f(A.Y); print(b); }").is_ok());
     }
 
     #[test]
     fn if_checks() {
-        ok("x := 1; if x > 0 { print(x); } else if x == 0 { } else { print(-x); }");
-        assert!(err_in("x := 1; if x { }").contains("`if` needs a bool, found int"));
-        assert!(err_in("x := 1; y := !x;").contains("`!` works on bools and trits"));
-        assert!(err_in("x := 1; while x { }").contains("`while` needs a bool, found int"));
-        ok("i := 0; while i < 3 { i = i + 1; }");
-        assert!(err_in("x := 1; t: trit = x == \"a\";").contains("compared with text, found int"));
-        assert!(err_in("x := 1.5; t: trit = x < 2;").contains("integer literal where a real is expected"));
+        ok("x: int = 1; if x > 0 { print(x); } else if x == 0 { } else { print(-x); }");
+        assert!(err_in("x: int = 1; if x { }").contains("`if` needs a bool, found int"));
+        assert!(err_in("x: int = 1; y: int = !x;").contains("`!` works on bools and trits"));
+        assert!(err_in("x: int = 1; while x { }").contains("`while` needs a bool, found int"));
+        ok("i: int = 0; while i < 3 { i = i + 1; }");
+        assert!(err_in("x: int = 1; t: trit = x == \"a\";").contains("compared with text, found int"));
+        assert!(err_in("x: real = 1.5; t: trit = x < 2;").contains("integer literal where a real is expected"));
     }
 
     #[test]
     fn print_buffers() {
-        ok("sym b[]: int = claim 3; sym t[]: tryte = claim 1; printl(b); printf(\"{b} {b:t} %v {t:c} %c\", b, t); s := toText(b, 'v'); burn b; burn t;");
+        ok("sym b[]: int = claim 3; sym t[]: tryte = claim 1; printl(b); printf(\"{b} {b:t} %v {t:c} %c\", b, t); s: text = toText(b, 'v'); burn b; burn t;");
         assert!(err_in("sym b[]: int = claim 3; printf(\"{b:c}\"); burn b;").contains("found an array of int"));
         assert!(err_in("sym b[]: int = claim 3; printf(\"%f\", b); burn b;").contains("prints a real"));
     }
 
     #[test]
     fn final_locals() {
-        ok("final x: int = input(); final y := x + 1; print(y);");
+        ok("final x: int = input(); final y: int = x + 1; print(y);");
         ok("final sym b[]: int = claim 3; b[0] = 5; burn b;");
-        ok("final x := 1; tri x <=> 0 { - => {} 0 => {} + => { x := 2; print(x); } }");
-        assert!(err_in("final x := 1; x = 2;").contains("`x` is final and cannot change"));
-        assert!(err_in("final x := 1; x += 2;").contains("is final"));
-        assert!(err_in("final x := 1; x := 2;").contains("cannot be declared again"));
+        ok("final x: int = 1; tri x <=> 0 { - => {} 0 => {} + => { x: int = 2; print(x); } }");
+        assert!(err_in("final x: int = 1; x = 2;").contains("`x` is final and cannot change"));
+        assert!(err_in("final x: int = 1; x += 2;").contains("is final"));
+        assert!(err_in("final x: int = 1; x: int = 2;").contains("cannot be declared again"));
     }
 
     #[test]
     fn to_text_checks() {
-        ok("n: int = 5; a := toText(n); b: text = toText(n, 't'); c := toText(1.5); print(\"x\" + toText(n, 'v'));");
-        assert!(err_in("x := toText(1.5, 't');").contains("takes an integer, found real"));
-        assert!(err_in("x := toText(\"a\");").contains("takes a number, found text"));
-        assert!(err_in("x := toText(5, 'x');").contains("must be 't' (ternary) or 'v'"));
-        assert!(err_in("x := toText();").contains("1 or 2 arguments"));
+        ok("n: int = 5; a: text = toText(n); b: text = toText(n, 't'); c: text = toText(1.5); print(\"x\" + toText(n, 'v'));");
+        assert!(err_in("x: text = toText(1.5, 't');").contains("takes an integer, found real"));
+        assert!(err_in("x: text = toText(\"a\");").contains("takes a number, found text"));
+        assert!(err_in("x: text = toText(5, 'x');").contains("must be 't' (ternary) or 'v'"));
+        assert!(err_in("x: text = toText();").contains("1 or 2 arguments"));
     }
 
     #[test]
     fn text_concat() {
         ok("name: text = \"Ana\"; print(\"hi \" + name + \"!\\n\");");
-        assert!(err_in("x := 5; print(\"x = \" + x);").contains("joins text with text only, found int"));
-        ok("t := \"a\" + \"b\"; u: text = t + t; same: trit = t == u;");
+        assert!(err_in("x: int = 5; print(\"x = \" + x);").contains("joins text with text only, found int"));
+        ok("t: text = \"a\" + \"b\"; u: text = t + t; same: trit = t == u;");
         assert!(err_in("print(\"a\" + 1.5);").contains("found real"));
     }
 
@@ -2067,15 +2698,15 @@ proc main() -> int {
         assert!(err_of("proc main(x: int) {}").contains("cannot take parameters"));
         assert!(err_of("proc f() {} proc f() {} proc main() {}").contains("defined twice"));
         assert!(err_of("proc print() {} proc main() {}").contains("built-in"));
-        assert!(err_of("proc f() -> int { x := 1; } proc main() {}").contains("must end with `return`"));
-        assert!(err_in("return; x := 1;").contains("unreachable code"));
-        assert!(err_in("x := input() on NaT { print(\"bad\"); };").contains("must end with `return`"));
-        ok("x := input() on NaT { return; }; print(x);");
+        assert!(err_of("proc f() -> int { x: int = 1; } proc main() {}").contains("must end with `return`"));
+        assert!(err_in("return; x: int = 1;").contains("unreachable code"));
+        assert!(err_in("x: int = input() on NaT { print(\"bad\"); };").contains("must end with `return`"));
+        ok("x: int = input() on NaT { return; }; print(x);");
     }
 
     #[test]
     fn consts() {
-        let hir = check_src("const LIMIT: tryte = -100; const NAME: text = \"Kestrel\"; proc main() { x := LIMIT; print(NAME); }").unwrap();
+        let hir = check_src("const LIMIT: tryte = -100; const NAME: text = \"Kestrel\"; proc main() { x: tryte = LIMIT; print(NAME); }").unwrap();
         assert_eq!(hir.procs[0].locals[0].ty, Type::Scalar(Scalar::Tryte));
         assert!(err_of("const X: int = 1 + 2; proc main() {}").contains("must be a literal"));
     }

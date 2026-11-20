@@ -11,7 +11,7 @@ use crate::diag::{Diagnostic, Span};
 use crate::lexer::{Tok, Token};
 
 pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
-    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0 };
+    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0, class: None };
     let mut items = Vec::new();
     while p.peek() != &Tok::Eof {
         items.push(p.item()?);
@@ -21,7 +21,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
 
 /// One expression and nothing else (the `{...}` of a `printf` format).
 pub fn parse_expr(tokens: Vec<Token>) -> Result<Expr, Diagnostic> {
-    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0 };
+    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0, class: None };
     let e = p.expr()?;
     if p.peek() != &Tok::Eof {
         return Err(p.unexpected("the end of `{...}`"));
@@ -38,6 +38,8 @@ struct Parser {
     /// How deep the code being parsed is nested (blocks, parentheses,
     /// operators). Bounded so deep input gives an error, not a stack overflow.
     depth: u32,
+    /// The class whose body is being parsed (methods may take `self`).
+    class: Option<&'static str>,
 }
 
 /// Nesting limit, like rustc's `recursion_limit`.
@@ -114,7 +116,15 @@ impl Parser {
             Tok::Const => self.const_decl().map(Item::Const),
             Tok::Enum => self.enum_decl().map(Item::Enum),
             Tok::Struct => self.struct_decl().map(Item::Struct),
-            _ => Err(self.unexpected("`proc`, `const`, `enum` or `struct`")),
+            Tok::Interface => self.interface_decl().map(Item::Interface),
+            Tok::Class | Tok::At => {
+                let annotations = self.annotations()?;
+                if self.peek() != &Tok::Class {
+                    return Err(self.unexpected("`class` after the annotations"));
+                }
+                self.class_decl(annotations).map(Item::Class)
+            }
+            _ => Err(self.unexpected("`proc`, `const`, `enum`, `struct`, `class` or `interface`")),
         }
     }
 
@@ -129,11 +139,69 @@ impl Parser {
         Ok(ConstDecl { name, ty, value })
     }
 
+    /// `@name` / `@name(A, B)`, any number of them.
+    fn annotations(&mut self) -> PResult<Vec<Annotation>> {
+        let mut out = Vec::new();
+        while self.eat(&Tok::At) {
+            let name = self.ident()?;
+            let mut args = Vec::new();
+            if self.eat(&Tok::LParen) {
+                while self.peek() != &Tok::RParen {
+                    args.push(self.ident()?);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RParen)?;
+            }
+            out.push(Annotation { name, args });
+        }
+        Ok(out)
+    }
+
+    /// `class Name { [public|private] field: T; ... [public|private] proc m(...) { } }`
+    fn class_decl(&mut self, annotations: Vec<Annotation>) -> PResult<ClassDecl> {
+        self.expect(Tok::Class)?;
+        let name = self.ident()?;
+        self.expect(Tok::LBrace)?;
+        let outer = self.class.replace(intern(&name.name));
+        let (mut fields, mut methods) = (Vec::new(), Vec::new());
+        let result = (|| {
+            while self.peek() != &Tok::RBrace {
+                let anns = self.annotations()?;
+                let public = if self.eat(&Tok::Public) {
+                    true
+                } else {
+                    self.eat(&Tok::Private);
+                    false
+                };
+                if self.peek() == &Tok::Proc {
+                    methods.push(MethodDecl { decl: self.proc_decl()?, public, annotations: anns });
+                    continue;
+                }
+                if let Some(a) = anns.first() {
+                    return Err(Diagnostic::new("annotations go on methods or on the class", a.name.span));
+                }
+                let sym_span = self.span();
+                let sym = self.eat(&Tok::Sym);
+                let (fname, ty) = self.typed_name(sym, sym_span)?;
+                self.expect(Tok::Semi)?;
+                fields.push(FieldDecl { name: fname, ty, public });
+            }
+            Ok(())
+        })();
+        self.class = outer;
+        result?;
+        self.expect(Tok::RBrace)?;
+        Ok(ClassDecl { name, annotations, fields, methods })
+    }
+
     fn proc_decl(&mut self) -> PResult<ProcDecl> {
         self.expect(Tok::Proc)?;
         let name = self.ident()?;
         self.expect(Tok::LParen)?;
         let mut params = Vec::new();
+        let mut this = None;
         while self.peek() != &Tok::RParen {
             // `lent v[]: int` borrows an array, `own v[]: int` takes it (`give`).
             let mode_span = self.span();
@@ -141,31 +209,90 @@ impl Parser {
                 Tok::Lent | Tok::Own => Some(self.bump().tok.clone()),
                 _ => None,
             };
+            // A method's first parameter may be `lent self` or `own self`.
+            if self.peek() == &Tok::Ident("self".into()) {
+                let at = self.span();
+                if self.class.is_none() || !params.is_empty() || this.is_some() {
+                    return Err(Diagnostic::new("`self` can only be the first parameter of a method", at));
+                }
+                this = Some(match mode {
+                    Some(Tok::Lent) => SelfMode::Lent,
+                    Some(_) => SelfMode::Own,
+                    None => {
+                        return Err(Diagnostic::new("say how the method takes the object", at)
+                            .with_note("`lent self` uses it, `own self` consumes it"));
+                    }
+                });
+                self.bump();
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+                continue;
+            }
             let sym_span = self.span();
             let sym = self.eat(&Tok::Sym);
             let (pname, mut ty) = self.typed_name(sym, sym_span)?;
+            let pmode = match mode {
+                Some(Tok::Lent) => Some(SelfMode::Lent),
+                Some(_) => Some(SelfMode::Own),
+                None => None,
+            };
             match (mode, ty.ty) {
                 (Some(Tok::Lent), Type::Own(b)) => ty.ty = Type::Lent(b),
                 (Some(Tok::Own), Type::Own(_)) => {}
+                // An object (checked later: the name must be a class).
+                (Some(Tok::Lent), Type::Named(n)) => ty.ty = Type::LentNamed(n),
+                (Some(Tok::Own), Type::Named(_)) => {}
                 (None, Type::Own(_)) => {
                     return Err(Diagnostic::new("an array parameter needs `lent` or `own`", pname.span)
                         .with_note(format!("`lent {0}[]: ...` borrows it, `own {0}[]: ...` takes it", pname.name)));
                 }
                 (Some(_), _) => {
-                    return Err(Diagnostic::new("`lent` and `own` only apply to arrays", mode_span)
+                    return Err(Diagnostic::new("`lent` and `own` only apply to arrays and objects", mode_span)
                         .with_note(format!("write `{}[]: ...`", pname.name)));
                 }
                 (None, _) => {}
             }
-            params.push(Param { name: pname, ty });
+            params.push(Param { name: pname, ty, mode: pmode });
             if !self.eat(&Tok::Comma) {
                 break;
             }
         }
         self.expect(Tok::RParen)?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
+        // In an interface, a method ends with `;`: it has no body.
+        if self.class.is_some_and(|c| c.starts_with('@')) {
+            let at = self.expect(Tok::Semi)?;
+            return Ok(ProcDecl { name, this, params, ret, body: Block { stmts: Vec::new(), span: at } });
+        }
         let body = self.block()?;
-        Ok(ProcDecl { name, params, ret, body })
+        Ok(ProcDecl { name, this, params, ret, body })
+    }
+
+    /// `interface Name { proc m(lent self, ...) -> T; ... }`
+    fn interface_decl(&mut self) -> PResult<InterfaceDecl> {
+        self.expect(Tok::Interface)?;
+        let name = self.ident()?;
+        self.expect(Tok::LBrace)?;
+        // `@` marks "inside an interface" for `proc_decl` (methods have no body).
+        let outer = self.class.replace(intern(&format!("@{}", name.name)));
+        let mut methods = Vec::new();
+        let result = (|| {
+            while self.peek() != &Tok::RBrace {
+                if matches!(self.peek(), Tok::Public | Tok::Private) {
+                    return Err(Diagnostic::new("interface methods are always public", self.span()));
+                }
+                if self.peek() != &Tok::Proc {
+                    return Err(self.unexpected("`proc`").with_note("an interface only lists methods: `proc area(lent self) -> real;`"));
+                }
+                methods.push(self.proc_decl()?);
+            }
+            Ok(())
+        })();
+        self.class = outer;
+        result?;
+        self.expect(Tok::RBrace)?;
+        Ok(InterfaceDecl { name, methods })
     }
 
     /// `[sym] name[]: T` (array) or `name: T`, as in declarations and
@@ -277,6 +404,7 @@ impl Parser {
                         .unexpected("a type")
                         .with_note("arrays are declared on the name: `x[]: int`, or `lent v[]: int` for a parameter"));
                 }
+                Tok::Eq => return Err(self.unexpected("a type").with_note("every variable has its type written: `x: int = 5;`")),
                 _ => return Err(self.unexpected("a type")),
             }
         };
@@ -389,11 +517,11 @@ impl Parser {
         Ok(kind)
     }
 
-    /// True at the start of a declaration: `x: T`, `x := e`, `x[]: T` or `sym x[]: T`.
+    /// True at the start of a declaration: `x: T`, `x[]: T` or `sym x[]: T`.
     fn at_declaration(&self) -> bool {
         match (self.peek(), self.peek_at(1)) {
             (Tok::Sym, _) => true,
-            (Tok::Ident(_), Tok::Colon | Tok::ColonEq) => true,
+            (Tok::Ident(_), Tok::Colon) => true,
             (Tok::Ident(_), Tok::LBracket) => self.peek_at(2) == &Tok::RBracket,
             _ => false,
         }
@@ -402,16 +530,14 @@ impl Parser {
     fn let_stmt(&mut self) -> PResult<StmtKind> {
         let sym_span = self.span();
         let sym = self.eat(&Tok::Sym);
-        let (name, ty) = if !sym && self.peek_at(1) == &Tok::ColonEq {
-            let name = self.ident()?;
-            self.bump();
-            (name, None)
-        } else {
-            let (name, ty) = self.typed_name(sym, sym_span)?;
-            self.expect(Tok::Eq)?;
-            (name, Some(ty))
-        };
-        let value = self.expr()?;
+        let (name, ty) = self.typed_name(sym, sym_span)?;
+        // `x: int;` declares without a value.
+        if self.peek() == &Tok::Semi {
+            return Ok(StmtKind::Let { is_final: false, name, ty: Some(ty), value: None, on_nat: None });
+        }
+        self.expect(Tok::Eq)?;
+        let ty = Some(ty);
+        let value = Some(self.expr()?);
         let on_nat = if self.eat(&Tok::On) {
             self.expect(Tok::NaT)?;
             Some(self.block()?)
@@ -435,39 +561,32 @@ impl Parser {
         };
         let op_span = self.bump().span;
         let target = lhs.clone();
-        // `p.a.b = ...`: peel the fields off, outermost last.
-        let span = lhs.span;
-        let mut fields = Vec::new();
-        let mut base = lhs;
-        while let ExprKind::Member(inner, field) = base.kind {
-            fields.push(field);
-            base = *inner;
-        }
-        fields.reverse();
-        let place = match base.kind {
-            ExprKind::Var(name) => Place { name: Ident { name, span: base.span }, index: None, fields, span },
-            ExprKind::Index(arr, idx) => match arr.kind {
-                ExprKind::Var(name) => Place { name: Ident { name, span: arr.span }, index: Some(*idx), fields, span },
-                _ => return Err(Diagnostic::new("only a variable can be indexed on the left of `=`", arr.span)),
-            },
-            _ => {
-                return Err(Diagnostic::new("cannot assign to this expression", span)
-                    .with_note("the left side of `=` must be a variable, `array[index]` or a field like `p.x`"));
+        // The target is a variable, `v[i]`, `p.x`, or a chain of them (`a[i].b`).
+        fn is_place(e: &Expr) -> bool {
+            match &e.kind {
+                ExprKind::Var(_) => true,
+                ExprKind::Index(base, _) | ExprKind::Member(base, _) => is_place(base),
+                _ => false,
             }
-        };
+        }
+        if !is_place(&lhs) {
+            return Err(Diagnostic::new("cannot assign to this expression", lhs.span)
+                .with_note("the left side of `=` must be a variable, `array[index]` or a field like `p.x`"));
+        }
+        let span = lhs.span;
         let value = match (compound, op_tok) {
             (None, _) => self.expr()?,
             (Some(op), Tok::PlusPlus | Tok::MinusMinus) => {
                 let one = Expr { kind: ExprKind::Num(Word::ONE), span: op_span };
-                Expr { kind: ExprKind::Binary(op, Box::new(target), Box::new(one)), span: place.span.to(op_span) }
+                Expr { kind: ExprKind::Binary(op, Box::new(target), Box::new(one)), span: span.to(op_span) }
             }
             (Some(op), _) => {
                 let rhs = self.expr()?;
-                let span = place.span.to(rhs.span);
+                let span = span.to(rhs.span);
                 Expr { kind: ExprKind::Binary(op, Box::new(target), Box::new(rhs)), span }
             }
         };
-        Ok(StmtKind::Assign { place, value })
+        Ok(StmtKind::Assign { target: lhs, value })
     }
 
     fn if_stmt(&mut self) -> PResult<StmtKind> {
@@ -560,7 +679,7 @@ impl Parser {
         Ok(StmtKind::Tri { head, neg: neg.unwrap(), zero: zero.unwrap(), pos: pos.unwrap() })
     }
 
-    /// `for i := 0; i < n; i++ { ... }`
+    /// `for i: int = 0; i < n; i++ { ... }`
     fn for_stmt(&mut self) -> PResult<StmtKind> {
         self.expect(Tok::For)?;
         let start = self.span();
@@ -569,7 +688,6 @@ impl Parser {
         let typed = matches!((self.peek(), self.peek_at(1)), (Tok::Ident(_), Tok::Colon));
         if !typed {
             let note = match (self.peek(), self.peek_at(1)) {
-                (_, Tok::ColonEq) => "`:=` is not allowed here: write the type, as in `for i: int = 0; ...`".to_string(),
                 (_, Tok::Eq) => {
                     "a `for` cannot reuse an outside variable: declare a new one, as in `for i: int = 0; ...`".to_string()
                 }
@@ -757,12 +875,39 @@ impl Parser {
                 e = Expr { kind: ExprKind::Index(Box::new(e), Box::new(idx)), span };
             } else if self.eat(&Tok::Dot) {
                 let field = self.ident()?;
+                if self.eat(&Tok::LParen) {
+                    let (args, close) = self.call_args()?;
+                    let span = e.span.to(close);
+                    e = Expr { kind: ExprKind::MethodCall { recv: Box::new(e), name: field, args }, span };
+                    continue;
+                }
                 let span = e.span.to(field.span);
                 e = Expr { kind: ExprKind::Member(Box::new(e), field), span };
             } else {
                 return Ok(e);
             }
         }
+    }
+
+    /// Arguments after `(`, up to and including `)`. `a..b` is allowed (for `replace`).
+    fn call_args(&mut self) -> PResult<(Vec<Expr>, Span)> {
+        let mut args = Vec::new();
+        while self.peek() != &Tok::RParen {
+            let a = self.nested_expr()?;
+            let a = if self.eat(&Tok::DotDot) {
+                let b = self.nested_expr()?;
+                let span = a.span.to(b.span);
+                Expr { kind: ExprKind::Range(Box::new(a), Box::new(b)), span }
+            } else {
+                a
+            };
+            args.push(a);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        let close = self.expect(Tok::RParen)?;
+        Ok((args, close))
     }
 
     /// `Name { a: 1, b: 2 }`, after the name.
@@ -830,32 +975,29 @@ impl Parser {
                 let span = start.to(size.span);
                 return Ok(Expr { kind: ExprKind::Claim(Box::new(size)), span });
             }
-            Tok::Give | Tok::Lend => {
-                let give = self.bump().tok == Tok::Give;
+            Tok::Give => {
+                self.bump();
                 let name = self.ident()?;
                 let span = start.to(name.span);
-                let kind = if give { ExprKind::Give(name) } else { ExprKind::Lend(name) };
-                return Ok(Expr { kind, span });
+                return Ok(Expr { kind: ExprKind::Give(name), span });
+            }
+            Tok::Lend => {
+                // `lend x` or `lend a.b.c` (an array or object held in a field).
+                self.bump();
+                let mut path = Expr { kind: ExprKind::Var(self.ident()?.name), span: self.tokens[self.pos - 1].span };
+                while self.peek() == &Tok::Dot && matches!(self.peek_at(1), Tok::Ident(_)) && self.peek_at(2) != &Tok::LParen {
+                    self.bump();
+                    let field = self.ident()?;
+                    let span = path.span.to(field.span);
+                    path = Expr { kind: ExprKind::Member(Box::new(path), field), span };
+                }
+                let span = start.to(path.span);
+                return Ok(Expr { kind: ExprKind::Lend(Box::new(path)), span });
             }
             Tok::Ident(name) => {
                 let name = Ident { name, span: self.bump().span };
                 if self.eat(&Tok::LParen) {
-                    let mut args = Vec::new();
-                    while self.peek() != &Tok::RParen {
-                        let a = self.nested_expr()?;
-                        let a = if self.eat(&Tok::DotDot) {
-                            let b = self.nested_expr()?;
-                            let span = a.span.to(b.span);
-                            Expr { kind: ExprKind::Range(Box::new(a), Box::new(b)), span }
-                        } else {
-                            a
-                        };
-                        args.push(a);
-                        if !self.eat(&Tok::Comma) {
-                            break;
-                        }
-                    }
-                    let close = self.expect(Tok::RParen)?;
+                    let (args, close) = self.call_args()?;
                     return Ok(Expr { kind: ExprKind::Call { name, args }, span: start.to(close) });
                 }
                 // `Name { field: ...`: a struct value (never in a head, where `{` opens the body).
@@ -916,7 +1058,10 @@ mod tests {
             }
             ExprKind::Claim(n) => format!("(claim {})", sx(n)),
             ExprKind::Give(n) => format!("(give {})", n.name),
-            ExprKind::Lend(n) => format!("(lend {})", n.name),
+            ExprKind::Lend(n) => format!("(lend {})", sx(n)),
+            ExprKind::MethodCall { recv, name, args } => {
+                format!("{}.{}({})", sx(recv), name.name, args.iter().map(sx).collect::<Vec<_>>().join(", "))
+            }
             ExprKind::Range(a, b) => format!("{}..{}", sx(a), sx(b)),
             ExprKind::StructLit { name, fields } => {
                 let fs: Vec<String> = fields.iter().map(|(f, e)| format!("{}: {}", f.name, sx(e))).collect();
@@ -952,9 +1097,9 @@ mod tests {
     #[test]
     fn trit_literals() {
         let stmts = body("t: trit = +; u: trit = -; f(-, +);");
-        let StmtKind::Let { value, .. } = &stmts[0] else { panic!() };
+        let StmtKind::Let { value: Some(value), .. } = &stmts[0] else { panic!() };
         assert_eq!(sx(value), "1");
-        let StmtKind::Let { value, .. } = &stmts[1] else { panic!() };
+        let StmtKind::Let { value: Some(value), .. } = &stmts[1] else { panic!() };
         assert_eq!(sx(value), "-1");
         let StmtKind::Expr(e) = &stmts[2] else { panic!() };
         assert_eq!(sx(e), "f(-1, 1)");
@@ -962,10 +1107,10 @@ mod tests {
 
     #[test]
     fn declarations() {
-        let stmts = body("acc: int = 0; y := claim 2 * k + 1; s: int = f() on NaT { return; };");
+        let stmts = body("acc: int = 0; y[]: int = claim 2 * k + 1; s: int = f() on NaT { return; };");
         let StmtKind::Let { name, ty, .. } = &stmts[0] else { panic!() };
         assert_eq!((name.name.as_str(), ty.unwrap().ty), ("acc", Type::Scalar(Scalar::Int)));
-        let StmtKind::Let { ty: None, value, .. } = &stmts[1] else { panic!() };
+        let StmtKind::Let { ty: Some(_), value: Some(value), .. } = &stmts[1] else { panic!() };
         assert_eq!(sx(value), "(claim (+ (* 2 k) 1))");
         let StmtKind::Let { on_nat: Some(b), .. } = &stmts[2] else { panic!() };
         assert_eq!(b.stmts[0].kind, StmtKind::Return(None));
@@ -974,8 +1119,8 @@ mod tests {
     #[test]
     fn assignment() {
         let stmts = body("x = 1; b[-1] = 2; add(1, 2); x += 3; b[0]++;");
-        assert!(matches!(&stmts[0], StmtKind::Assign { place, .. } if place.index.is_none()));
-        assert!(matches!(&stmts[1], StmtKind::Assign { place, .. } if place.index.is_some()));
+        assert!(matches!(&stmts[0], StmtKind::Assign { target, .. } if matches!(target.kind, ExprKind::Var(_))));
+        assert!(matches!(&stmts[1], StmtKind::Assign { target, .. } if matches!(target.kind, ExprKind::Index(..))));
         assert!(matches!(&stmts[2], StmtKind::Expr(Expr { kind: ExprKind::Call { .. }, .. })));
         let StmtKind::Assign { value, .. } = &stmts[3] else { panic!() };
         assert_eq!(sx(value), "(+ x 3)");
@@ -1013,9 +1158,9 @@ mod tests {
     fn errors() {
         assert!(parse_err("proc main() { final 5; }").message.contains("after `final`"));
         assert!(parse_err("proc main() { t: trit = 1 < 2 < 3; }").message.contains("cannot be chained"));
-        let d = parse_err("proc main() { x := 1\n y := 2; }");
+        let d = parse_err("proc main() { x: int = 1\n y: int = 2; }");
         assert_eq!(d.message, "expected `;`, found `y`");
-        assert_eq!(d.span.start, "proc main() { x := 1".len());
+        assert_eq!(d.span.start, "proc main() { x: int = 1".len());
 
         assert!(parse_err("proc main() { tri x { - => a; + => b; } }").message.contains("missing the 0 arm"));
         assert!(parse_err("proc main() { tri x { - => a; - => b; 0 => c; + => d; } }").message.contains("appears twice"));
@@ -1025,9 +1170,9 @@ mod tests {
         assert!(e.message.contains("the end of the range"), "{}", e.message);
         assert!(parse_err("proc main() { if {1} { } }").message.contains("expected an expression, found `{`"));
         assert!(parse_err("proc f() -> lent int[] { } proc main() {}").note.unwrap().contains("declared on the name"));
-        assert!(parse_err("proc main() { x := a <=> b <=> c; }").message.contains("cannot be chained"));
-        assert!(parse_err("x := 1;").message.contains("expected `proc`, `const`, `enum` or `struct`"));
-        assert!(parse_err("proc main() { x := ; }").message.contains("expected an expression, found `;`"));
+        assert!(parse_err("proc main() { x: trit = a <=> b <=> c; }").message.contains("cannot be chained"));
+        assert!(parse_err("x: int = 1;").message.contains("expected `proc`, `const`, `enum`, `struct`, `class` or `interface`"));
+        assert!(parse_err("proc main() { x: int = ; }").message.contains("expected an expression, found `;`"));
     }
 
     #[test]

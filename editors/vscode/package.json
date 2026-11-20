@@ -1,0 +1,110 @@
+{
+  "name": "kestrel-lang",
+  "displayName": "Kestrel",
+  "description": "Kestrel language support (.ks): highlighting, snippets and Run",
+  "version": "0.2.0",
+  "publisher": "kestrel",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:kestrel"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "kestrel",
+        "aliases": [
+          "Kestrel",
+          "kestrel"
+        ],
+        "extensions": [
+          ".ks"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/ks-light.svg",
+          "dark": "./icons/ks-dark.svg"
+        }
+      },
+      {
+        "id": "kestrel-bytecode",
+        "aliases": [
+          "Kestrel Bytecode"
+        ],
+        "extensions": [
+          ".ksb"
+        ],
+        "icon": {
+          "light": "./icons/ksb-light.svg",
+          "dark": "./icons/ksb-dark.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "kestrel",
+        "scopeName": "source.kestrel",
+        "path": "./syntaxes/kestrel.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "kestrel",
+        "path": "./snippets/kestrel.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "kestrel.run",
+        "title": "Run Kestrel",
+        "category": "Kestrel",
+        "icon": "$(play)"
+      }
+    ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "kestrel.run",
+          "when": "resourceLangId == kestrel",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "kestrel.run",
+          "when": "resourceLangId == kestrel",
+          "group": "navigation@0"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "kestrel.run",
+          "when": "resourceLangId == kestrel"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "kestrel.run",
+        "key": "ctrl+f5",
+        "when": "editorLangId == kestrel"
+      }
+    ],
+    "configuration": {
+      "title": "Kestrel",
+      "properties": {
+        "kestrel.binDir": {
+          "type": "string",
+          "default": "",
+          "description": "Folder with the ksc and ksvm binaries. Empty: use target/release or target/debug of the workspace, then the PATH."
+        }
+      }
+    }
+  }
+}

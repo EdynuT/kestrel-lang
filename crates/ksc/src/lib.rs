@@ -35,3 +35,4 @@ fn compile_here(src: &str) -> Result<Module, diag::Diagnostic> {
     linear::check(&hir)?;
     codegen::generate(&hir)
 }
+

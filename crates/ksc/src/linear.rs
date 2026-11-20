@@ -19,6 +19,8 @@ enum St {
     Alive,
     Burned,
     Given,
+    /// Declared without a value (`c: Conta;`): owns nothing yet.
+    Empty,
 }
 
 impl St {
@@ -28,7 +30,7 @@ impl St {
     }
 
     fn consumed(self) -> bool {
-        matches!(self, St::Burned | St::Given)
+        matches!(self, St::Burned | St::Given | St::Empty)
     }
 
     fn describe(self) -> &'static str {
@@ -37,6 +39,7 @@ impl St {
             St::Alive => "still owned",
             St::Burned => "burned",
             St::Given => "given away",
+            St::Empty => "without a value",
         }
     }
 }
@@ -70,7 +73,7 @@ fn check_proc(p: &HProc) -> R<()> {
 }
 
 fn is_own(t: Type) -> bool {
-    matches!(t, Type::Own(_))
+    matches!(t, Type::Own(_) | Type::Class(_))
 }
 
 struct Checker<'h> {
@@ -116,6 +119,8 @@ impl Checker<'_> {
             St::Alive | St::Untracked => Ok(()),
             St::Burned => Err(Diagnostic::new(format!("`{}` is used after it was burned", self.name(id)), span)),
             St::Given => Err(Diagnostic::new(format!("`{}` is used after it was given away", self.name(id)), span)),
+            St::Empty => Err(Diagnostic::new(format!("`{}` has no value yet", self.name(id)), span)
+                .with_note(format!("give it one first: `{} = ...;`", self.name(id)))),
         }
     }
 
@@ -151,8 +156,24 @@ impl Checker<'_> {
                         St::Given => {
                             return Err(Diagnostic::new(format!("`{name}` was given away; its name can only be reused after `burn`"), s.span));
                         }
-                        St::Burned | St::Untracked => st[*local] = St::Alive,
+                        St::Burned | St::Untracked | St::Empty => st[*local] = St::Alive,
                     }
+                }
+            }
+            HStmtKind::Declare(local) => {
+                if is_own(self.p.locals[*local].ty) {
+                    st[*local] = St::Empty;
+                    if let Some(l) = self.loops.last_mut() {
+                        l.inner.push(*local);
+                    }
+                }
+            }
+            HStmtKind::SetElem { arr, index, value, .. } => {
+                self.expr(index, &mut st)?;
+                self.expr(value, &mut st)?;
+                match arr.kind {
+                    HExprKind::Local(id) => self.require_alive(id, &st, s.span)?,
+                    _ => self.expr(arr, &mut st)?,
                 }
             }
             HStmtKind::Burn(id) => {
@@ -162,6 +183,10 @@ impl Checker<'_> {
                     St::Burned => {
                         return Err(Diagnostic::new(format!("`{name}` is burned twice"), s.span)
                             .with_note("a buffer can be burned only once"));
+                    }
+                    St::Empty => {
+                        return Err(Diagnostic::new(format!("`{name}` has no value to burn"), s.span)
+                            .with_note(format!("it was declared without one; give it a value first: `{name} = ...;`")));
                     }
                     St::Given | St::Untracked => {
                         return Err(Diagnostic::new(format!("`{name}` was given away and cannot be burned here"), s.span)
@@ -314,20 +339,22 @@ impl Checker<'_> {
                     _ => self.expr(base, st)?,
                 }
             }
-            HExprKind::Call(_, args) => {
-                let lent: Vec<LocalId> =
-                    args.iter().filter_map(|a| if let HExprKind::Lend(id) = a.kind { Some(id) } else { None }).collect();
+            HExprKind::ToIface(inner, _) => self.expr(inner, st)?,
+            HExprKind::DynCall { args, .. } | HExprKind::Call(_, args) => {
+                // What each lent argument borrows from: a local, maybe through
+                // fields (`lend c` and `lend c.items` both borrow from `c`).
+                let lent: Vec<Option<LocalId>> = args.iter().map(lent_root).collect();
                 for (i, a) in args.iter().enumerate() {
                     // Also nested: `f(lend v, g(give v))`.
-                    if let Some((id, at)) = lent.iter().find_map(|&id| gives(a, id).map(|s| (id, s))) {
+                    if let Some((id, at)) = lent.iter().flatten().find_map(|&id| gives(a, id).map(|s| (id, s))) {
                         return Err(Diagnostic::new(format!("`{}` is lent and given away in the same call", self.name(id)), at)
-                            .with_note("the callee would borrow an array it also owns"));
+                            .with_note("the callee would borrow something it also owns"));
                     }
-                    if let HExprKind::Lend(id) = a.kind
-                        && args[..i].iter().any(|b| b.kind == HExprKind::Lend(id))
+                    if let Some(id) = lent[i]
+                        && lent[..i].contains(&Some(id))
                     {
                         return Err(Diagnostic::new(format!("`{}` is lent twice in the same call", self.name(id)), a.span)
-                            .with_note("the proc would see one array under two names: a write through one would change the other"));
+                            .with_note("the proc would see the same data under two names: a write through one would change the other"));
                     }
                     self.expr(a, st)?;
                 }
@@ -345,11 +372,14 @@ impl Checker<'_> {
                 args.iter().try_for_each(|a| self.expr(a, st))?
             }
             HExprKind::Print(pieces) => pieces.iter().try_for_each(|(_, a)| self.expr(a, st))?,
-            HExprKind::StructLit(items) => items.iter().try_for_each(|a| self.expr(a, st))?,
+            HExprKind::StructLit(items) | HExprKind::NewObj(items) => items.iter().try_for_each(|a| self.expr(a, st))?,
             HExprKind::Field(..) => {}
             HExprKind::ElemField(arr, idx, _) => {
                 self.expr(idx, st)?;
-                self.require_alive(*arr, st, e.span)?;
+                match arr.kind {
+                    HExprKind::Local(id) => self.require_alive(id, st, e.span)?,
+                    _ => self.expr(arr, st)?,
+                }
             }
             HExprKind::Bind(_, value, body) => {
                 self.expr(value, st)?;
@@ -360,14 +390,31 @@ impl Checker<'_> {
     }
 }
 
+/// The local a lent argument borrows from (`lend c`, or `c.items` read
+/// through an object), if it is one.
+fn lent_root(e: &HExpr) -> Option<LocalId> {
+    if !matches!(e.ty, Type::Lent(_) | Type::LentClass(_)) {
+        return None;
+    }
+    let mut e = e;
+    loop {
+        match &e.kind {
+            HExprKind::Lend(id) | HExprKind::Local(id) => return Some(*id),
+            HExprKind::ElemField(arr, _, _) | HExprKind::ToIface(arr, _) => e = arr,
+            _ => return None,
+        }
+    }
+}
+
 /// The span of a `give id` inside `e`, if there is one.
 fn gives(e: &HExpr, id: LocalId) -> Option<crate::diag::Span> {
     let sub = |x: &HExpr| gives(x, id);
     match &e.kind {
         HExprKind::Give(g) if *g == id => Some(e.span),
-        HExprKind::Neg(a) | HExprKind::Convert(a) | HExprKind::Claim(a) => sub(a),
+        HExprKind::Neg(a) | HExprKind::Convert(a) | HExprKind::Claim(a) | HExprKind::ToIface(a, _) => sub(a),
+        HExprKind::DynCall { args, .. } => args.iter().find_map(sub),
         HExprKind::Binary(_, a, b) | HExprKind::Index(a, b) | HExprKind::Bind(_, a, b) => sub(a).or_else(|| sub(b)),
-        HExprKind::ElemField(_, a, _) => sub(a),
+        HExprKind::ElemField(a, b, _) => sub(a).or_else(|| sub(b)),
         HExprKind::Call(_, xs) | HExprKind::Builtin(_, xs) | HExprKind::Pack(xs) | HExprKind::StructLit(xs) => xs.iter().find_map(sub),
         HExprKind::Print(ps) => ps.iter().find_map(|(_, x)| sub(x)),
         _ => None,
@@ -428,13 +475,13 @@ proc main() -> int {
 
     #[test]
     fn basic_lifecycle() {
-        ok("sym b[]: int = claim 3; b[0] = 1; x := peek(lend b); burn b;");
+        ok("sym b[]: int = claim 3; b[0] = 1; x: int = peek(lend b); burn b;");
         ok("sym b[]: int = claim 3; take(give b);");
         ok("sym b[]: int = mk(); sym c[]: int = give b; burn c;");
         assert!(err("sym b[]: int = claim 3;").contains("`b` is never burned or given away"));
         assert!(err("sym b[]: int = claim 3; burn b; burn b;").contains("burned twice"));
         assert!(err("sym b[]: int = claim 3; burn b; b[0] = 1;").contains("used after it was burned"));
-        assert!(err("sym b[]: int = claim 3; take(give b); x := b[0];").contains("used after it was given away"));
+        assert!(err("sym b[]: int = claim 3; take(give b); x: int = b[0];").contains("used after it was given away"));
         assert!(err("sym b[]: int = claim 3; take(give b); burn b;").contains("given away and cannot be burned"));
         assert!(err("sym b[]: int = claim 3; take(give b); take(give b);").contains("used after it was given away"));
     }
@@ -457,8 +504,8 @@ proc main() -> int {
 
     #[test]
     fn on_nat_must_clean_up() {
-        ok("sym b[]: int = claim 3; s := peek(lend b) on NaT { burn b; return; }; burn b;");
-        assert!(err("sym b[]: int = claim 3; s := peek(lend b) on NaT { return; }; burn b;").contains("when the proc returns"));
+        ok("sym b[]: int = claim 3; s: int = peek(lend b) on NaT { burn b; return; }; burn b;");
+        assert!(err("sym b[]: int = claim 3; s: int = peek(lend b) on NaT { return; }; burn b;").contains("when the proc returns"));
     }
 
     #[test]

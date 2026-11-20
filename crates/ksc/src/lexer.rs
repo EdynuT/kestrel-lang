@@ -76,6 +76,11 @@ pub enum Tok {
     For,
     Enum,
     Struct,
+    Class,
+    Interface,
+    Public,
+    Private,
+    At,
     Sym,
     Match,
     Dot,
@@ -88,7 +93,6 @@ pub enum Tok {
     PlusPlus,
     MinusMinus,
     Eq,
-    ColonEq,
     Colon,
     Comma,
     Semi,
@@ -128,6 +132,10 @@ const KEYWORDS: &[(&str, Tok)] = &[
     ("for", Tok::For),
     ("enum", Tok::Enum),
     ("struct", Tok::Struct),
+    ("class", Tok::Class),
+    ("interface", Tok::Interface),
+    ("public", Tok::Public),
+    ("private", Tok::Private),
     ("sym", Tok::Sym),
     ("match", Tok::Match),
     ("walk", Tok::Walk),
@@ -166,7 +174,6 @@ const OPERATORS: &[(&str, Tok)] = &[
     ("!=", Tok::NotEq),
     ("&&", Tok::AndAnd),
     ("||", Tok::OrOr),
-    (":=", Tok::ColonEq),
     ("..", Tok::DotDot),
     (".", Tok::Dot),
     ("=>", Tok::FatArrow),
@@ -184,6 +191,7 @@ const OPERATORS: &[(&str, Tok)] = &[
     (",", Tok::Comma),
     (";", Tok::Semi),
     ("|", Tok::Pipe),
+    ("@", Tok::At),
     ("(", Tok::LParen),
     (")", Tok::RParen),
     ("{", Tok::LBrace),
@@ -464,7 +472,7 @@ mod tests {
         assert!(err("0vN").contains("`N` is not a valid digit"));
         assert!(err("0t").contains("no digits"));
         assert!(err("12abc").contains("right after a number"));
-        assert!(err("x: int @R0 = 1;").contains("unexpected character `@`"));
+        assert!(err("x: int $ 1;").contains("unexpected character `$`"));
         assert!(err(r#""a € b""#).contains("'€' is not in the Kestrel character table"));
         assert_eq!(toks(r#""a | b \\ c""#)[0], Tok::Str("a | b \\ c".into()));
         assert!(err(r#""niño""#).contains("'ñ'"));
@@ -479,7 +487,7 @@ mod tests {
 
     #[test]
     fn spans_cover_tokens() {
-        let t = lex("x := 0t+0-;").unwrap();
+        let t = lex("x <= 0t+0-;").unwrap();
         assert_eq!(t[0].span, Span::new(0, 1));
         assert_eq!(t[1].span, Span::new(2, 4));
         assert_eq!(t[2].span, Span::new(5, 10));

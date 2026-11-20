@@ -25,6 +25,8 @@ pub enum Op {
     /// Push the local and poison its slot (ownership transfer).
     Move(Slot),
     Pop,
+    /// Pop a value, push `+1` if it is NaT (no value), `-1` otherwise. Never traps.
+    IsNaT,
 
     // Integer ALU (overflow is NaT)
     Add,
@@ -199,6 +201,7 @@ impl Op {
             Store(_) => 0x04,
             Move(_) => 0x05,
             Pop => 0x06,
+            IsNaT => 0x07,
 
             Add => 0x10,
             Sub => 0x11,
@@ -297,6 +300,7 @@ impl Op {
             Store(_) => "store",
             Move(_) => "move",
             Pop => "pop",
+            IsNaT => "isnat",
             Add => "add",
             Sub => "sub",
             Mul => "mul",
@@ -438,6 +442,7 @@ impl Op {
             0x04 => Store(r.u16()?),
             0x05 => Move(r.u16()?),
             0x06 => Pop,
+            0x07 => IsNaT,
             0x10 => Add,
             0x11 => Sub,
             0x12 => Mul,
@@ -627,7 +632,7 @@ mod tests {
     fn all_ops() -> Vec<Op> {
         use Op::*;
         vec![
-            PushC(7), PushR(70_000), PushS(0), Load(4), Store(9), Move(0), Pop,
+            PushC(7), PushR(70_000), PushS(0), Load(4), Store(9), Move(0), Pop, IsNaT,
             Add, Sub, Mul, Div, Mod, Pow, Neg, Shl3, Shr3, Cmp3, KAnd, KOr, Test(0b101), Soft, Hard, ToBool, Trap(4),
             FAdd, FSub, FMul, FDiv, FPow, FNeg, FCmp3,
             TLen, TIdx, Narrow6, Narrow1, IToF, FToI, TStr, TStrT, TStrV, TCat, TEq, TSub, TToI, TToF, CharIs(2),

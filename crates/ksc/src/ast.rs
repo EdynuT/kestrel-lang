@@ -15,6 +15,53 @@ pub enum Item {
     Proc(ProcDecl),
     Enum(EnumDecl),
     Struct(StructDecl),
+    Class(ClassDecl),
+    Interface(InterfaceDecl),
+}
+
+/// `interface Name { proc m(lent self, ...) -> T; ... }`: methods without bodies.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InterfaceDecl {
+    pub name: Ident,
+    /// Each method's body is empty.
+    pub methods: Vec<ProcDecl>,
+}
+
+/// `@name` or `@name(A, B)` before a declaration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Annotation {
+    pub name: Ident,
+    pub args: Vec<Ident>,
+}
+
+/// `class Name { fields; methods }`: data with methods and an owner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClassDecl {
+    pub name: Ident,
+    pub annotations: Vec<Annotation>,
+    pub fields: Vec<FieldDecl>,
+    pub methods: Vec<MethodDecl>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldDecl {
+    pub name: Ident,
+    pub ty: TypeExpr,
+    pub public: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MethodDecl {
+    pub decl: ProcDecl,
+    pub public: bool,
+    pub annotations: Vec<Annotation>,
+}
+
+/// How a method takes its object: `lent self` (borrows) or `own self` (consumes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelfMode {
+    Lent,
+    Own,
 }
 
 /// `enum Name { A, B = 5, C }`: values count up from 0, or from the last explicit one.
@@ -41,6 +88,9 @@ pub struct ConstDecl {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProcDecl {
     pub name: Ident,
+    /// A method's `lent self` / `own self` (not in `params`); `None` for
+    /// plain procs and static methods.
+    pub this: Option<SelfMode>,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
     pub body: Block,
@@ -50,6 +100,8 @@ pub struct ProcDecl {
 pub struct Param {
     pub name: Ident,
     pub ty: TypeExpr,
+    /// `lent` / `own` as written (arrays and objects need one).
+    pub mode: Option<SelfMode>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,9 +142,18 @@ pub enum Type {
     Enum(&'static str),
     /// A declared struct, by name.
     Struct(&'static str),
-    /// A type name as written; the checker turns it into `Enum` or `Struct`.
-    /// Only produced by the parser.
+    /// An object of a class; it has an owner, like an array.
+    Class(&'static str),
+    /// A borrowed object (`lent c: Conta`, `lent self`).
+    LentClass(&'static str),
+    /// A type name as written; the checker turns it into `Enum`, `Struct`
+    /// or `Class`. Only produced by the parser.
     Named(&'static str),
+    /// `lent x: Name` as written; must name a class or an interface.
+    LentNamed(&'static str),
+    /// A borrowed object seen through an interface (`lent d: Desenhavel`):
+    /// its pointer and the number of its class.
+    LentIface(&'static str),
     /// No value: the result of `print(...)` or of a proc without `->`.
     /// Only produced by the checker, never by the parser.
     Void,
@@ -160,7 +221,9 @@ impl Elem {
             Type::Enum(n) => Elem::Enum(n),
             Type::Struct(n) => Elem::Struct(n),
             Type::Named(n) => Elem::Named(n),
-            Type::Own(_) | Type::Lent(_) | Type::Void => return None,
+            Type::Own(_) | Type::Lent(_) | Type::Void | Type::Class(_) | Type::LentClass(_) | Type::LentNamed(_) | Type::LentIface(_) => {
+                return None;
+            }
         })
     }
 }
@@ -194,7 +257,8 @@ impl std::fmt::Display for Type {
             Type::Text => f.write_str("text"),
             Type::Own(b) => write!(f, "{b}"),
             Type::Lent(b) => write!(f, "lent {b}"),
-            Type::Enum(name) | Type::Struct(name) | Type::Named(name) => f.write_str(name),
+            Type::Enum(name) | Type::Struct(name) | Type::Named(name) | Type::Class(name) => f.write_str(name),
+            Type::LentClass(name) | Type::LentNamed(name) | Type::LentIface(name) => write!(f, "lent {name}"),
             Type::Void => f.write_str("no value"),
         }
     }
@@ -228,16 +292,17 @@ pub struct Stmt {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum StmtKind {
-    /// `x: T @R0 = e on NaT { ... };` or `x := e;`, optionally after `final`.
+    /// `x: T = e on NaT { ... };` or `x: T;` (no value), optionally after `final`.
     Let {
         is_final: bool,
         name: Ident,
         ty: Option<TypeExpr>,
-        value: Expr,
+        /// `None` for `x: int;`: declared without a value (it holds NaT).
+        value: Option<Expr>,
         on_nat: Option<Block>,
     },
-    /// `x = e;` or `b[i] = e;`
-    Assign { place: Place, value: Expr },
+    /// `target = e;`: target is a variable, `v[i]`, `p.x`, or a chain of them.
+    Assign { target: Expr, value: Expr },
     /// `add d, s;`, `add d, a, b;`, `neg d;`, `mov d, s;`
     Burn(Ident),
     Return(Option<Expr>),
@@ -255,15 +320,6 @@ pub enum StmtKind {
     /// `for init; cond; step { }`, like Java's `for` without parentheses.
     For { init: Box<Stmt>, cond: Expr, step: Box<Stmt>, body: Block },
     Expr(Expr),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Place {
-    pub name: Ident,
-    pub index: Option<Expr>,
-    /// `p.a.b = ...`: the fields after the name (and index), outermost first.
-    pub fields: Vec<Ident>,
-    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -308,7 +364,10 @@ pub enum ExprKind {
     Call { name: Ident, args: Vec<Expr> },
     Claim(Box<Expr>),
     Give(Ident),
-    Lend(Ident),
+    /// `lend x`, or `lend self.items` (a path to an array or object).
+    Lend(Box<Expr>),
+    /// `obj.method(args)`, or `Class.method(args)` for a static method.
+    MethodCall { recv: Box<Expr>, name: Ident, args: Vec<Expr> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

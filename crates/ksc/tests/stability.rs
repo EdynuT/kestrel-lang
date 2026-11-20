@@ -41,17 +41,17 @@ proc main() {
     sym s[]: int = {-8, 0, 8};
     for i: int = 0; i < len(a); i++ { if a[i] > 1 && s[0] == 0 { printf("%d ", a[i]); } else { continue; } }
     walk i in span 1 { s[i] += i * 2; }
-    t := "Kes" + "trel"; printl(sub(t, 0, 3) + toText(len(t)));
-    n := 0; while n < 5 { n++; if n == 4 { break; } }
+    t: text = "Kes" + "trel"; printl(sub(t, 0, 3) + toText(len(t)));
+    n: int = 0; while n < 5 { n++; if n == 4 { break; } }
     printf("{n} %s %t %v\n", nome(Cor.Azul), n, n);
-    x := toInt("12") on NaT { burn a; burn s; return; };
-    r := (real) x / 3.0;
+    x: int = toInt("12") on NaT { burn a; burn s; return; };
+    r: real = (real) x / 3.0;
     printl(r);
     burn a; burn s;
 }"#,
     r#"proc fib(n: int) -> int { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
 proc fill(own v[]: int) -> int[] { for i: int = 0; i < len(v); i++ { v[i] = fib(i); } return v; }
-proc soma(lent v[]: int) -> int { s := 0; walk i in 0..len(v) - 1 { s += v[i]; } return s; }
+proc soma(lent v[]: int) -> int { s: int = 0; walk i in 0..len(v) - 1 { s += v[i]; } return s; }
 proc main() -> int {
     b[]: int = claim 8;
     c[]: int = fill(give b);
@@ -65,15 +65,34 @@ proc main() -> int {
 struct Linha { a: Ponto; b: Ponto; nome: text; }
 proc meio(l: Linha) -> Ponto { return Ponto { x: (l.a.x + l.b.x) / 2, y: (l.a.y + l.b.y) / 2 }; }
 proc main() {
-    l := Linha { a: Ponto { x: 0, y: 0 }, b: Ponto { x: 4, y: 8 }, nome: "d" };
-    m := meio(l); l.b.y -= 2; k := l;
+    l: Linha = Linha { a: Ponto { x: 0, y: 0 }, b: Ponto { x: 4, y: 8 }, nome: "d" };
+    m: Ponto = meio(l); l.b.y -= 2; k: Linha = l;
     printl(m); printf("{l} %d %s\n", meio(k).y, l);
     ps[]: Ponto = {m, Ponto { x: 1, y: 2 }}; ps[1].y += ps[0].x;
     ns[]: text = claim 2; ns[0] = l.nome; rs[]: real = {1.5, 2.5};
     printl(ps[1]); printl(ns); printl(rs);
     append(ps, m); insert(rs, 1, 9.0); remove(ns, 0); replace(rs, 0..0, 2..2);
-    q := pop(ps); resize(ns, 3); printl(q, len(ps), rs, ns); clear(ns);
+    q: Ponto = pop(ps); resize(ns, 3); printl(q, len(ps), rs, ns); clear(ns);
     burn ps; burn ns; burn rs;
+}"#,
+    r#"class Pilha {
+    itens[]: int;
+    public topo: int;
+    public proc nova() -> Pilha { return Pilha { itens: {}, topo: 0 }; }
+    public proc por(lent self, x: int) { append(self.itens, x); self.topo = x; }
+    public proc tirar(lent self) -> int { return pop(self.itens); }
+    public proc vazia(lent self) -> bool { return len(self.itens) == 0; }
+    public proc fim(own self) -> int { n: int = len(self.itens); burn self; return n; }
+}
+class Dupla { a: Pilha; b: Pilha;
+    public proc nova() -> Dupla { x: Pilha = Pilha.nova(); y: Pilha = Pilha.nova(); return Dupla { a: give x, b: give y }; }
+    public proc mover(lent self) { while !self.a.vazia() { self.b.por(self.a.tirar()); } }
+    public proc encher(lent self, n: int) { for i: int = 0; i < n; i++ { self.a.por(i * 3); } }
+}
+proc main() {
+    d: Dupla = Dupla.nova(); d.encher(4); d.mover(); printl(d);
+    p: Pilha = Pilha.nova(); p.por(7); printf("{p.topo} %s\n", p.vazia()); k: int = p.fim(); printl(k);
+    burn d;
 }"#,
 ];
 
@@ -81,10 +100,10 @@ proc main() {
 const VOCAB: &[&str] = &[
     "proc", "return", "if", "else", "while", "for", "walk", "in", "span", "tri", "match", "burn", "give", "lend", "claim",
     "sym", "final", "own", "lent", "int", "tryte", "trit", "real", "text", "enum", "NaT", "on", "break", "continue",
-    "{", "}", "(", ")", "[", "]", ";", ",", ".", "..", ":", ":=", "=", "==", "!=", "<", ">", "<=", ">=", "<=>", "+",
+    "{", "}", "(", ")", "[", "]", ";", ",", ".", "..", ":", "=", "==", "!=", "<", ">", "<=", ">=", "<=>", "+",
     "-", "*", "/", "%", "**", "<<", ">>", "&&", "||", "!", "|", "=>", "->", "++", "--", "+=", "0", "1", "-1", "364",
     "3812798742493", "0t+-0", "0vM", "1.5", "'a'", "\"s\"", "x", "a", "i", "main", "print", "printf", "len", "sub",
-    "toText", "toInt", "exit", "bool", "true", "false", "struct", "Ponto", "x:", "append", "pop", "insert", "remove", "resize", "clear", "replace",
+    "toText", "toInt", "exit", "bool", "true", "false", "class", "public", "self", "lent self", "own self", "Pilha", ".", "struct", "Ponto", "x:", "append", "pop", "insert", "remove", "resize", "clear", "replace",
 ];
 
 /// The source text of each token, using the real lexer (comments are dropped).
@@ -226,7 +245,7 @@ fn arithmetic_matches_reference() {
         // `continue` moves on to the next case instead of trapping.
         let body: String = cases
             .iter()
-            .map(|(e, _)| format!("walk k in 0..0 {{ x := {e} on NaT {{ printl(\"NaT\"); continue; }}; printl(x); }}\n"))
+            .map(|(e, _)| format!("walk k in 0..0 {{ x: int = {e} on NaT {{ printl(\"NaT\"); continue; }}; printl(x); }}\n"))
             .collect();
         let src = format!("proc main() {{\n{body}}}");
         let module = ksc::compile(&src).unwrap_or_else(|d| panic!("batch {batch}: {}\n{src}", d.message));

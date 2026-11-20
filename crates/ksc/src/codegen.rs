@@ -20,7 +20,7 @@ pub fn generate(hir: &Hir) -> R<Module> {
     let mut pools = Pools::default();
     let mut functions = Vec::new();
     for p in &hir.procs {
-        functions.push(ProcGen::new(p, &hir.structs, &mut pools)?.run()?);
+        functions.push(ProcGen::new(p, &hir.structs, &hir.classes, &mut pools)?.run()?);
     }
     let m = Module { entry: hir.entry as u32, consts: pools.consts, strings: pools.strings, functions };
     debug_assert_eq!(m.verify(), Ok(()));
@@ -63,6 +63,7 @@ struct LoopLabels {
 struct ProcGen<'a> {
     p: &'a HProc,
     structs: &'a Structs,
+    classes: &'a Structs,
     pools: &'a mut Pools,
     slots: Vec<Slot>,
     names: Vec<String>,
@@ -73,7 +74,7 @@ struct ProcGen<'a> {
 }
 
 impl<'a> ProcGen<'a> {
-    fn new(p: &'a HProc, structs: &'a Structs, pools: &'a mut Pools) -> R<Self> {
+    fn new(p: &'a HProc, structs: &'a Structs, classes: &'a Structs, pools: &'a mut Pools) -> R<Self> {
         // Each local takes as many slots as its type (a struct: one per
         // field). Parameters come first, in order, as the caller pushes them.
         // User variables get the low registers next; walk variables and
@@ -109,7 +110,7 @@ impl<'a> ProcGen<'a> {
             )
             .with_note("each struct field counts as one value"));
         }
-        Ok(ProcGen { p, structs, pools, slots, names, code: Vec::new(), loops: Vec::new(), param_slots })
+        Ok(ProcGen { p, structs, classes, pools, slots, names, code: Vec::new(), loops: Vec::new(), param_slots })
     }
 
     fn width(&self, ty: Type) -> usize {
@@ -124,8 +125,21 @@ impl<'a> ProcGen<'a> {
             HExprKind::Builtin(..) => self.width(e.ty),
             HExprKind::Print(_) => 0,
             HExprKind::Bind(_, _, body) => self.leftover(body),
-            HExprKind::Call(..) if e.ty == Type::Void => 1,
+            HExprKind::Call(..) | HExprKind::DynCall { .. } if e.ty == Type::Void => 1,
             _ => self.width(e.ty),
+        }
+    }
+
+    /// "No value" for a type: NaT in every slot (a real NaT for reals).
+    fn push_nat(&mut self, ty: Type) {
+        match ty {
+            Type::Scalar(Scalar::Real) => self.push_real(Real::NAT),
+            Type::Struct(n) => {
+                for (_, t) in self.structs[n].clone() {
+                    self.push_nat(t);
+                }
+            }
+            _ => self.push_word(Word::NAT),
         }
     }
 
@@ -145,6 +159,27 @@ impl<'a> ProcGen<'a> {
             }
             _ => self.push_word(Word::ZERO),
         }
+    }
+
+    /// Frees what `slot` owns: an object first frees the arrays and objects
+    /// in its fields (each read into a scratch slot), then itself.
+    fn burn(&mut self, slot: Slot, ty: Type) {
+        if let Type::Class(c) = ty {
+            let mut off = 0;
+            for (_, t) in self.classes[c].clone() {
+                if let Type::Own(_) | Type::Class(_) = t {
+                    let tmp = self.names.len() as Slot;
+                    self.names.push("$burn".into());
+                    self.emit(Op::Load(slot));
+                    self.push_word(Word::ZERO);
+                    self.emit(Op::LdElem { off: off as u8, n: 1 });
+                    self.emit(Op::Store(tmp));
+                    self.burn(tmp, t);
+                }
+                off += self.width(t);
+            }
+        }
+        self.emit(Op::Purge(slot));
     }
 
     /// Loads `n` slots starting at `first`.
@@ -311,9 +346,24 @@ impl<'a> ProcGen<'a> {
                     self.emit(Op::StElem { off: *field as u8, n: n as u8 });
                 }
             }
-            HStmtKind::Burn(id) => {
-                self.emit(Op::Purge(self.slot(*id)));
+            HStmtKind::Declare(local) => {
+                // No value yet: every slot holds NaT (set again on each pass of a loop).
+                let ty = self.p.locals[*local].ty;
+                self.push_nat(ty);
+                self.store(self.slot(*local), self.width(ty));
             }
+            HStmtKind::SetElem { arr, index, field, value } => {
+                self.expr(arr)?;
+                self.expr(index)?;
+                self.expr(value)?;
+                let n = self.width(value.ty);
+                if *field == 0 && n == 1 {
+                    self.emit(Op::StIdx);
+                } else {
+                    self.emit(Op::StElem { off: *field as u8, n: n as u8 });
+                }
+            }
+            HStmtKind::Burn(id) => self.burn(self.slot(*id), self.p.locals[*id].ty),
             HStmtKind::Return(v) => {
                 match v {
                     Some(e) => self.expr(e)?,
@@ -478,9 +528,40 @@ impl<'a> ProcGen<'a> {
                 let k = self.pools.string(s);
                 self.emit(Op::PushS(k));
             }
-            HExprKind::Local(id) => self.load(self.slot(*id), self.width(e.ty)),
-            HExprKind::Lend(id) => {
-                self.emit(Op::Load(self.slot(*id)));
+            HExprKind::Local(id) | HExprKind::Lend(id) => self.load(self.slot(*id), self.width(e.ty)),
+            HExprKind::ToIface(obj, tag) => {
+                self.expr(obj)?;
+                self.push_word(Word::new(*tag));
+            }
+            HExprKind::DynCall { recv, impls, args } => {
+                // self, args; then for each class: tag == k ? call K.m : next
+                let s = self.slot(*recv);
+                self.emit(Op::Load(s));
+                for a in args {
+                    self.expr(a)?;
+                }
+                let argc = 1 + args.iter().map(|a| self.width(a.ty)).sum::<usize>();
+                let mut exits = Vec::new();
+                for (tag, pid) in impls {
+                    self.emit(Op::Load(s + 1));
+                    self.push_word(Word::new(*tag));
+                    self.emit(Op::Cmp3);
+                    self.emit(Op::Test(0b010));
+                    let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
+                    let call = self.here();
+                    self.patch(br, 2, call);
+                    self.emit(Op::Call { f: *pid as u32, argc: argc as u8 });
+                    exits.push(self.emit(Op::Jmp(0)));
+                    let next = self.here();
+                    self.patch(br, 0, next);
+                    self.patch(br, 1, next);
+                }
+                let k = self.pools.string("interface call on an object of an unknown class");
+                self.emit(Op::Trap(k));
+                let end = self.here();
+                for at in exits {
+                    self.patch(at, 0, end);
+                }
             }
             HExprKind::Field(id, off) => self.load(self.slot(*id) + *off as Slot, self.width(e.ty)),
             HExprKind::StructLit(items) => {
@@ -584,8 +665,7 @@ impl<'a> ProcGen<'a> {
                     self.expr(idx)?;
                     self.emit(Op::TIdx);
                 } else {
-                    let HExprKind::Local(id) = base.kind else { unreachable!("buffer index base is a local") };
-                    self.emit(Op::Load(self.slot(id)));
+                    self.expr(base)?;
                     self.expr(idx)?;
                     match self.width(e.ty) {
                         1 => self.emit(Op::LdIdx),
@@ -602,6 +682,26 @@ impl<'a> ProcGen<'a> {
             }
             HExprKind::Print(pieces) => {
                 for (fmt, p) in pieces {
+                    if *fmt == Fmt::Quoted {
+                        // text; jnat NAT; "\""; print; print; "\""; print; jmp END; NAT: "NaT"; print; END:
+                        self.expr(p)?;
+                        let jnat = self.emit(Op::JNat(0));
+                        let q = self.pools.string("\"");
+                        self.emit(Op::PushS(q));
+                        self.emit(Op::Print);
+                        self.emit(Op::Print);
+                        self.emit(Op::PushS(q));
+                        self.emit(Op::Print);
+                        let jmp = self.emit(Op::Jmp(0));
+                        let nat = self.here();
+                        self.patch(jnat, 0, nat);
+                        let k = self.pools.string("NaT");
+                        self.emit(Op::PushS(k));
+                        self.emit(Op::Print);
+                        let end = self.here();
+                        self.patch(jmp, 0, end);
+                        continue;
+                    }
                     self.expr(p)?;
                     if p.ty == Type::Void {
                         continue; // a struct, already printed field by field
@@ -612,6 +712,7 @@ impl<'a> ProcGen<'a> {
                         Fmt::Trits => Op::ShowT,
                         Fmt::Hepta => Op::ShowV,
                         Fmt::Char => Op::Emit,
+                        Fmt::Quoted => unreachable!("handled above"),
                     });
                 }
             }
@@ -633,8 +734,10 @@ impl<'a> ProcGen<'a> {
                 });
             }
             HExprKind::Builtin(Builtin::ToText(Fmt::Plain), args) if args[0].ty == Type::Bool => {
-                // `true` / `false`: branch on the value and push the right word.
+                // `true` / `false`: branch on the value and push the right word
+                // (`NaT` for a bool without a value).
                 self.expr(&args[0])?;
+                let jnat = self.emit(Op::JNat(0));
                 let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
                 let mut exits = Vec::new();
                 for (arm, word) in [(0, Some("false")), (1, None), (2, Some("true"))] {
@@ -652,6 +755,10 @@ impl<'a> ProcGen<'a> {
                         }
                     }
                 }
+                let nat = self.here();
+                self.patch(jnat, 0, nat);
+                let k = self.pools.string("NaT");
+                self.emit(Op::PushS(k));
                 let end = self.here();
                 for at in exits {
                     self.patch(at, 0, end);
@@ -663,6 +770,7 @@ impl<'a> ProcGen<'a> {
                 }
                 self.emit(match b {
                     Builtin::Pop => Op::PopEl,
+                    Builtin::IsNaT => Op::IsNaT,
                     Builtin::Remove => Op::Remove,
                     Builtin::Clear => Op::Clear,
                     Builtin::Replace => Op::Replace,
@@ -708,8 +816,17 @@ impl<'a> ProcGen<'a> {
                     w => self.emit(Op::PackT { n, w: w as u8, sym }),
                 };
             }
+            HExprKind::NewObj(values) => {
+                for v in values {
+                    self.expr(v)?;
+                }
+                match values.iter().map(|v| self.width(v.ty)).sum::<usize>() {
+                    1 => self.emit(Op::Pack { n: 1, sym: false }),
+                    w => self.emit(Op::PackT { n: 1, w: w as u8, sym: false }),
+                };
+            }
             HExprKind::ElemField(arr, idx, off) => {
-                self.emit(Op::Load(self.slot(*arr)));
+                self.expr(arr)?;
                 self.expr(idx)?;
                 self.emit(Op::LdElem { off: *off as u8, n: self.width(e.ty) as u8 });
             }
@@ -737,6 +854,10 @@ fn leaf_names(structs: &Structs, ty: Type, name: &str, out: &mut Vec<String>) {
             for (f, t) in &structs[s] {
                 leaf_names(structs, *t, &format!("{name}.{f}"), out);
             }
+        }
+        Type::LentIface(_) => {
+            out.push(name.to_string());
+            out.push(format!("{name}.class"));
         }
         _ => out.push(name.to_string()),
     }

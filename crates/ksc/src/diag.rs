@@ -81,12 +81,12 @@ mod tests {
 
     #[test]
     fn render_points_at_the_span() {
-        let src = "proc main() {\n    x := 1 + ;\n}\n";
+        let src = "proc main() {\n    x: int = 1 + ;\n}\n";
         let at = src.find(';').unwrap();
         let d = Diagnostic::new("expected an expression", Span::new(at, at + 1)).with_note("try `1 + 2`");
         assert_eq!(
             d.render("demo.ks", src),
-            "error: expected an expression\n --> demo.ks:2:14\n  |\n2 |     x := 1 + ;\n  |              ^\n  = note: try `1 + 2`\n"
+            "error: expected an expression\n --> demo.ks:2:18\n  |\n2 |     x: int = 1 + ;\n  |                  ^\n  = note: try `1 + 2`\n"
         );
     }
 }

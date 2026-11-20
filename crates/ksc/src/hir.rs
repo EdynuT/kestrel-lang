@@ -20,6 +20,8 @@ pub struct Hir {
     pub entry: ProcId,
     /// Fields of each struct, in declared order.
     pub structs: Structs,
+    /// Fields of each class, in declared order (`burn` frees what they own).
+    pub classes: Structs,
 }
 
 /// Struct layouts. A struct value is its fields side by side, nested
@@ -32,6 +34,8 @@ pub fn width(structs: &Structs, ty: Type) -> usize {
     match ty {
         Type::Struct(n) => structs[n].iter().map(|(_, t)| width(structs, *t)).sum(),
         Type::Void => 0,
+        // An interface value: the object's pointer and its class number.
+        Type::LentIface(_) => 2,
         _ => 1,
     }
 }
@@ -83,8 +87,13 @@ pub struct HStmt {
 #[derive(Clone, Debug, PartialEq)]
 pub enum HStmtKind {
     Let { local: LocalId, value: HExpr, on_nat: Option<HBlock> },
+    /// `x: T;`: the local holds NaT (no value) until it is assigned.
+    Declare(LocalId),
     /// `x = e`, `b[i] = e`, or a field: `p.x = e` writes at slot offset `field`.
     Assign { local: LocalId, index: Option<HExpr>, field: usize, value: HExpr },
+    /// A cell of an array that is not in a local (one held in a field):
+    /// `arr` gives the pointer.
+    SetElem { arr: HExpr, index: HExpr, field: usize, value: HExpr },
     Burn(LocalId),
     Return(Option<HExpr>),
     Break,
@@ -144,6 +153,8 @@ pub enum Builtin {
     Eof,
     ArgCount,
     Arg,
+    /// `isNaT(x)`: whether `x` has no value.
+    IsNaT,
     /// Arrays that change size; the first argument is the (lent) array.
     Append,
     Pop,
@@ -172,6 +183,9 @@ pub enum Fmt {
     Hepta,
     /// `{x:c}` / `%c`
     Char,
+    /// A text field inside a printed struct or object: `"Ana"` in quotes,
+    /// or `NaT` (no quotes) when it has no value.
+    Quoted,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -201,15 +215,24 @@ pub enum HExprKind {
     Pack(Vec<HExpr>),
     /// `Ponto { x: 1, y: 2 }`: field values in declared order.
     StructLit(Vec<HExpr>),
+    /// A new object (`Conta { ... }` inside its class): field values in
+    /// declared order, stored in a heap block of one element.
+    NewObj(Vec<HExpr>),
     /// A field of a struct local: the slots from this offset on (as many as
     /// the node's type takes).
     Field(LocalId, usize),
     /// Stores the value in a hidden local, then evaluates the body (used to
     /// read fields of a struct that is not in a variable, like `f().x`).
     Bind(LocalId, Box<HExpr>, Box<HExpr>),
-    /// A field of an array element, `pts[i].x`: array local, index, offset
-    /// of the field inside the element.
-    ElemField(LocalId, Box<HExpr>, usize),
+    /// An object seen through an interface: its pointer (the inner
+    /// expression) and its class number.
+    ToIface(Box<HExpr>, i64),
+    /// `d.m(args)` on an interface value (local `recv`): calls the method of
+    /// the object's class, chosen by its class number from `impls`.
+    DynCall { recv: LocalId, impls: Vec<(i64, ProcId)>, args: Vec<HExpr> },
+    /// A field of an array element, `pts[i].x`: the array (a pointer),
+    /// index, offset of the field inside the element.
+    ElemField(Box<HExpr>, Box<HExpr>, usize),
 }
 
 impl HBlock {

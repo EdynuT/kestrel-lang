@@ -240,6 +240,10 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             Op::Pop => {
                 self.pop()?;
             }
+            Op::IsNaT => {
+                let v = self.pop()?;
+                self.push(Value::Word(if v.is_nat() { Word::ONE } else { Word::NEG_ONE }));
+            }
 
             Op::Soft => self.frame().soft = true,
             Op::Hard => self.frame().soft = false,
@@ -592,8 +596,12 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 self.output.write_all(s.as_bytes()).map_err(io_err)?;
             }
             Op::Print => {
-                let t = self.pop_text()?;
-                let s: String = self.texts[t].iter().collect();
+                // A text without a value prints as NaT, like Java prints `null`.
+                let s: String = match self.pop()? {
+                    v if v.is_nat() => "NaT".into(),
+                    Value::Text(t) => self.texts[t as usize].iter().collect(),
+                    other => return Err(format!("expected a text, found {other:?}")),
+                };
                 self.output.write_all(s.as_bytes()).map_err(io_err)?;
             }
             Op::Show | Op::ShowT | Op::ShowV => {
@@ -768,6 +776,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
     fn pop_text(&mut self) -> Result<usize, String> {
         match self.pop()? {
             Value::Text(t) => Ok(t as usize),
+            v if v.is_nat() => Err("use of a text that has no value (NaT)".into()),
             other => Err(format!("expected a text, found {other:?}")),
         }
     }
@@ -775,7 +784,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
     fn pop_ptr(&mut self) -> Result<Ptr, String> {
         match self.pop()? {
             Value::Ptr(p) => Ok(p),
-            v if v.is_nat() => Err("use of a buffer that was burned or given away".into()),
+            v if v.is_nat() => Err("use of an array or object that has no value, or was burned or given away".into()),
             other => Err(format!("expected a buffer, found {other:?}")),
         }
     }

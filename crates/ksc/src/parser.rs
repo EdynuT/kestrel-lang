@@ -982,14 +982,24 @@ impl Parser {
                 return Ok(Expr { kind: ExprKind::Give(name), span });
             }
             Tok::Lend => {
-                // `lend x` or `lend a.b.c` (an array or object held in a field).
+                // `lend x`, `lend a.b.c` (an array or object held in a field)
+                // or `lend v[i]` (an object held in an array).
                 self.bump();
                 let mut path = Expr { kind: ExprKind::Var(self.ident()?.name), span: self.tokens[self.pos - 1].span };
-                while self.peek() == &Tok::Dot && matches!(self.peek_at(1), Tok::Ident(_)) && self.peek_at(2) != &Tok::LParen {
-                    self.bump();
-                    let field = self.ident()?;
-                    let span = path.span.to(field.span);
-                    path = Expr { kind: ExprKind::Member(Box::new(path), field), span };
+                loop {
+                    if self.peek() == &Tok::Dot && matches!(self.peek_at(1), Tok::Ident(_)) && self.peek_at(2) != &Tok::LParen {
+                        self.bump();
+                        let field = self.ident()?;
+                        let span = path.span.to(field.span);
+                        path = Expr { kind: ExprKind::Member(Box::new(path), field), span };
+                    } else if self.eat(&Tok::LBracket) {
+                        let idx = self.expr()?;
+                        let close = self.expect(Tok::RBracket)?;
+                        let span = path.span.to(close);
+                        path = Expr { kind: ExprKind::Index(Box::new(path), Box::new(idx)), span };
+                    } else {
+                        break;
+                    }
                 }
                 let span = start.to(path.span);
                 return Ok(Expr { kind: ExprKind::Lend(Box::new(path)), span });

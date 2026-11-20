@@ -196,7 +196,7 @@ Há dois tipos de array, e o tipo decide como os índices funcionam:
 | `append(v, x)` | Põe `x` no fim |
 | `pop(v)` | Tira o último elemento e o devolve. Vazio dispara Trap |
 | `insert(v, i, x)` | Põe `x` na posição `i` (`0..len`), empurrando os seguintes |
-| `remove(v, i)` | Tira o elemento da posição `i`, puxando os seguintes |
+| `remove(v, i)` | Tira o elemento da posição `i`, puxando os seguintes, e o devolve |
 | `resize(v, n)` | Muda para `n` elementos. Ao crescer, completa com zeros. Ao diminuir, os elementos cortados precisam estar zerados, senão dispara Trap (proteção contra perder dados sem querer) |
 | `clear(v)` | Deixa o array vazio |
 | `replace(v, a..b, c..d)` | Troca os trechos `a..b` e `c..d` de lugar (inclusivos, sem sobreposição; os tamanhos podem ser diferentes). Funciona também em `sym` |
@@ -560,10 +560,29 @@ total: real = c.fechar(); // depois disto, `c` não existe mais
 - Um método recebe o objeto como primeiro parâmetro: `lent self` (empresta: pode ler e mudar os campos) ou `own self` (consome: precisa terminar com `burn self`, `give` ou `return`). `c.metodo(...)` passa `c` sozinho. Um método `own self` só pode ser chamado numa variável que é dona do objeto.
 - Método sem `self` é da classe ("static"): `Conta.nova(...)`. Não há construtor especial; o objeto é criado preenchendo todos os campos, e só dentro da classe.
 - Campos podem ser de qualquer tipo, inclusive arrays e outros objetos. Um campo que possui algo (array ou objeto) não pode ser trocado, só alterado por dentro (`append(self.hist, x)`, `self.hist[i] = ...`). Lido de fora, ele vem emprestado.
-- Uma classe não pode conter a si mesma (nem por outra classe), porque o primeiro objeto nunca poderia ser criado. Um struct não pode conter objetos. Arrays de objetos ainda não existem.
+- Uma classe não pode conter a si mesma (nem por outra classe), porque o primeiro objeto nunca poderia ser criado. Um struct não pode conter objetos.
 - Emprestar o mesmo objeto (ou um campo dele) duas vezes na mesma chamada é erro: `c.f(lend c.hist)`.
 - `print(c)`, `{c}` e `%s` mostram todos os campos, inclusive os privados (para depurar).
 
+#### Arrays de objetos
+
+```
+contas[]: Conta = {give a, Conta.nova("Bia")};
+append(contas, Conta.nova("Caio"));
+contas[0].depositar(2.5);      // o elemento é emprestado para o método
+ver(lend contas[1]);           // empresta um elemento
+x: Conta = remove(contas, 1);  // tira o objeto do array: agora `x` é o dono
+burn x;
+burn contas;                   // libera o array e todos os objetos dentro dele
+```
+
+- O array **é dono** dos seus objetos. Eles entram com `give`, ou já novos (`Conta.nova(...)`): `{a}` e `append(v, a)` sem `give` são erro, porque copiariam o objeto.
+- `contas[i]` **fica no array**: chama métodos `lent self`, lê campos públicos e passa com `lend contas[i]`. Para ser dono dele, tire-o com `pop(v)` ou `remove(v, i)`. `x: Conta = contas[0];` é erro.
+- Todo elemento é um objeto de verdade, nunca vazio. Por isso não existem para arrays de objetos: `claim n` (criaria elementos vazios), `resize` (crescer cria vazios, diminuir perderia objetos) e `clear` (perderia objetos). Trocar um elemento (`contas[0] = ...`) também é erro: tire o antigo com `remove`, dê `burn` nele, e ponha o novo com `insert`.
+- `pop`/`remove` devolvem o objeto, que precisa ser guardado: `pop(contas);` sozinho é erro.
+- Emprestar um elemento e tirar um elemento do mesmo array na mesma chamada é erro: `f(lend contas[0], remove(contas, 0))`.
+- `burn contas` libera cada objeto (e o que eles possuem) antes do array. Um campo `contas[]: Conta` dentro de outra classe funciona igual.
+- O array inteiro não é impresso (como os de struct): imprima elemento por elemento.
 ### 8.11 `interface`, `@impl` e `@override`
 
 ```
@@ -594,7 +613,7 @@ mostrar(lend c);
 - **`@override` é obrigatório** em cada método que cumpre uma interface, e um `@override` que não cumpre nada é erro (pega erros de digitação). Não há herança: cada classe escreve os seus métodos.
 - Por enquanto um valor de interface só existe **emprestado**: parâmetros `lent f: Forma`, passados com `lend c` (de qualquer classe que implemente `Forma`) ou repassados com `lend f`. Por dentro, ele leva o ponteiro do objeto e o número da sua classe, e `f.area()` chama o `area` daquela classe.
 - Pela interface só se chamam métodos dela: os campos e os outros métodos da classe não aparecem. Métodos `own self` não podem ser chamados por uma interface (o objeto está emprestado).
-- Variáveis, `own` e arrays de interfaces (uma lista com formas diferentes) chegam junto com os arrays de objetos.
+- Variáveis, `own` e arrays de interfaces (uma lista com formas diferentes) ainda não existem: são o próximo passo depois dos arrays de objetos.
 
 ### 8.12 Limites do compilador
 

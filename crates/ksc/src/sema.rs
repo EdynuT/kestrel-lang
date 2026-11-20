@@ -344,10 +344,6 @@ impl Checker {
             other => return Ok(other),
         };
         let elem_ty = self.resolve(&ast::TypeExpr { ty: buf.ty(), span: t.span })?;
-        if let Type::Class(n) = elem_ty {
-            return Err(err(format!("arrays of objects (`{n}[]`) are not supported yet"), t.span)
-                .with_note("each element would need its own burn; they come after interfaces"));
-        }
         if let Type::Struct(n) = elem_ty {
             let w = width(&self.structs, elem_ty);
             if w > MAX_ELEM_WIDTH {
@@ -553,6 +549,15 @@ impl Checker {
         }
         let names: Vec<&str> = info.fields.iter().map(|(n, _, _)| n.as_str()).collect();
         Err(err(format!("class `{c}` has no field `{}`", f.name), f.span).with_note(format!("its fields are {}", names.join(", "))))
+    }
+
+    /// `arr[idx]`. An object stays in the array: it is read lent, through
+    /// its pointer cell (like a field holding an object).
+    fn element(arr: HExpr, idx: HExpr, ty: Type, span: Span) -> HExpr {
+        match ty {
+            Type::Class(c) => hx(HExprKind::ElemField(Box::new(arr), Box::new(idx), 0), Type::LentClass(c), span),
+            _ => hx(HExprKind::Index(Box::new(arr), Box::new(idx)), ty, span),
+        }
     }
 
     /// How a field looks when read through its object: something it owns is lent.
@@ -1199,6 +1204,11 @@ impl Checker {
                 Ok(HStmtKind::Assign { local: id, index: None, field: off, value: hv })
             }
             LVal::Elem { arr, idx, off, ty } => {
+                if let (Type::Class(_), Type::Own(_) | Type::Lent(_)) = (ty, arr.ty) {
+                    return Err(err("an object in an array cannot be replaced", target.span).with_note(
+                        "the old one would be lost: take it out first (`old: T = remove(v, i);`, burn it), then `insert(v, i, give new)`",
+                    ));
+                }
                 if let Type::Own(_) | Type::Class(_) = ty {
                     return Err(err("a field that owns an array or an object cannot be replaced", target.span)
                         .with_note("change what is inside it instead (`append(self.items, x)`, `self.items[i] = ...`)"));
@@ -1287,6 +1297,9 @@ impl Checker {
         let d = err(format!("expected {ty}, found {}", h.ty), h.span);
         Err(match (h.ty, ty) {
             (from, Type::Bool) if from.is_int() => d.with_note("write `true` or `false`, or compare: `x != 0`"),
+            (Type::LentClass(_), Type::Class(_)) => d.with_note(
+                "an object held in an array or a field stays there: take it out with `remove(v, i)` or `pop(v)`, or pass it with `lend`",
+            ),
             (Type::Scalar(Scalar::Real), t) | (t, Type::Scalar(Scalar::Real)) if t.is_int() => {
                 d.with_note(format!("convert explicitly with `as {ty}`"))
             }
@@ -1511,12 +1524,12 @@ impl Checker {
                     let hidx = self.index(idx)?;
                     self.check_index(id, &hidx)?;
                     let hb = hx(HExprKind::Local(id), ty, base.span);
-                    return Ok(hx(HExprKind::Index(Box::new(hb), Box::new(hidx)), el.ty(), span));
+                    return Ok(Self::element(hb, hidx, el.ty(), span));
                 }
                 let hb = self.expr(base, None)?;
                 if let Type::Own(el) | Type::Lent(el) = hb.ty {
                     let hidx = self.index(idx)?;
-                    return Ok(hx(HExprKind::Index(Box::new(hb), Box::new(hidx)), el.ty(), span));
+                    return Ok(Self::element(hb, hidx, el.ty(), span));
                 }
                 if hb.ty != Type::Text {
                     return Err(err(format!("cannot index {}", hb.ty), base.span));
@@ -1527,6 +1540,10 @@ impl Checker {
             ExprKind::Call { name, args } => self.call(name, args, span)?,
             ExprKind::Claim(size) => match want {
                 Some(Type::Own(el)) => {
+                    if let Type::Class(c) = el.ty() {
+                        return Err(err(format!("`claim` would make empty `{c}` elements"), span)
+                            .with_note("an array of objects holds only real objects: start with `{}` and `append` them"));
+                    }
                     let n = self.index(size)?;
                     hx(HExprKind::Claim(Box::new(n)), Type::Own(el), span)
                 }
@@ -2174,12 +2191,20 @@ impl Checker {
                 };
                 arity(n)?;
                 let (arr, buf) = self.array_arg(&args[0], &name.name)?;
+                if let (Type::Class(c), "resize" | "clear") = (buf.ty(), name.name.as_str()) {
+                    let note = if name.name == "resize" {
+                        "growing would make empty elements and shrinking would lose objects: use `append` and `pop`/`remove`"
+                    } else {
+                        "the objects would be lost: take each one out with `pop` and burn it, or burn the whole array"
+                    };
+                    return Err(err(format!("`{}` does not work on an array of `{c}` objects", name.name), name.span).with_note(note));
+                }
                 let int = Type::Scalar(Scalar::Int);
                 let (b, rest, ty) = match name.name.as_str() {
                     "append" => (Builtin::Append, vec![self.expect(&args[1], buf.ty())?], Type::Void),
                     "pop" => (Builtin::Pop, vec![], buf.ty()),
                     "insert" => (Builtin::Insert, vec![self.index(&args[1])?, self.expect(&args[2], buf.ty())?], Type::Void),
-                    "remove" => (Builtin::Remove, vec![self.index(&args[1])?], Type::Void),
+                    "remove" => (Builtin::Remove, vec![self.index(&args[1])?], buf.ty()),
                     "resize" => (Builtin::Resize, vec![self.expect(&args[1], int)?], Type::Void),
                     "clear" => (Builtin::Clear, vec![], Type::Void),
                     _ => {

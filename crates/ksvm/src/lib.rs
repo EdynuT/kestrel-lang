@@ -387,7 +387,8 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 let p = self.pop_ptr()?;
                 let b = self.block(p)?;
                 let at = elem_cell(b, i, 0, b.w).map_err(|e| format!("remove: {e}"))?;
-                b.cells.drain(at..at + b.w);
+                let vals: Vec<Value> = b.cells.drain(at..at + b.w).collect();
+                self.stack.extend(vals);
             }
             Op::Resize => {
                 let n = self.pop_word()?;

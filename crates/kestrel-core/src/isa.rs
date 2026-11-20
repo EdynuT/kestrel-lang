@@ -109,7 +109,7 @@ pub enum Op {
     PopEl,
     /// `elem.. ptr i` -> put the element at index `i` (0..=len), shifting the rest.
     Insert,
-    /// `ptr i` -> remove the element at index `i`, shifting the rest.
+    /// `ptr i` -> remove the element at index `i`, shifting the rest, and push it.
     Remove,
     /// `zero.. ptr n` -> grow to `n` elements with copies of `zero`, or shrink
     /// to `n` (only if every element cut off still equals `zero`).

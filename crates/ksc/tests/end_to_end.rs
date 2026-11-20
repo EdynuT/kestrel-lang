@@ -868,3 +868,89 @@ proc main() {
     .unwrap_err();
     assert!(e.message.contains("`A` does not implement `F`"), "{}", e.message);
 }
+
+#[test]
+fn arrays_of_objects() {
+    let src = r#"interface Nomeado {
+    proc nome(lent self) -> text;
+}
+
+@impl(Nomeado)
+class Conta {
+    dono: text;
+    saldo: real;
+    public proc nova(dono: text) -> Conta { return Conta { dono: dono, saldo: 0.0 }; }
+    @override
+    public proc nome(lent self) -> text { return self.dono; }
+    public proc depositar(lent self, v: real) { self.saldo += v; }
+    public proc saldoAtual(lent self) -> real { return self.saldo; }
+}
+
+class Banco {
+    contas[]: Conta;
+    public proc novo() -> Banco {
+        vazio[]: Conta = {};
+        return Banco { contas: give vazio };
+    }
+    public proc abrir(lent self, dono: text) { append(self.contas, Conta.nova(dono)); }
+    public proc total(lent self) -> real {
+        t: real = 0.0;
+        for i: int = 0; i < len(self.contas); i++ { t += self.contas[i].saldoAtual(); }
+        return t;
+    }
+}
+
+proc mostrar(lent n: Nomeado) { printl(n.nome()); }
+
+proc main() {
+    a: Conta = Conta.nova("Ana");
+    cs[]: Conta = {give a, Conta.nova("Bia")};
+    insert(cs, 1, Conta.nova("Caio"));
+    cs[0].depositar(2.5);
+    mostrar(lend cs[1]);
+    printl(cs[2].nome(), len(cs));
+    printl(cs[0]);
+    x: Conta = remove(cs, 1);
+    printl(x.nome(), len(cs));
+    burn x;
+    b: Banco = Banco.novo();
+    b.abrir("Davi");
+    b.abrir("Eva");
+    printl(b.total());
+    dump("antes");
+    burn cs;
+    burn b;
+    dump("depois");
+    v[]: int = {7, 8, 9};
+    n: int = remove(v, 0);
+    remove(v, 0);
+    printl(n, v);
+    burn v;
+}
+"#;
+    let o = out(src);
+    assert!(o.starts_with("Caio\nBia 3\nConta { dono: \"Ana\", saldo: 2.5 }\nCaio 2\n0.0\n"), "{o}");
+    assert!(o.ends_with("7 [9]\n"), "{o}");
+    // `burn` frees the objects inside the arrays too.
+    let after = &o[o.find("dump: depois").unwrap()..];
+    assert!(o.contains("heap #") && !after.contains("heap #"), "{o}");
+
+    let cls = "class C { x: int; public proc novo() -> C { return C { x: 1 }; } \
+               public proc pega(lent self, own o: C) { burn o; } }
+               proc par(lent c: C, own d: C) { burn d; }";
+    for (body, why) in [
+        ("x: C = cs[0];", "take it out with `remove(v, i)` or `pop(v)`"),
+        ("cs[0] = C.novo();", "an object in an array cannot be replaced"),
+        ("ds[]: C = claim 3; burn ds;", "`claim` would make empty `C` elements"),
+        ("resize(cs, 3);", "`resize` does not work on an array of `C` objects"),
+        ("clear(cs);", "`clear` does not work"),
+        ("pop(cs);", "would be lost"),
+        ("remove(cs, 0);", "would be lost"),
+        ("c: C = C.novo(); append(cs, c); burn c;", "object `c` cannot be copied"),
+        ("par(lend cs[0], remove(cs, 0));", "has an element taken out in the same call"),
+        ("cs[0].pega(pop(cs));", "has an element taken out in the same call"),
+    ] {
+        let e = ksc::compile(&format!("{cls} proc main() {{ cs[]: C = {{C.novo()}}; {body} burn cs; }}")).unwrap_err();
+        assert!(e.message.contains(why) || e.note.as_ref().is_some_and(|n| n.contains(why)), "{body}: {} {:?}", e.message, e.note);
+    }
+}

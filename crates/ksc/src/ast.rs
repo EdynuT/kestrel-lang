@@ -126,6 +126,8 @@ pub enum Elem {
     Text,
     Enum(&'static str),
     Struct(&'static str),
+    /// An object: the array owns it, each element is a pointer.
+    Class(&'static str),
     /// A type name as written; the checker resolves it.
     Named(&'static str),
 }
@@ -208,6 +210,7 @@ impl Elem {
             Elem::Text => Type::Text,
             Elem::Enum(n) => Type::Enum(n),
             Elem::Struct(n) => Type::Struct(n),
+            Elem::Class(n) => Type::Class(n),
             Elem::Named(n) => Type::Named(n),
         }
     }
@@ -220,8 +223,9 @@ impl Elem {
             Type::Text => Elem::Text,
             Type::Enum(n) => Elem::Enum(n),
             Type::Struct(n) => Elem::Struct(n),
+            Type::Class(n) => Elem::Class(n),
             Type::Named(n) => Elem::Named(n),
-            Type::Own(_) | Type::Lent(_) | Type::Void | Type::Class(_) | Type::LentClass(_) | Type::LentNamed(_) | Type::LentIface(_) => {
+            Type::Own(_) | Type::Lent(_) | Type::Void | Type::LentClass(_) | Type::LentNamed(_) | Type::LentIface(_) => {
                 return None;
             }
         })

@@ -350,6 +350,11 @@ impl Checker<'_> {
                         return Err(Diagnostic::new(format!("`{}` is lent and given away in the same call", self.name(id)), at)
                             .with_note("the callee would borrow something it also owns"));
                     }
+                    // `f(lend cs[0], remove(cs, 0))`: the same object lent and owned.
+                    if let Some((id, at)) = lent.iter().flatten().find_map(|&id| takes_out(a, id).map(|s| (id, s))) {
+                        return Err(Diagnostic::new(format!("`{}` is lent and has an element taken out in the same call", self.name(id)), at)
+                            .with_note("the callee could borrow the very element it gets: take it out before the call"));
+                    }
                     if let Some(id) = lent[i]
                         && lent[..i].contains(&Some(id))
                     {
@@ -411,6 +416,21 @@ fn gives(e: &HExpr, id: LocalId) -> Option<crate::diag::Span> {
     let sub = |x: &HExpr| gives(x, id);
     match &e.kind {
         HExprKind::Give(g) if *g == id => Some(e.span),
+        HExprKind::Neg(a) | HExprKind::Convert(a) | HExprKind::Claim(a) | HExprKind::ToIface(a, _) => sub(a),
+        HExprKind::DynCall { args, .. } => args.iter().find_map(sub),
+        HExprKind::Binary(_, a, b) | HExprKind::Index(a, b) | HExprKind::Bind(_, a, b) => sub(a).or_else(|| sub(b)),
+        HExprKind::ElemField(a, b, _) => sub(a).or_else(|| sub(b)),
+        HExprKind::Call(_, xs) | HExprKind::Builtin(_, xs) | HExprKind::Pack(xs) | HExprKind::StructLit(xs) => xs.iter().find_map(sub),
+        HExprKind::Print(ps) => ps.iter().find_map(|(_, x)| sub(x)),
+        _ => None,
+    }
+}
+
+/// The span of a `pop(id)` or `remove(id, i)` inside `e`, if there is one.
+fn takes_out(e: &HExpr, id: LocalId) -> Option<crate::diag::Span> {
+    let sub = |x: &HExpr| takes_out(x, id);
+    match &e.kind {
+        HExprKind::Builtin(Builtin::Pop | Builtin::Remove, xs) if lent_root(&xs[0]) == Some(id) => Some(e.span),
         HExprKind::Neg(a) | HExprKind::Convert(a) | HExprKind::Claim(a) | HExprKind::ToIface(a, _) => sub(a),
         HExprKind::DynCall { args, .. } => args.iter().find_map(sub),
         HExprKind::Binary(_, a, b) | HExprKind::Index(a, b) | HExprKind::Bind(_, a, b) => sub(a).or_else(|| sub(b)),

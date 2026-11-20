@@ -1,5 +1,3 @@
-use conceitos;
-
 interface Forma {
     proc area(lent self) -> real;
     proc nome(lent self) -> text;

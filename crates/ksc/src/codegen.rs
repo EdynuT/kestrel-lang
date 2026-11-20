@@ -179,6 +179,29 @@ impl<'a> ProcGen<'a> {
                 off += self.width(t);
             }
         }
+        if let Type::Own(b) = ty
+            && let elem @ Type::Class(_) = b.ty()
+        {
+            // An array of objects: pop and burn each one until it is empty.
+            // top: load v; tlen; br3 end, end, body
+            // body: load v; popel; store $burn; <burn $burn>; jmp top
+            let tmp = self.names.len() as Slot;
+            self.names.push("$burn".into());
+            let top = self.here();
+            self.emit(Op::Load(slot));
+            self.emit(Op::TLen);
+            let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
+            let body = self.here();
+            self.emit(Op::Load(slot));
+            self.emit(Op::PopEl);
+            self.emit(Op::Store(tmp));
+            self.burn(tmp, elem);
+            self.emit(Op::Jmp(top));
+            let end = self.here();
+            self.patch(br, 0, end);
+            self.patch(br, 1, end);
+            self.patch(br, 2, body);
+        }
         self.emit(Op::Purge(slot));
     }
 

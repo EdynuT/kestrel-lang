@@ -18,8 +18,8 @@ hoje:  programa.ks ──[ksc em Rust]──────────────
 | 0.3 | **Controle e arrays:** `if`/`else`, `while`, `for`, comparações (`== != < > <= >=`), `+=`/`++`, enums, `match`, arrays a partir de 0 (`x[]: int`) e simétricos (`sym x[]: int`), literal `{1, 2, 3}` | ✅ |
 | 0.4 | **Textos, E/S e erros:** comparar, cortar, montar e converter textos, classificar caracteres, ler arquivo e stdin, escrever bytes, argumentos de linha de comando, `exit`, contas que falham disparam Trap e `on NaT` trata | ✅ |
 | 0.5 | **Dados:** `struct` (só dados), arrays de qualquer tipo (inclusive structs), arrays que mudam de tamanho (`append`, `pop`, `insert`, `remove`, `resize`, `clear`, `replace`) | ✅ |
-| 0.6 | **Classes:** `class` com métodos, `private`/`public`, interfaces (sem herança), anotações (`@impl`, `@test`, `@deprecated`) | |
-| 0.7 | **Ferramentas:** módulos (`use`), seção de símbolos e tabela de linhas no `.ksb`, documentação `/** */`, executável único, traceback com linha do `.ks`, `assert`, biblioteca padrão mínima escrita em Kestrel (hash map, hash set, funções de texto) | |
+| 0.6 | **Classes:** `class` com métodos, `private`/`public`, interfaces (sem herança), arrays de objetos, interfaces com dono, árvores e objetos opcionais (`T?`), anotações (`@impl`, `@override`, `@test`, `@deprecated`), `assert` e `ksc --test` | |
+| 0.7 | **Ferramentas:** módulos (`use`), seção de símbolos e tabela de linhas no `.ksb`, documentação `/** */`, executável único, traceback com linha do `.ks`, biblioteca padrão mínima escrita em Kestrel (hash map, hash set, funções de texto) | |
 | 0.8 | `ksc.ks`: lexer e parser | |
 | 0.9 | `ksc.ks`: verificação de tipos e de posse, gerador de código e escrita do `.ksb` | |
 | **1.0** | Bootstrap: o teste abaixo passa | |
@@ -40,6 +40,7 @@ A biblioteca padrão da 0.7 e o `ksc.ks` (0.8 e 0.9) são escritos como **aulas*
   - `Conta { ... }` só cria o objeto dentro da própria classe; fora dela se usa um método static (`Conta.nova()`), o "construtor" sem palavra especial.
   - `c.metodo()` empresta `c` (`lent self`); um método `own self` consome o objeto. `print(c)` mostra os campos.
   - Arrays de objetos (2026-11-20): o array é dono dos objetos, que entram com `give` e saem com `pop`/`remove` (que agora devolve o elemento). `v[i]` fica no array (emprestado). Sem elementos vazios: `claim`, `resize` e `clear` não valem para eles, e trocar `v[i] = ...` é erro. `burn v` libera cada objeto.
+  - Tipos recursivos (2026-11-20), escolhido o modelo do Kotlin/Swift: `filhos[]: No` (árvores) e campos opcionais `proximo: No?` (vazio = NaT). O compilador obriga a conferir com `isNaT` antes de usar, e a conferência se perde quando algo pode ter esvaziado o campo. `give n.proximo` tira o objeto; atribuir só a um `T?` vazio (senão Trap). `burn` usa uma função escondida por classe, então libera árvores de qualquer profundidade.
   - Interfaces com dono (2026-11-20): variáveis, campos, `own`, retorno e arrays de uma interface guardam objetos de classes diferentes; `burn` libera conforme a classe. Falta: voltar da interface para a classe concreta.
   - Um objeto de classe tem dono, como um array: `burn`, `give`, `lend` e `return`, e esquecer é erro de compilação.
 - **Sem herança:** reaproveitamento por composição (uma classe tem outra como campo) e por interfaces, como em Go e Rust. Herança conflita com a posse (quem é dono da parte herdada? o que o `burn` libera?).

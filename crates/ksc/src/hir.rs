@@ -24,6 +24,10 @@ pub struct Hir {
     pub classes: Structs,
     /// The classes that implement each interface, with their numbers.
     pub ifaces: Ifaces,
+    /// `@test` procs, in the order they are written.
+    pub tests: Vec<(String, ProcId)>,
+    /// Uses of `@deprecated` things.
+    pub warnings: Vec<crate::diag::Diagnostic>,
 }
 
 pub type Ifaces = HashMap<&'static str, Vec<(i64, &'static str)>>;
@@ -39,7 +43,7 @@ pub fn width(structs: &Structs, ty: Type) -> usize {
         Type::Struct(n) => structs[n].iter().map(|(_, t)| width(structs, *t)).sum(),
         Type::Void => 0,
         // An interface value: the object's pointer and its class number.
-        Type::LentIface(_) | Type::Iface(_) => 2,
+        Type::LentIface(_) | Type::Iface(_) | Type::OptIface(_) | Type::LentOptIface(_) => 2,
         _ => 1,
     }
 }
@@ -238,6 +242,9 @@ pub enum HExprKind {
     /// A field of an array element, `pts[i].x`: the array (a pointer),
     /// index, offset of the field inside the element.
     ElemField(Box<HExpr>, Box<HExpr>, usize),
+    /// `give n.campo`: the value of a `T?` field of the object (a pointer),
+    /// at that offset; the field is left empty (NaT).
+    TakeField(Box<HExpr>, usize),
 }
 
 impl HBlock {

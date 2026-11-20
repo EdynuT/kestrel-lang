@@ -32,6 +32,8 @@ pub struct InterfaceDecl {
 pub struct Annotation {
     pub name: Ident,
     pub args: Vec<Ident>,
+    /// A string argument: `@deprecated("use x")`.
+    pub text: Option<String>,
 }
 
 /// `class Name { fields; methods }`: data with methods and an owner.
@@ -94,6 +96,9 @@ pub struct ProcDecl {
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
     pub body: Block,
+    /// `@test`, `@deprecated(...)` before a top-level proc (a method keeps
+    /// its own in `MethodDecl`).
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -160,6 +165,19 @@ pub enum Type {
     LentIface(&'static str),
     /// An owned object seen through an interface (`f: Forma = Circulo.novo();`).
     Iface(&'static str),
+    /// `T?` as written (`proximo: No?`); the checker makes it `OptClass` or
+    /// `OptIface`. Only produced by the parser.
+    NamedOpt(&'static str),
+    /// `lent x: T?` as written. Only produced by the parser.
+    LentNamedOpt(&'static str),
+    /// An object that may be empty (NaT): `proximo: No?`. It must be checked
+    /// (`if !isNaT(x) { ... }`) before it is used.
+    OptClass(&'static str),
+    /// An interface value that may be empty.
+    OptIface(&'static str),
+    /// A borrowed `T?` (`lent n: No?`).
+    LentOptClass(&'static str),
+    LentOptIface(&'static str),
     /// No value: the result of `print(...)` or of a proc without `->`.
     /// Only produced by the checker, never by the parser.
     Void,
@@ -231,7 +249,16 @@ impl Elem {
             Type::Class(n) => Elem::Class(n),
             Type::Iface(n) => Elem::Iface(n),
             Type::Named(n) => Elem::Named(n),
-            Type::Own(_) | Type::Lent(_) | Type::Void | Type::LentClass(_) | Type::LentNamed(_) | Type::LentIface(_) => {
+            Type::NamedOpt(_)
+            | Type::LentNamedOpt(_)
+            | Type::OptClass(_)
+            | Type::OptIface(_)
+            | Type::LentOptClass(_)
+            | Type::LentOptIface(_)
+            | Type::Own(_)
+            | Type::Lent(_)
+            | Type::Void
+            | Type::LentClass(_) | Type::LentNamed(_) | Type::LentIface(_) => {
                 return None;
             }
         })
@@ -239,6 +266,22 @@ impl Elem {
 }
 
 impl Type {
+    /// What a `T?` holds when it is not empty: `No?` -> `No`, `lent No?` -> `lent No`.
+    pub fn unopt(self) -> Type {
+        match self {
+            Type::OptClass(c) => Type::Class(c),
+            Type::OptIface(i) => Type::Iface(i),
+            Type::LentOptClass(c) => Type::LentClass(c),
+            Type::LentOptIface(i) => Type::LentIface(i),
+            t => t,
+        }
+    }
+
+    /// `T?`, owned or lent.
+    pub fn is_opt(self) -> bool {
+        matches!(self, Type::OptClass(_) | Type::OptIface(_) | Type::LentOptClass(_) | Type::LentOptIface(_))
+    }
+
     pub fn is_int(self) -> bool {
         matches!(self, Type::Scalar(s) if s.is_int())
     }
@@ -268,6 +311,8 @@ impl std::fmt::Display for Type {
             Type::Own(b) => write!(f, "{b}"),
             Type::Lent(b) => write!(f, "lent {b}"),
             Type::Enum(name) | Type::Struct(name) | Type::Named(name) | Type::Class(name) | Type::Iface(name) => f.write_str(name),
+            Type::NamedOpt(name) | Type::OptClass(name) | Type::OptIface(name) => write!(f, "{name}?"),
+            Type::LentNamedOpt(name) | Type::LentOptClass(name) | Type::LentOptIface(name) => write!(f, "lent {name}?"),
             Type::LentClass(name) | Type::LentNamed(name) | Type::LentIface(name) => write!(f, "lent {name}"),
             Type::Void => f.write_str("no value"),
         }
@@ -302,6 +347,9 @@ pub struct Stmt {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum StmtKind {
+    /// `assert(cond);` or `assert(cond, "message");`. `msg` is what a failure
+    /// shows: the message, or the condition as written, with its line.
+    Assert { cond: Expr, msg: String },
     /// `x: T = e on NaT { ... };` or `x: T;` (no value), optionally after `final`.
     Let {
         is_final: bool,
@@ -374,6 +422,8 @@ pub enum ExprKind {
     Call { name: Ident, args: Vec<Expr> },
     Claim(Box<Expr>),
     Give(Ident),
+    /// `give a.b`: takes the object out of an optional field, leaving it empty.
+    GiveField(Box<Expr>),
     /// `lend x`, or `lend self.items` (a path to an array or object).
     Lend(Box<Expr>),
     /// `obj.method(args)`, or `Class.method(args)` for a static method.

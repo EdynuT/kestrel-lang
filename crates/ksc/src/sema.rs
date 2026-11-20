@@ -3,6 +3,7 @@
 //! Ownership rules (use after give, leaks, double burn, tri symmetry) are
 //! checked afterwards by the linear checker on the HIR.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use kestrel_core::charset::char_to_tryte;
@@ -16,11 +17,11 @@ use crate::hir::*;
 
 type R<T> = Result<T, Diagnostic>;
 
-const BUILTINS: [&str; 33] = [
+const BUILTINS: [&str; 34] = [
     "print", "printl", "printf", "toText", "emit", "input", "len", "dump", "sub", "toInt", "toReal", "isDigit",
     "isLetter", "isUpper", "isLower", "isSpace", "readFile", "fileExists", "writeFile", "writeBytes",
     "readLine", "eof", "argCount", "arg", "exit", "append", "pop", "insert", "remove", "resize", "clear", "replace",
-    "isNaT",
+    "isNaT", "assert",
 ];
 /// Built-ins that change the size of the array they get first.
 const RESIZERS: [&str; 6] = ["append", "pop", "insert", "remove", "resize", "clear"];
@@ -30,8 +31,20 @@ const MAX_ELEM_WIDTH: usize = 243;
 /// Names of the `is_*` built-ins, in `charset::Class::ALL` order.
 const CHAR_CLASSES: [&str; 5] = ["isDigit", "isLetter", "isUpper", "isLower", "isSpace"];
 
+/// Checks a program; it must have a `proc main`.
 pub fn check(program: &Program) -> R<Hir> {
+    check_with(program, true)
+}
+
+/// Checks a program; `need_main: false` (for `ksc --test`) lets it have
+/// only `@test` procs. `Hir::entry` is then `main` if there is one, or 0.
+pub fn check_with(program: &Program, need_main: bool) -> R<Hir> {
     let mut cx = Checker {
+        warnings: RefCell::new(Vec::new()),
+        deprecated: HashMap::new(),
+        deprecated_classes: HashMap::new(),
+        tests: Vec::new(),
+        current: None,
         sigs: Vec::new(),
         proc_ids: HashMap::new(),
         consts: HashMap::new(),
@@ -113,16 +126,18 @@ pub fn check(program: &Program) -> R<Hir> {
     for p in &name_procs {
         cx.declare_proc(p)?;
     }
-    let entry = *cx
-        .proc_ids
-        .get("main")
-        .ok_or_else(|| Diagnostic::new("the program has no `proc main`", Span::default()))?;
-    let main = &cx.sigs[entry];
-    if !main.params.is_empty() {
-        return Err(Diagnostic::new("`main` cannot take parameters", main.span));
-    }
-    if !matches!(main.ret, Type::Void | Type::Scalar(Scalar::Int)) {
-        return Err(Diagnostic::new(format!("`main` must return an int or nothing, not {}", main.ret), main.span));
+    let entry = match cx.proc_ids.get("main") {
+        Some(&id) => id,
+        None if !need_main => 0,
+        None => return Err(Diagnostic::new("the program has no `proc main`", Span::default())),
+    };
+    if let Some(main) = cx.proc_ids.get("main").map(|&id| &cx.sigs[id]) {
+        if !main.params.is_empty() {
+            return Err(Diagnostic::new("`main` cannot take parameters", main.span));
+        }
+        if !matches!(main.ret, Type::Void | Type::Scalar(Scalar::Int)) {
+            return Err(Diagnostic::new(format!("`main` must return an int or nothing, not {}", main.ret), main.span));
+        }
     }
     let mut procs = Vec::new();
     for item in &program.items {
@@ -142,7 +157,11 @@ pub fn check(program: &Program) -> R<Hir> {
     procs.sort_by_key(|p| cx.proc_ids[&p.name]);
     let classes = cx.classes.values().map(|c| (c.name, c.fields.iter().map(|(n, t, _)| (n.clone(), *t)).collect())).collect();
     let ifaces = cx.ifaces.values().map(|i| (i.name, i.impls.iter().map(|c| (cx.class_tags[c], *c)).collect())).collect();
-    Ok(Hir { procs, entry, structs: cx.structs, classes, ifaces })
+    // A warning found twice (an expression checked twice) is shown once.
+    let mut warnings = cx.warnings.into_inner();
+    warnings.sort_by_key(|w| (w.span.start, w.span.end));
+    warnings.dedup();
+    Ok(Hir { procs, entry, structs: cx.structs, classes, ifaces, tests: cx.tests, warnings })
 }
 
 #[derive(Clone)]
@@ -170,15 +189,81 @@ struct FnCx {
     /// Names of arrays that may change size in this proc (given to `append`
     /// & co. or lent to a proc): their size is never known.
     resized: HashSet<String>,
+    /// What `isNaT` checks proved non-empty for the code being checked
+    /// (`None`: proved, then something could have emptied it).
+    narrowed: Vec<Option<Narrow>>,
 }
 
 impl FnCx {
     fn new(ret: Type) -> FnCx {
-        FnCx { locals: Vec::new(), scopes: vec![Scope::default()], ret, loops: 0, sizes: HashMap::new(), resized: HashSet::new() }
+        FnCx {
+            locals: Vec::new(),
+            scopes: vec![Scope::default()],
+            ret,
+            loops: 0,
+            sizes: HashMap::new(),
+            resized: HashSet::new(),
+            narrowed: Vec::new(),
+        }
+    }
+}
+
+/// A local or a chain of object fields: `n.proximo.proximo` is `n` and the
+/// offsets of the two fields.
+type Path = (LocalId, Vec<usize>);
+
+/// A `T?` proved non-empty by `if !isNaT(x)`, `if isNaT(x) { return; }` & co.
+#[derive(Clone)]
+enum Narrow {
+    /// A `T?` local, retyped to `T` meanwhile; its declared type is kept here.
+    Local(LocalId, Type),
+    /// A `T?` field of an object.
+    Field(Path),
+}
+
+/// The path `h` reads, if it is a local or fields of objects.
+fn path_of(h: &HExpr) -> Option<Path> {
+    match &h.kind {
+        HExprKind::Local(id) | HExprKind::Lend(id) => Some((*id, Vec::new())),
+        HExprKind::ElemField(obj, idx, off)
+            if matches!(obj.ty, Type::Class(_) | Type::LentClass(_)) && matches!(idx.kind, HExprKind::Word(w) if w == Word::ZERO) =>
+        {
+            let (id, mut fields) = path_of(obj)?;
+            fields.push(*off);
+            Some((id, fields))
+        }
+        _ => None,
+    }
+}
+
+/// The `T?` paths that are not empty when `h` is `when`:
+/// `!isNaT(x)` when true, `isNaT(x)` when false, joined by `&&` (true) or `||` (false).
+fn facts(h: &HExpr, when: bool, out: &mut Vec<Path>) {
+    match &h.kind {
+        HExprKind::Builtin(Builtin::IsNaT, a) if !when && a[0].ty.is_opt() => out.extend(path_of(&a[0])),
+        HExprKind::Neg(x) if h.ty == Type::Bool => facts(x, !when, out),
+        HExprKind::Binary(BinOp::And, a, b) if when => {
+            facts(a, true, out);
+            facts(b, true, out);
+        }
+        HExprKind::Binary(BinOp::Or, a, b) if !when => {
+            facts(a, false, out);
+            facts(b, false, out);
+        }
+        _ => {}
     }
 }
 
 struct Checker {
+    /// `@deprecated` uses found so far (`resolve` only gets `&self`).
+    warnings: RefCell<Vec<Diagnostic>>,
+    /// Procs and methods marked `@deprecated`, with their message.
+    deprecated: HashMap<ProcId, Option<String>>,
+    deprecated_classes: HashMap<&'static str, Option<String>>,
+    /// `@test` procs, in the order they are written.
+    tests: Vec<(String, ProcId)>,
+    /// The proc being checked.
+    current: Option<ProcId>,
     sigs: Vec<Sig>,
     proc_ids: HashMap<String, ProcId>,
     consts: HashMap<String, HExpr>,
@@ -327,6 +412,7 @@ impl Checker {
         let name_proc = format!("$name.{name}");
         let int = ast::TypeExpr { ty: Type::Scalar(Scalar::Int), span: sp };
         let decl = ast::ProcDecl {
+            annotations: Vec::new(),
             name: ast::Ident { name: name_proc.clone(), span: sp },
             this: None,
             params: vec![ast::Param { name: ast::Ident { name: "v".into(), span: sp }, ty: int, mode: None }],
@@ -341,7 +427,7 @@ impl Checker {
     fn resolve(&self, t: &ast::TypeExpr) -> R<Type> {
         let buf = match t.ty {
             Type::Own(b) | Type::Lent(b) => b,
-            Type::Named(_) | Type::LentNamed(_) => return self.resolve_name(t),
+            Type::Named(_) | Type::LentNamed(_) | Type::NamedOpt(_) | Type::LentNamedOpt(_) => return self.resolve_name(t),
             other => return Ok(other),
         };
         let elem_ty = self.resolve(&ast::TypeExpr { ty: buf.ty(), span: t.span })?;
@@ -356,6 +442,20 @@ impl Checker {
     }
 
     fn resolve_name(&self, t: &ast::TypeExpr) -> R<Type> {
+        // `No?` / `lent No?`: an object (or interface value) that may be empty.
+        if let Type::NamedOpt(n) | Type::LentNamedOpt(n) = t.ty {
+            let lent = matches!(t.ty, Type::LentNamedOpt(_));
+            let inner = self.resolve_name(&ast::TypeExpr { ty: if lent { Type::LentNamed(n) } else { Type::Named(n) }, span: t.span });
+            return match inner {
+                Ok(Type::Class(c)) => Ok(Type::OptClass(c)),
+                Ok(Type::Iface(i)) => Ok(Type::OptIface(i)),
+                Ok(Type::LentClass(c)) => Ok(Type::LentOptClass(c)),
+                Ok(Type::LentIface(i)) => Ok(Type::LentOptIface(i)),
+                Ok(other) => Err(err(format!("`?` is for classes and interfaces, not {other}"), t.span)
+                    .with_note("numbers, bools, texts and enums can already hold NaT")),
+                Err(e) => Err(e),
+            };
+        }
         if let Type::LentNamed(n) = t.ty {
             if let Some(i) = self.ifaces.get(n) {
                 return Ok(Type::LentIface(i.name));
@@ -368,6 +468,11 @@ impl Checker {
         }
         let Type::Named(n) = t.ty else { return Ok(t.ty) };
         if let Some(c) = self.classes.get(n) {
+            if let Some(msg) = self.deprecated_classes.get(c.name)
+                && self.class != Some(c.name)
+            {
+                self.warn(format!("class `{n}` is deprecated"), t.span, msg.clone());
+            }
             return Ok(Type::Class(c.name));
         }
         if let Some(i) = self.ifaces.get(n) {
@@ -425,20 +530,30 @@ impl Checker {
     fn declare_methods(&mut self, c: &ast::ClassDecl) -> R<Vec<(&'static str, ast::ProcDecl)>> {
         let class = self.classes[&c.name.name].name;
         for a in &c.annotations {
-            if a.name.name != "impl" {
-                return Err(err(format!("unknown annotation `@{}` on a class", a.name.name), a.name.span)
-                    .with_note("a class takes `@impl(Interface)`"));
-            }
-            if a.args.is_empty() {
-                return Err(err("`@impl` names the interfaces: `@impl(Desenhavel)`", a.name.span));
+            match a.name.name.as_str() {
+                "impl" if a.args.is_empty() => {
+                    return Err(err("`@impl` names the interfaces: `@impl(Desenhavel)`", a.name.span));
+                }
+                "impl" => {}
+                "deprecated" => {
+                    self.deprecated_classes.insert(class, a.text.clone());
+                }
+                _ => {
+                    return Err(err(format!("unknown annotation `@{}` on a class", a.name.name), a.name.span)
+                        .with_note("a class takes `@impl(Interface)` and `@deprecated`"));
+                }
             }
         }
         let mut out = Vec::new();
         for m in &c.methods {
             let mname = &m.decl.name;
-            if let Some(a) = m.annotations.iter().find(|a| a.name.name != "override" || !a.args.is_empty()) {
-                return Err(err(format!("unknown annotation `@{}` on a method", a.name.name), a.name.span)
-                    .with_note("a method takes `@override` when it fills in an interface method"));
+            if let Some(a) = m.annotations.iter().find(|a| !matches!(a.name.name.as_str(), "override" | "deprecated") || !a.args.is_empty()) {
+                let note = if a.name.name == "test" {
+                    "a test is a proc outside the classes: `@test proc nome() { ... }`"
+                } else {
+                    "a method takes `@override` (when it fills in an interface method) and `@deprecated`"
+                };
+                return Err(err(format!("unknown annotation `@{}` on a method", a.name.name), a.name.span).with_note(note));
             }
             if self.classes[class].methods.contains_key(&mname.name) {
                 return Err(err(format!("method `{}` is defined twice in `{class}`", mname.name), mname.span));
@@ -454,8 +569,15 @@ impl Checker {
                 let this = ast::Param { name: ast::Ident { name: "self".into(), span: sp }, ty: ast::TypeExpr { ty, span: sp }, mode: Some(mode) };
                 decl.params.insert(0, this);
             }
-            self.declare_proc(&decl)?;
+            // The class may name itself in its methods without a warning.
+            self.class = Some(class);
+            let declared = self.declare_proc(&decl);
+            self.class = None;
+            declared?;
             let id = self.proc_ids[&decl.name.name];
+            if let Some(a) = m.annotations.iter().find(|a| a.name.name == "deprecated") {
+                self.deprecated.insert(id, a.text.clone());
+            }
             let method = Method { id, this: m.decl.this, public: m.public };
             self.classes.get_mut(class).expect("registered").methods.insert(mname.name.clone(), method);
             out.push((class, decl));
@@ -566,6 +688,8 @@ impl Checker {
             Type::Own(b) => Type::Lent(b),
             Type::Class(n) => Type::LentClass(n),
             Type::Iface(n) => Type::LentIface(n),
+            Type::OptClass(n) => Type::LentOptClass(n),
+            Type::OptIface(n) => Type::LentOptIface(n),
             t => t,
         }
     }
@@ -626,6 +750,8 @@ impl Checker {
             match f.ty {
                 Type::Text => pieces.push((Fmt::Quoted, f)),
                 Type::Lent(b) if !matches!(b.ty(), Type::Scalar(_) | Type::Text) => pieces.push(text("[...]")),
+                // It may be empty, or of another class: shown as `...`.
+                t if t.is_opt() || matches!(t, Type::LentIface(_)) => pieces.push(text("...")),
                 _ => pieces.push((Fmt::Plain, self.displayed(f))),
             }
             off += width(&self.structs, fty);
@@ -662,7 +788,7 @@ impl Checker {
         for (n, t) in &decl {
             let (_, e) = fields.iter().find(|(f, _)| f.name == *n).expect("checked above");
             let h = match (t, &e.kind) {
-                (Type::Own(_) | Type::Class(_) | Type::Iface(_), ExprKind::Give(x)) => {
+                (Type::Own(_) | Type::Class(_) | Type::Iface(_) | Type::OptClass(_) | Type::OptIface(_), ExprKind::Give(x)) => {
                     let lid = self.lookup(&x.name).ok_or_else(|| self.unknown(&x.name, x.span))?;
                     let h = self.give(lid, e.span)?;
                     self.coerce(h, *t)?
@@ -704,6 +830,11 @@ impl Checker {
             return Ok(hx(HExprKind::DynCall { impls, args: hargs }, m.ret, span));
         }
         let Some((obj, c)) = self.object(recv)? else {
+            if let Ok(h) = self.expr(recv, None)
+                && h.ty.is_opt()
+            {
+                return Err(self.maybe_empty(h.ty, recv.span));
+            }
             let ty = self.expr(recv, None).map(|h| h.ty.to_string()).unwrap_or_else(|_| "this".into());
             return Err(err(format!("{ty} has no methods"), recv.span));
         };
@@ -756,7 +887,7 @@ impl Checker {
                 return Err(err(format!("field `{}` appears twice in struct `{}`", f.name, s.name.name), f.span));
             }
             let ty = self.resolve(t)?;
-            if let Type::Class(c) | Type::Iface(c) = ty {
+            if let Type::Class(c) | Type::Iface(c) | Type::OptClass(c) | Type::OptIface(c) = ty {
                 return Err(err(format!("a struct cannot hold an object (`{c}`)"), t.span)
                     .with_note("a struct is copied, and an object has one owner; use a class instead"));
             }
@@ -892,13 +1023,15 @@ impl Checker {
                 return Err(err(format!("parameter `{}` appears twice", param.name.name), param.name.span));
             }
             let ty = self.resolve(&param.ty)?;
-            if let Type::Class(c) | Type::Iface(c) = ty
+            if let Type::Class(c) | Type::Iface(c) | Type::OptClass(c) | Type::OptIface(c) = ty
                 && param.mode.is_none()
             {
                 return Err(err("an object parameter needs `lent` or `own`", param.name.span)
                     .with_note(format!("`lent {0}: {c}` borrows it, `own {0}: {c}` takes it", param.name.name)));
             }
-            if param.mode.is_some() && !matches!(ty, Type::Own(_) | Type::Lent(_) | Type::Class(_) | Type::LentClass(_) | Type::Iface(_) | Type::LentIface(_)) {
+            if param.mode.is_some() && !matches!(ty, Type::Own(_) | Type::Lent(_) | Type::Class(_) | Type::LentClass(_) | Type::Iface(_) | Type::LentIface(_))
+                && !ty.is_opt()
+            {
                 return Err(err("`lent` and `own` only apply to arrays and objects", param.name.span));
             }
             params.push((param.name.name.clone(), ty));
@@ -910,12 +1043,140 @@ impl Checker {
         if let (Type::Lent(_), Some(t)) = (ret, p.ret) {
             return Err(err("a proc cannot return a lent buffer", t.span).with_note("lent buffers only live as long as the call"));
         }
-        self.proc_ids.insert(name.clone(), self.sigs.len());
+        let id = self.sigs.len();
+        for a in &p.annotations {
+            match a.name.name.as_str() {
+                "test" => {
+                    if !params.is_empty() || ret != Type::Void || name == "main" {
+                        return Err(err(format!("test `{name}` cannot take parameters or return a value"), p.name.span)
+                            .with_note("a test is `@test proc nome() { ... }`, checked with `assert`"));
+                    }
+                    self.tests.push((name.clone(), id));
+                }
+                "deprecated" => {
+                    self.deprecated.insert(id, a.text.clone());
+                }
+                _ => {
+                    return Err(err(format!("unknown annotation `@{}` on a proc", a.name.name), a.name.span)
+                        .with_note("a proc takes `@test` and `@deprecated`"));
+                }
+            }
+        }
+        self.proc_ids.insert(name.clone(), id);
         self.sigs.push(Sig { params, ret, span: p.name.span });
         Ok(())
     }
 
+    /// Marks `p` as not empty: a local is retyped (`No?` -> `No`) until
+    /// [`Self::unnarrow_to`]; a field is looked up by [`Self::narrowed_ty`].
+    fn narrow(&mut self, p: &Path) {
+        if p.1.is_empty() {
+            let declared = self.f.locals[p.0].ty;
+            if declared.is_opt() {
+                self.f.locals[p.0].ty = declared.unopt();
+                self.f.narrowed.push(Some(Narrow::Local(p.0, declared)));
+            }
+        } else {
+            self.f.narrowed.push(Some(Narrow::Field(p.clone())));
+        }
+    }
+
+    /// Forgets what was proved after the first `len` entries.
+    fn unnarrow_to(&mut self, len: usize) {
+        while self.f.narrowed.len() > len {
+            if let Some(Some(Narrow::Local(id, declared))) = self.f.narrowed.pop() {
+                self.f.locals[id].ty = declared;
+            }
+        }
+    }
+
+    /// Something may have emptied the fields under `p` (a call that lends
+    /// `p`, a method of `p`): they must be checked again. `inclusive` also
+    /// forgets `p` itself (`give p`).
+    fn invalidate(&mut self, p: &Path, inclusive: bool) {
+        for n in self.f.narrowed.iter_mut() {
+            if let Some(Narrow::Field((id, fields))) = n
+                && *id == p.0
+                && fields.starts_with(&p.1)
+                && (inclusive || fields.len() > p.1.len())
+            {
+                *n = None;
+            }
+        }
+    }
+
+    /// `ty` for the field read by `h`: `T` if a check proved it is not empty.
+    fn narrowed_ty(&self, h: &HExpr, ty: Type) -> Type {
+        if !ty.is_opt() {
+            return ty;
+        }
+        let proved = path_of(h).is_some_and(|p| self.f.narrowed.iter().any(|n| matches!(n, Some(Narrow::Field(q)) if *q == p)));
+        if proved { ty.unopt() } else { ty }
+    }
+
+    /// The type a local was declared with (a checked `No?` is `No` meanwhile).
+    fn declared_ty(&self, id: LocalId) -> Type {
+        self.f.narrowed.iter().rev().find_map(|n| match n {
+            Some(Narrow::Local(l, t)) if *l == id => Some(*t),
+            _ => None,
+        }).unwrap_or(self.f.locals[id].ty)
+    }
+
+    /// Before a loop: whatever its body may empty is not proved inside it,
+    /// not even before that point (the body runs again).
+    fn invalidate_loop(&mut self, s: &ast::Stmt) {
+        if self.f.narrowed.iter().all(|n| !matches!(n, Some(Narrow::Field(_)))) {
+            return;
+        }
+        let mut events: Vec<(Expr, bool)> = Vec::new();
+        visit_stmt(s, &mut |e| match &e.kind {
+            ExprKind::Lend(x) => events.push(((**x).clone(), false)),
+            ExprKind::MethodCall { recv, .. } => events.push(((**recv).clone(), false)),
+            ExprKind::GiveField(x) => events.push(((**x).clone(), true)),
+            _ => {}
+        });
+        for (e, inclusive) in events {
+            if let Some(p) = self.probe_path(&e) {
+                self.invalidate(&p, inclusive);
+            }
+        }
+    }
+
+    /// The path `e` names (`n`, `n.proximo`), found without checking `e`.
+    /// `None` for anything else, or a name not in scope yet.
+    fn probe_path(&self, e: &Expr) -> Option<Path> {
+        fn walk(cx: &Checker, e: &Expr) -> Option<(Path, Type)> {
+            match &e.kind {
+                ExprKind::Var(n) => cx.lookup(n).map(|id| ((id, Vec::new()), cx.f.locals[id].ty.unopt())),
+                ExprKind::Member(b, f) => {
+                    let ((id, mut fields), ty) = walk(cx, b)?;
+                    let (Type::Class(c) | Type::LentClass(c)) = ty else { return None };
+                    let (off, fty) = cx.class_field(c, f).ok()?;
+                    fields.push(off);
+                    Some(((id, fields), fty.unopt()))
+                }
+                _ => None,
+            }
+        }
+        walk(self, e).map(|(p, _)| p)
+    }
+
+    /// The error for using a `T?` that was not checked.
+    fn maybe_empty(&self, ty: Type, span: Span) -> Diagnostic {
+        err(format!("this is {ty}: it may be empty"), span)
+            .with_note("check it first: `if !isNaT(x) { ... }`, or leave early with `if isNaT(x) { return; }`")
+    }
+
+    fn warn(&self, message: String, span: Span, note: Option<String>) {
+        let mut w = Diagnostic::warning(message, span);
+        if let Some(n) = note {
+            w = w.with_note(n);
+        }
+        self.warnings.borrow_mut().push(w);
+    }
+
     fn check_proc(&mut self, p: &ast::ProcDecl) -> R<HProc> {
+        self.current = Some(self.proc_ids[&p.name.name]);
         let sig = self.sigs[self.proc_ids[&p.name.name]].clone();
         self.f = FnCx::new(sig.ret);
         let mut resized = HashSet::new();
@@ -971,6 +1232,13 @@ impl Checker {
     }
 
     fn block(&mut self, b: &ast::Block) -> R<HBlock> {
+        let mark = self.f.narrowed.len();
+        let r = self.block_here(b);
+        self.unnarrow_to(mark);
+        r
+    }
+
+    fn block_here(&mut self, b: &ast::Block) -> R<HBlock> {
         self.f.scopes.push(Scope::default());
         let mut stmts: Vec<HStmt> = Vec::new();
         for s in &b.stmts {
@@ -989,6 +1257,9 @@ impl Checker {
     // ---- statements ----
 
     fn stmt(&mut self, s: &ast::Stmt) -> R<HStmt> {
+        if matches!(s.kind, StmtKind::While { .. } | StmtKind::For { .. } | StmtKind::Walk { .. }) {
+            self.invalidate_loop(s);
+        }
         let kind = match &s.kind {
             StmtKind::Let { is_final, name, ty: Some(t), value: None, .. } => {
                 let ty = self.resolve(t)?;
@@ -1051,8 +1322,8 @@ impl Checker {
             StmtKind::Burn(name) => {
                 let id = self.lookup(&name.name).ok_or_else(|| self.unknown(&name.name, name.span))?;
                 match self.f.locals[id].ty {
-                    Type::Own(_) | Type::Class(_) | Type::Iface(_) => HStmtKind::Burn(id),
-                    Type::LentClass(_) | Type::LentIface(_) => {
+                    Type::Own(_) | Type::Class(_) | Type::Iface(_) | Type::OptClass(_) | Type::OptIface(_) => HStmtKind::Burn(id),
+                    Type::LentClass(_) | Type::LentIface(_) | Type::LentOptClass(_) | Type::LentOptIface(_) => {
                         return Err(err("cannot burn a lent object", name.span).with_note("only its owner can burn it"));
                     }
                     Type::Lent(_) => {
@@ -1067,7 +1338,7 @@ impl Checker {
                     return Err(err("this proc has no return type, so it returns nothing", e.span).with_note("write `return;`"));
                 }
                 (t, None) => return Err(err(format!("this proc must return a {t}"), s.span)),
-                (t @ (Type::Own(_) | Type::Class(_) | Type::Iface(_)), Some(Expr { kind: ExprKind::Var(name), span })) => {
+                (t @ (Type::Own(_) | Type::Class(_) | Type::Iface(_) | Type::OptClass(_) | Type::OptIface(_)), Some(Expr { kind: ExprKind::Var(name), span })) => {
                     // `return b` hands ownership back to the caller.
                     let id = self.lookup(name).ok_or_else(|| self.unknown(name, *span))?;
                     let h = self.give(id, *span)?;
@@ -1083,6 +1354,17 @@ impl Checker {
                 }
                 if s.kind == StmtKind::Break { HStmtKind::Break } else { HStmtKind::Continue }
             }
+            StmtKind::Assert { cond, msg } => {
+                // `if !cond { trap }`, as a `tri`: false and 0 (unknown) fail.
+                let h = self.expr(cond, Some(Type::Scalar(Scalar::Trit)))?;
+                if !is_truth(h.ty) {
+                    return Err(err(format!("`assert` needs a bool, found {}", h.ty), cond.span)
+                        .with_note("compare, e.g. `assert(x > 0);`"));
+                }
+                let fail = || HBlock { stmts: vec![HStmt { kind: HStmtKind::Trap(msg.clone()), span: s.span }], scope: vec![], span: s.span };
+                let ok = HBlock { stmts: vec![], scope: vec![], span: s.span };
+                HStmtKind::Tri { head: h, arms: Box::new([fail(), fail(), ok]), origin: Branch::If }
+            }
             StmtKind::If { cond, then, otherwise } => {
                 let h = self.expr(cond, Some(Type::Scalar(Scalar::Trit)))?;
                 if !is_truth(h.ty) {
@@ -1090,11 +1372,28 @@ impl Checker {
                         .with_note("compare first, e.g. `if x > 0 { ... }`"));
                 }
                 // `if` is a `tri` whose `0` arm traps: an unknown condition is an error.
-                let then = self.block(then)?;
+                // `isNaT` checks in the condition prove fields and locals not empty.
+                let (mut yes, mut no) = (Vec::new(), Vec::new());
+                facts(&h, true, &mut yes);
+                facts(&h, false, &mut no);
+                let mark = self.f.narrowed.len();
+                yes.iter().for_each(|p| self.narrow(p));
+                let then = self.block(then);
+                self.unnarrow_to(mark);
+                let then = then?;
+                no.iter().for_each(|p| self.narrow(p));
                 let otherwise = match otherwise {
-                    Some(b) => self.block(b)?,
-                    None => HBlock { stmts: vec![], scope: vec![], span: s.span },
+                    Some(b) => self.block(b),
+                    None => Ok(HBlock { stmts: vec![], scope: vec![], span: s.span }),
                 };
+                self.unnarrow_to(mark);
+                let otherwise = otherwise?;
+                // `if isNaT(x) { return; }`: after it, `x` is not empty (until the block ends).
+                if then.diverges() {
+                    no.iter().for_each(|p| self.narrow(p));
+                } else if otherwise.diverges() {
+                    yes.iter().for_each(|p| self.narrow(p));
+                }
                 let trap = HStmt { kind: HStmtKind::Trap("if condition is 0 (unknown)".into()), span: cond.span };
                 let unknown = HBlock { stmts: vec![trap], scope: vec![], span: cond.span };
                 HStmtKind::Tri { head: h, arms: Box::new([otherwise, unknown, then]), origin: Branch::If }
@@ -1115,9 +1414,14 @@ impl Checker {
                     return Err(err(format!("`while` needs a bool, found {}", h.ty), cond.span)
                         .with_note("compare first, e.g. `while i < 10 { ... }`"));
                 }
+                let mut yes = Vec::new();
+                facts(&h, true, &mut yes);
+                let mark = self.f.narrowed.len();
+                yes.iter().for_each(|p| self.narrow(p));
                 self.f.loops += 1;
                 let body = self.block(body);
                 self.f.loops -= 1;
+                self.unnarrow_to(mark);
                 HStmtKind::While { cond: h, body: body?, step: None }
             }
             // `for init; cond; step { body }` = `{ init; while cond { body } }` with `step`
@@ -1193,7 +1497,7 @@ impl Checker {
                 if !matches!(h.kind, HExprKind::Call(..) | HExprKind::DynCall { .. } | HExprKind::Builtin(..) | HExprKind::Print(_)) {
                     return Err(err("this expression does nothing", e.span).with_note("only calls can be used as statements"));
                 }
-                if let Type::Own(_) | Type::Class(_) | Type::Iface(_) = h.ty {
+                if let Type::Own(_) | Type::Class(_) | Type::Iface(_) | Type::OptClass(_) | Type::OptIface(_) = h.ty {
                     return Err(err("the buffer or object returned by this call would be lost", e.span)
                         .with_note("store it, e.g. `sym b[]: int = f(...);`, then burn it"));
                 }
@@ -1203,7 +1507,84 @@ impl Checker {
         Ok(HStmt { kind, span: s.span })
     }
 
+    /// `x = v` or `n.campo = v` where it is `T?`: allowed only while it is
+    /// empty (checked when it runs), so no object is ever lost:
+    /// `tri isNaT(target) { trap; trap; target = v }`.
+    fn assign_opt(&mut self, target: &Expr, value: &Expr) -> R<Option<HStmtKind>> {
+        let span = target.span;
+        let zero = hx(HExprKind::Word(Word::ZERO), Type::Scalar(Scalar::Int), span);
+        let (read, set) = match &target.kind {
+            ExprKind::Var(name) => {
+                let Some(id) = self.lookup(name) else { return Ok(None) };
+                let declared = self.declared_ty(id);
+                if !matches!(declared, Type::OptClass(_) | Type::OptIface(_)) {
+                    return Ok(None);
+                }
+                if self.f.locals[id].is_final {
+                    return Err(err(format!("`{name}` is final and cannot change"), span));
+                }
+                let hv = self.expect(value, declared)?;
+                (hx(HExprKind::Local(id), declared, span), HStmtKind::Assign { local: id, index: None, field: 0, value: hv })
+            }
+            ExprKind::Member(base, f) => {
+                let Ok(lv) = self.lvalue(base) else { return Ok(None) };
+                let (Type::Class(c) | Type::LentClass(c)) = lv.ty() else { return Ok(None) };
+                let (off, fty) = self.class_field(c, f)?;
+                if !fty.is_opt() {
+                    return Ok(None);
+                }
+                let obj = match lv {
+                    LVal::Local { id, ty, .. } => hx(HExprKind::Local(id), ty, base.span),
+                    LVal::Elem { arr, idx, off, .. } => hx(HExprKind::ElemField(Box::new(arr), Box::new(idx), off), Type::LentClass(c), base.span),
+                };
+                let hv = self.expect(value, fty)?;
+                let read = hx(HExprKind::ElemField(Box::new(obj.clone()), Box::new(zero.clone()), off), fty, span);
+                let set = match obj.kind {
+                    HExprKind::Local(id) => HStmtKind::Assign { local: id, index: Some(zero), field: off, value: hv },
+                    _ => HStmtKind::SetElem { arr: obj, index: zero, field: off, value: hv },
+                };
+                (read, set)
+            }
+            _ => return Ok(None),
+        };
+        let name = path_text(target);
+        let msg = format!("`{name}` still holds an object; take it out first (`old: T? = give {name};`) and burn it");
+        let fail = || HBlock { stmts: vec![HStmt { kind: HStmtKind::Trap(msg.clone()), span }], scope: vec![], span };
+        let ok = HBlock { stmts: vec![HStmt { kind: set, span }], scope: vec![], span };
+        let head = hx(HExprKind::Builtin(Builtin::IsNaT, vec![read]), Type::Bool, span);
+        Ok(Some(HStmtKind::Tri { head, arms: Box::new([fail(), fail(), ok]), origin: Branch::If }))
+    }
+
+    /// `give n.campo`: takes the object out of a `T?` field, leaving it empty.
+    fn give_field(&mut self, path: &Expr, span: Span) -> R<HExpr> {
+        let ExprKind::Member(base, f) = &path.kind else { unreachable!("the parser makes `give a.b` a field path") };
+        let lv = self.lvalue(base)?;
+        let (Type::Class(c) | Type::LentClass(c)) = lv.ty() else {
+            return Err(err(format!("{} has no fields to give away", lv.ty()), base.span));
+        };
+        let (off, fty) = self.class_field(c, f)?;
+        if !fty.is_opt() {
+            return Err(err(format!("only a field that may be empty can be given away; `{}` is {fty}", f.name), path.span)
+                .with_note(format!("the object would be left without it; declare it `{}: {fty}?` to allow this", f.name)));
+        }
+        let obj = match lv {
+            LVal::Local { id, ty, .. } => hx(HExprKind::Local(id), ty, base.span),
+            LVal::Elem { arr, idx, off, .. } => hx(HExprKind::ElemField(Box::new(arr), Box::new(idx), off), Type::LentClass(c), base.span),
+        };
+        let zero = hx(HExprKind::Word(Word::ZERO), Type::Scalar(Scalar::Int), span);
+        let read = hx(HExprKind::ElemField(Box::new(obj.clone()), Box::new(zero), off), fty, span);
+        let ty = self.narrowed_ty(&read, fty);
+        // From here on the field is empty again.
+        if let Some(p) = path_of(&read) {
+            self.invalidate(&p, true);
+        }
+        Ok(hx(HExprKind::TakeField(Box::new(obj), off), ty, span))
+    }
+
     fn assign(&mut self, target: &Expr, value: &Expr) -> R<HStmtKind> {
+        if let Some(k) = self.assign_opt(target, value)? {
+            return Ok(k);
+        }
         match self.lvalue(target)? {
             LVal::Local { id, off, ty } => {
                 let local = &self.f.locals[id];
@@ -1268,7 +1649,12 @@ impl Checker {
                         }
                     };
                     let zero = hx(HExprKind::Word(Word::ZERO), Type::Scalar(Scalar::Int), base.span);
+                    let read = hx(HExprKind::ElemField(Box::new(obj.clone()), Box::new(zero.clone()), off), ty, base.span);
+                    let ty = self.narrowed_ty(&read, ty);
                     return Ok(LVal::Elem { arr: obj, idx: zero, off, ty });
+                }
+                if lv.ty().is_opt() {
+                    return Err(self.maybe_empty(lv.ty(), base.span));
                 }
                 let Type::Struct(sname) = lv.ty() else {
                     return Err(err(format!("{} has no fields", lv.ty()), f.span));
@@ -1312,6 +1698,18 @@ impl Checker {
     fn coerce(&self, h: HExpr, ty: Type) -> R<HExpr> {
         if fits(h.ty, ty) {
             return Ok(h);
+        }
+        // An object (or interface value) fits where it may be empty: `No` -> `No?`.
+        match (h.ty, ty) {
+            (Type::Class(c), Type::OptClass(d)) if c == d => return Ok(HExpr { ty, ..h }),
+            (Type::Iface(i), Type::OptIface(j)) if i == j => return Ok(HExpr { ty, ..h }),
+            (Type::Class(_), Type::OptIface(i)) => {
+                let as_iface = self.coerce(h, Type::Iface(i))?;
+                return Ok(HExpr { ty, ..as_iface });
+            }
+            // A `T?` where a `T` is needed: it must be checked first.
+            (from, to) if from.is_opt() && !to.is_opt() && from.unopt() == to => return Err(self.maybe_empty(from, h.span)),
+            _ => {}
         }
         // An object becomes an interface value: it keeps its class number.
         if let (Type::Class(c), Type::Iface(i)) = (h.ty, ty) {
@@ -1385,8 +1783,8 @@ impl Checker {
         match self.f.locals[id].ty {
             Type::Own(e) => Ok(hx(HExprKind::Give(id), Type::Own(e), span)),
             Type::Class(c) => Ok(hx(HExprKind::Give(id), Type::Class(c), span)),
-            Type::Iface(i) => Ok(hx(HExprKind::Give(id), Type::Iface(i), span)),
-            Type::Lent(_) | Type::LentClass(_) | Type::LentIface(_) => Err(err("cannot give away something lent", span).with_note("only its owner can give it")),
+            t @ (Type::Iface(_) | Type::OptClass(_) | Type::OptIface(_)) => Ok(hx(HExprKind::Give(id), t, span)),
+            Type::Lent(_) | Type::LentClass(_) | Type::LentIface(_) | Type::LentOptClass(_) | Type::LentOptIface(_) => Err(err("cannot give away something lent", span).with_note("only its owner can give it")),
             t => Err(err(format!("only an own buffer can be given, this is {t}"), span)),
         }
     }
@@ -1457,6 +1855,12 @@ impl Checker {
             ExprKind::Str(s) => hx(HExprKind::Text(s.clone()), Type::Text, span),
             ExprKind::Bool(b) => hx(HExprKind::Word(if *b { Word::ONE } else { Word::NEG_ONE }), Type::Bool, span),
             ExprKind::NaT => match want {
+                // An empty `T?`: a NaT pointer (and class number for an interface).
+                Some(t @ Type::OptClass(_)) => hx(HExprKind::Word(kestrel_core::Word::NAT), t, span),
+                Some(t @ Type::OptIface(_)) => {
+                    let nat = hx(HExprKind::Word(kestrel_core::Word::NAT), Type::Scalar(Scalar::Int), span);
+                    hx(HExprKind::StructLit(vec![nat.clone(), nat]), t, span)
+                }
                 Some(Type::Scalar(Scalar::Real)) => hx(HExprKind::Real(kestrel_core::Real::NAT), Type::Scalar(Scalar::Real), span),
                 Some(t @ Type::Scalar(_)) => hx(HExprKind::Word(kestrel_core::Word::NAT), t, span),
                 _ => hx(HExprKind::Word(kestrel_core::Word::NAT), Type::Scalar(Scalar::Int), span),
@@ -1464,7 +1868,7 @@ impl Checker {
             ExprKind::Var(name) => {
                 if let Some(id) = self.lookup(name) {
                     let ty = self.f.locals[id].ty;
-                    if let Type::Class(_) | Type::LentClass(_) | Type::Iface(_) | Type::LentIface(_) = ty {
+                    if matches!(ty, Type::Class(_) | Type::LentClass(_) | Type::Iface(_) | Type::LentIface(_)) || ty.is_opt() {
                         return Err(err(format!("object `{name}` cannot be copied"), span)
                             .with_note(format!("pass it with `lend {name}` or `give {name}`; read its fields with `{name}.x`")));
                     }
@@ -1505,8 +1909,12 @@ impl Checker {
                 let (obj, c) = self.object(base)?.expect("checked by the guard");
                 let (off, ty) = self.class_field(c, field)?;
                 let zero = hx(HExprKind::Word(Word::ZERO), Type::Scalar(Scalar::Int), span);
-                hx(HExprKind::ElemField(Box::new(obj), Box::new(zero), off), Self::view(ty), span)
+                let h = hx(HExprKind::ElemField(Box::new(obj), Box::new(zero), off), Self::view(ty), span);
+                // A `T?` field proved not empty reads as a `T`.
+                let ty = self.narrowed_ty(&h, h.ty);
+                HExpr { ty, ..h }
             }
+            ExprKind::GiveField(path) => self.give_field(path, span)?,
             ExprKind::MethodCall { recv, name, args } => self.method_call(recv, name, args, span)?,
             ExprKind::Member(base, field) if self.iface_recv(base).is_ok_and(|h| h.is_some()) => {
                 return Err(err(format!("`{}` is hidden: an interface shows only its methods", field.name), field.span)
@@ -1519,6 +1927,9 @@ impl Checker {
                 };
                 let Some(tname) = enum_name else {
                     let hb = self.expr(base, None)?;
+                    if hb.ty.is_opt() {
+                        return Err(self.maybe_empty(hb.ty, base.span));
+                    }
                     let Type::Struct(sname) = hb.ty else {
                         return Err(err(format!("{} has no fields", hb.ty), field.span)
                             .with_note("`.` reads a struct field (`p.x`) or an enum value (`Cor.Verde`)"));
@@ -1649,8 +2060,15 @@ impl Checker {
         let trit = Type::Scalar(Scalar::Trit);
         let (ha, hb, ty) = match op {
             BinOp::And | BinOp::Or => {
+                // `!isNaT(x) && x.v > 0`: the right side runs only when the left proved `x`.
                 let ha = self.expr(a, Some(trit))?;
-                let hb = self.expr(b, Some(trit))?;
+                let mut proved = Vec::new();
+                facts(&ha, op == BinOp::And, &mut proved);
+                let mark = self.f.narrowed.len();
+                proved.iter().for_each(|p| self.narrow(p));
+                let hb = self.expr(b, Some(trit));
+                self.unnarrow_to(mark);
+                let hb = hb?;
                 for h in [&ha, &hb] {
                     if !is_truth(h.ty) {
                         return Err(err(format!("`{}` works on bools and trits, found {}", op.symbol(), h.ty), h.span)
@@ -1861,7 +2279,11 @@ impl Checker {
         {
             return Ok(hx(HExprKind::Lend(id), Type::Lent(el), e.span));
         }
-        self.expr(e, want)
+        let h = self.expr(e, want)?;
+        if h.ty.is_opt() {
+            return Err(self.maybe_empty(h.ty, e.span));
+        }
+        Ok(h)
     }
 
     /// Like `viewed`, for `print`/`printf`/`toText`: only arrays of numbers
@@ -2164,7 +2586,7 @@ impl Checker {
                 }
                 return Ok(builtin(Builtin::Len, vec![a], Type::Scalar(Scalar::Int)));
             }
-            "dump" | "exit" => return Err(err(format!("`{}(...)` is a statement, not a value", name.name), span)),
+            "dump" | "exit" | "assert" => return Err(err(format!("`{}(...)` is a statement, not a value", name.name), span)),
             "readFile" | "fileExists" => {
                 arity(1)?;
                 let p = self.expect(&args[0], text)?;
@@ -2209,11 +2631,18 @@ impl Checker {
             "isNaT" => {
                 // The only test that a NaT does not poison: `x == NaT` is NaT itself.
                 arity(1)?;
-                let x = self.expr(&args[0], None)?;
-                if !matches!(x.ty, Type::Scalar(_) | Type::Bool | Type::Text | Type::Enum(_)) {
+                // A `T?` local is read in place (not copied) to test it.
+                let x = match &args[0].kind {
+                    ExprKind::Var(n) if self.lookup(n).is_some_and(|id| self.declared_ty(id).is_opt()) => {
+                        let id = self.lookup(n).expect("checked");
+                        hx(HExprKind::Local(id), self.declared_ty(id), args[0].span)
+                    }
+                    _ => self.expr(&args[0], None)?,
+                };
+                if !matches!(x.ty, Type::Scalar(_) | Type::Bool | Type::Text | Type::Enum(_)) && !x.ty.is_opt() {
                     let note = match x.ty {
                         Type::Struct(_) => "test one field: `isNaT(p.x)`",
-                        _ => "arrays and objects are checked by the compiler: they always have a value when used",
+                        _ => "arrays and objects always have a value; an object that may be empty is declared `T?`",
                     };
                     return Err(err(format!("`isNaT` takes a number, bool, text or enum value, found {}", x.ty), x.span).with_note(note));
                 }
@@ -2287,6 +2716,15 @@ impl Checker {
     /// A call to a user proc or method. `this` is the method's `self`
     /// argument, already checked.
     fn call_proc(&mut self, id: ProcId, shown: &str, args: &[Expr], this: Option<HExpr>, span: Span) -> R<HExpr> {
+        // A deprecated method used inside its own class (or a proc calling
+        // itself) is not warned about: only the code outside has to move.
+        let own_class = shown.split_once('.').is_some_and(|(c, _)| self.class == Some(c));
+        if let Some(msg) = self.deprecated.get(&id)
+            && self.current != Some(id)
+            && !own_class
+        {
+            self.warn(format!("`{shown}` is deprecated"), span, msg.clone());
+        }
         let sig = self.sigs[id].clone();
         let params = &sig.params[usize::from(this.is_some())..];
         let hargs = self.call_args(shown, params, args, this, span)?;
@@ -2302,7 +2740,7 @@ impl Checker {
         let mut hargs: Vec<HExpr> = this.into_iter().collect();
         for (arg, (pname, pty)) in args.iter().zip(params) {
             let h = match (pty, &arg.kind) {
-                (Type::Own(_) | Type::Class(_) | Type::Iface(_), ExprKind::Give(x)) => {
+                (Type::Own(_) | Type::Class(_) | Type::Iface(_) | Type::OptClass(_) | Type::OptIface(_), ExprKind::Give(x)) => {
                     let lid = self.lookup(&x.name).ok_or_else(|| self.unknown(&x.name, x.span))?;
                     let h = self.give(lid, arg.span)?;
                     self.coerce(h, *pty)?
@@ -2333,11 +2771,36 @@ impl Checker {
                     let h = self.lent_arg(x)?;
                     match h.ty {
                         Type::Class(c2) | Type::LentClass(c2) if c2 == *c => HExpr { ty: *pty, span: arg.span, ..h },
+                        t if t.is_opt() => return Err(self.maybe_empty(t, arg.span)),
                         t => return Err(err(format!("expected {pty}, found {t}"), arg.span)),
                     }
                 }
                 (Type::LentClass(_), _) => {
                     return Err(err(format!("parameter `{pname}` borrows an object"), arg.span).with_note("pass it with `lend c`"));
+                }
+                (Type::LentOptClass(c), ExprKind::Lend(x)) => {
+                    let h = self.lent_arg(x)?;
+                    match h.ty {
+                        Type::Class(c2) | Type::LentClass(c2) | Type::OptClass(c2) | Type::LentOptClass(c2) if c2 == *c => {
+                            HExpr { ty: *pty, span: arg.span, ..h }
+                        }
+                        t => return Err(err(format!("expected {pty}, found {t}"), arg.span)),
+                    }
+                }
+                (Type::LentOptIface(i), ExprKind::Lend(x)) => {
+                    let h = self.lent_arg(x)?;
+                    match h.ty {
+                        Type::Iface(j) | Type::LentIface(j) | Type::OptIface(j) | Type::LentOptIface(j) if j == *i => {
+                            HExpr { ty: *pty, span: arg.span, ..h }
+                        }
+                        Type::Class(c) | Type::LentClass(c) | Type::OptClass(c) | Type::LentOptClass(c) if self.ifaces[*i].impls.contains(&c) => {
+                            hx(HExprKind::ToIface(Box::new(h), self.class_tags[c]), *pty, arg.span)
+                        }
+                        t => return Err(err(format!("expected {pty}, found {t}"), arg.span)),
+                    }
+                }
+                (Type::LentOptClass(_) | Type::LentOptIface(_), _) => {
+                    return Err(err(format!("parameter `{pname}` borrows an object"), arg.span).with_note("pass it with `lend x`"));
                 }
                 (Type::LentIface(i), ExprKind::Lend(x)) => {
                     let h = self.lent_arg(x)?;
@@ -2361,6 +2824,19 @@ impl Checker {
             };
             hargs.push(h);
         }
+        // What the callee borrows, it may change: a `T?` field under it is
+        // not proved any more (the callee could have emptied it).
+        for h in &hargs {
+            let inner = match &h.kind {
+                HExprKind::ToIface(x, _) => x,
+                _ => h,
+            };
+            if matches!(h.ty, Type::Lent(_) | Type::LentClass(_) | Type::LentIface(_) | Type::LentOptClass(_) | Type::LentOptIface(_))
+                && let Some(p) = path_of(inner)
+            {
+                self.invalidate(&p, false);
+            }
+        }
         Ok(hargs)
     }
 
@@ -2369,14 +2845,14 @@ impl Checker {
         if let ExprKind::Var(name) = &x.kind {
             let lid = self.lookup(name).ok_or_else(|| self.unknown(name, x.span))?;
             let ty = self.f.locals[lid].ty;
-            if !matches!(ty, Type::Own(_) | Type::Lent(_) | Type::Class(_) | Type::LentClass(_) | Type::Iface(_) | Type::LentIface(_)) {
+            if !matches!(ty, Type::Own(_) | Type::Lent(_) | Type::Class(_) | Type::LentClass(_) | Type::Iface(_) | Type::LentIface(_)) && !ty.is_opt() {
                 return Err(err(format!("only arrays and objects are lent; `{name}` is {ty}"), x.span)
                     .with_note("numbers, texts and structs are copied: pass them without `lend`"));
             }
             return Ok(hx(HExprKind::Lend(lid), ty, x.span));
         }
         let h = self.expr(x, None)?;
-        if !matches!(h.ty, Type::Lent(_) | Type::LentClass(_) | Type::LentIface(_)) {
+        if !matches!(h.ty, Type::Lent(_) | Type::LentClass(_) | Type::LentIface(_) | Type::LentOptClass(_) | Type::LentOptIface(_)) {
             return Err(err(format!("only arrays and objects are lent; this is {}", h.ty), x.span));
         }
         Ok(h)
@@ -2397,6 +2873,15 @@ impl LVal {
         match self {
             LVal::Local { ty, .. } | LVal::Elem { ty, .. } => *ty,
         }
+    }
+}
+
+/// `n.proximo` as written, for messages.
+fn path_text(e: &Expr) -> String {
+    match &e.kind {
+        ExprKind::Var(n) => n.clone(),
+        ExprKind::Member(b, f) => format!("{}.{}", path_text(b), f.name),
+        _ => "this".into(),
     }
 }
 
@@ -2421,7 +2906,7 @@ fn visit_stmt(s: &ast::Stmt, f: &mut dyn FnMut(&Expr)) {
             visit_expr(target, f);
             visit_expr(value, f);
         }
-        StmtKind::Return(Some(e)) | StmtKind::Expr(e) => visit_expr(e, f),
+        StmtKind::Return(Some(e)) | StmtKind::Expr(e) | StmtKind::Assert { cond: e, .. } => visit_expr(e, f),
         StmtKind::Return(None) | StmtKind::Burn(_) | StmtKind::Break | StmtKind::Continue => {}
         StmtKind::Tri { head, neg, zero, pos } => {
             visit_expr(head, f);

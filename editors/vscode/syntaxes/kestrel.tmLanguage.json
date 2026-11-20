@@ -91,7 +91,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.kestrel",
-          "match": "\\b(print|printl|printf|toText|emit|input|len|dump|sub|toInt|toReal|isDigit|isLetter|isUpper|isLower|isSpace|readFile|fileExists|writeFile|writeBytes|readLine|eof|argCount|arg|exit|append|pop|insert|remove|resize|clear|replace|isNaT)\\b(?=\\s*\\()"
+          "match": "\\b(print|printl|printf|toText|emit|input|len|dump|sub|toInt|toReal|isDigit|isLetter|isUpper|isLower|isSpace|readFile|fileExists|writeFile|writeBytes|readLine|eof|argCount|arg|exit|append|pop|insert|remove|resize|clear|replace|isNaT|assert)\\b(?=\\s*\\()"
         },
         { "name": "entity.name.function.call.kestrel", "match": "\\b[A-Za-z_]\\w*(?=\\s*\\()" }
       ]

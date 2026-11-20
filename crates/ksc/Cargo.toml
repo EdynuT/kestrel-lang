@@ -6,6 +6,5 @@ license.workspace = true
 
 [dependencies]
 kestrel-core = { path = "../kestrel-core" }
-
-[dev-dependencies]
+# `ksc --test` runs the tests on the VM.
 ksvm = { path = "../ksvm" }

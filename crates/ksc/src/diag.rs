@@ -20,17 +20,23 @@ impl Span {
     }
 }
 
-/// A compiler error pointing at a place in the source.
+/// A compiler error (or warning) pointing at a place in the source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
     pub message: String,
     pub span: Span,
     pub note: Option<String>,
+    /// A warning does not stop the compilation (`@deprecated` uses).
+    pub warning: bool,
 }
 
 impl Diagnostic {
     pub fn new(message: impl Into<String>, span: Span) -> Diagnostic {
-        Diagnostic { message: message.into(), span, note: None }
+        Diagnostic { message: message.into(), span, note: None, warning: false }
+    }
+
+    pub fn warning(message: impl Into<String>, span: Span) -> Diagnostic {
+        Diagnostic { warning: true, ..Diagnostic::new(message, span) }
     }
 
     pub fn with_note(mut self, note: impl Into<String>) -> Diagnostic {
@@ -57,7 +63,8 @@ impl Diagnostic {
         let width = src[start..self.span.end.clamp(start, line_end)].chars().count().max(1);
 
         let gutter = " ".repeat(line_no.to_string().len());
-        let mut out = format!("error: {}\n{gutter}--> {path}:{line_no}:{col}\n{gutter} |\n", self.message);
+        let level = if self.warning { "warning" } else { "error" };
+        let mut out = format!("{level}: {}\n{gutter}--> {path}:{line_no}:{col}\n{gutter} |\n", self.message);
         out += &format!("{line_no} | {text}\n");
         out += &format!("{gutter} | {}{}\n", " ".repeat(col - 1), "^".repeat(width));
         if let Some(note) = &self.note {

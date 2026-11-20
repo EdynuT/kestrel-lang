@@ -1048,3 +1048,183 @@ proc main() {
         assert!(e.message.contains(why) || e.note.as_ref().is_some_and(|n| n.contains(why)), "{body}: {} {:?}", e.message, e.note);
     }
 }
+
+#[test]
+fn assert_tests_and_deprecated() {
+    // A failed assert traps with its line and the condition (or the message).
+    assert!(main_trap("x: int = 2;\n    assert(x == 3);").contains("assert failed (line 2): x == 3"));
+    assert!(main_trap("assert(1 > 2, \"nunca\");").contains("assert failed (line 1): nunca"));
+    assert_eq!(main_out("assert(1 < 2); printl(\"ok\");"), "ok\n");
+
+    let src = r#"@deprecated("use somar")
+proc soma(a: int, b: int) -> int { return a + b; }
+proc somar(a: int, b: int) -> int { return a + b; }
+
+@deprecated
+class Velha {
+    x: int;
+    public proc nova() -> Velha { return Velha { x: 1 }; }
+    @deprecated("use ver")
+    public proc olhar(lent self) -> int { return self.ver(); }
+    public proc ver(lent self) -> int { return self.x; }
+}
+
+@test
+proc passa() { assert(somar(2, 3) == 5); }
+
+@test
+proc falha() { assert(somar(2, 2) == 5, "conta errada"); }
+
+proc main() {
+    printl(soma(1, 2));
+    v: Velha = Velha.nova();
+    printl(v.olhar());
+    burn v;
+}
+"#;
+    let o = ksc::compile_full(src, true).unwrap();
+    let w: Vec<(String, Option<String>)> = o.warnings.iter().map(|w| (w.message.clone(), w.note.clone())).collect();
+    assert_eq!(
+        w,
+        [
+            ("`soma` is deprecated".to_string(), Some("use somar".to_string())),
+            ("class `Velha` is deprecated".to_string(), None),
+            ("`Velha.olhar` is deprecated".to_string(), Some("use ver".to_string())),
+        ]
+    );
+    assert!(o.warnings.iter().all(|w| w.warning));
+    let names: Vec<&str> = o.tests.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["passa", "falha"]);
+    // Each test runs as the entry of its own VM.
+    let run = |id: u32| {
+        let mut m = o.module.clone();
+        m.entry = id;
+        Vm::new(&m, &b""[..], Vec::new()).run()
+    };
+    assert!(run(o.tests[0].1).is_ok());
+    assert!(run(o.tests[1].1).unwrap_err().reason.contains("assert failed (line 18): conta errada"));
+
+    // Without `main`, only `ksc --test` accepts the file.
+    let only_tests = "@test proc t() { assert(true); }";
+    assert!(ksc::compile(only_tests).unwrap_err().message.contains("no `proc main`"));
+    assert_eq!(ksc::compile_full(only_tests, false).unwrap().tests.len(), 1);
+
+    for (src, why) in [
+        ("@test proc t(x: int) { } proc main() { }", "cannot take parameters"),
+        ("class A { x: int; @test public proc t(lent self) { } } proc main() { }", "unknown annotation `@test` on a method"),
+        ("@foo proc f() { } proc main() { }", "unknown annotation `@foo` on a proc"),
+        ("proc main() { x: bool = assert(true); }", "is a statement, not a value"),
+        ("proc main() { assert(1.5); }", "`assert` needs a bool"),
+    ] {
+        let e = ksc::compile(src).unwrap_err();
+        assert!(e.message.contains(why), "{src}: {}", e.message);
+    }
+}
+
+#[test]
+fn recursive_and_optional_objects() {
+    // A tree: a class holding an array of itself. `burn` frees it by recursion.
+    let tree = r#"class No {
+    public valor: int;
+    filhos[]: No;
+    public proc novo(v: int) -> No { f[]: No = {}; return No { valor: v, filhos: give f }; }
+    public proc add(lent self, own n: No) { append(self.filhos, give n); }
+    public proc soma(lent self) -> int {
+        s: int = self.valor;
+        for i: int = 0; i < len(self.filhos); i++ { s += self.filhos[i].soma(); }
+        return s;
+    }
+}
+proc main() {
+    r: No = No.novo(1);
+    a: No = No.novo(2);
+    a.add(No.novo(4));
+    r.add(give a);
+    r.add(No.novo(3));
+    printl(r.soma());
+    burn r;
+    dump("fim");
+}
+"#;
+    let o = out(tree);
+    assert!(o.starts_with("10\n") && !o.contains("heap #"), "{o}");
+
+    // A linked list: `proximo: No?` may be empty and is checked before use.
+    let list = r#"interface F { proc nome(lent self) -> text; }
+@impl(F) class A { x: int; public proc novo() -> A { return A { x: 1 }; }
+    @override public proc nome(lent self) -> text { return "a"; } }
+
+class No {
+    public valor: int;
+    public proximo: No?;
+    public proc novo(v: int) -> No { return No { valor: v, proximo: NaT }; }
+    public proc anexar(lent self, own n: No) {
+        if isNaT(self.proximo) {
+            self.proximo = give n;
+            return;
+        }
+        self.proximo.anexar(give n);
+    }
+}
+
+proc soma(lent n: No?) -> int {
+    if isNaT(n) { return 0; }
+    return n.valor + soma(lend n.proximo);
+}
+
+proc main() {
+    lista: No = No.novo(1);
+    lista.anexar(No.novo(2));
+    lista.anexar(No.novo(3));
+    printl(soma(lend lista));
+    if !isNaT(lista.proximo) && lista.proximo.valor == 2 { printl("segundo"); }
+    resto: No? = give lista.proximo;
+    printl(soma(lend lista), soma(lend resto), isNaT(lista.proximo));
+    v: No?;
+    printl(isNaT(v));
+    v = No.novo(9);
+    if isNaT(v) || v.valor == 9 { printl("nove"); }
+    f: F? = A.novo();
+    g: F?;
+    if !isNaT(f) { printl(f.nome(), isNaT(g)); }
+    burn f;
+    burn g;
+    burn v;
+    burn resto;
+    burn lista;
+    dump("fim");
+}
+"#;
+    let o = out(list);
+    assert!(o.starts_with("6\nsegundo\n1 5 true\ntrue\nnove\na true\n") && !o.contains("heap #"), "{o}");
+
+    // Putting an object into a `T?` that still holds one traps (it would be lost).
+    let decls = "class No { public valor: int; public proximo: No?;
+        public proc novo(v: int) -> No { return No { valor: v, proximo: NaT }; }
+        public proc mexer(lent self) { } }
+        proc ver(lent n: No) { }";
+    let run = |body: &str| run_with(&format!("{decls} proc main() {{ n: No = No.novo(1); {body} burn n; }}"), "").0;
+    assert!(run("n.proximo = No.novo(2); n.proximo = No.novo(3);").unwrap_err().reason.contains("`n.proximo` still holds an object"));
+    assert!(run("v: No? = No.novo(5); v = No.novo(6); burn v;").unwrap_err().reason.contains("`v` still holds an object"));
+    assert!(run("v: No?; burn v; v = No.novo(6); burn v;").is_ok());
+
+    for (body, why) in [
+        ("printl(n.proximo.valor);", "it may be empty"),
+        ("if !isNaT(n.proximo) { n.mexer(); printl(n.proximo.valor); }", "it may be empty"),
+        ("if !isNaT(n.proximo) { while true { printl(n.proximo.valor); n.mexer(); } }", "it may be empty"),
+        ("if !isNaT(n.proximo) { x: No = give n.proximo; printl(n.proximo.valor); burn x; }", "it may be empty"),
+        ("v: No?; x: No = give v; burn x;", "it may be empty"),
+        ("v: No?; ver(lend v); burn v;", "it may be empty"),
+        ("x: int = give n.valor;", "only a field that may be empty can be given away"),
+        ("v: No?;", "`v` is never burned"),
+        ("x: int? = 1;", "`?` is for classes and interfaces"),
+    ] {
+        let e = ksc::compile(&format!("{decls} proc main() {{ n: No = No.novo(1); {body} burn n; }}")).unwrap_err();
+        assert!(e.message.contains(why), "{body}: {}", e.message);
+    }
+    // Checked, then nothing that could empty it: fine.
+    assert!(ksc::compile(&format!(
+        "{decls} proc main() {{ n: No = No.novo(1); if !isNaT(n.proximo) {{ n.proximo.mexer(); ver(lend n.proximo); }} burn n; }}"
+    ))
+    .is_ok());
+}

@@ -81,6 +81,8 @@ pub enum Tok {
     Public,
     Private,
     At,
+    /// `?` after a type: `No?` may be empty.
+    Question,
     Sym,
     Match,
     Dot,
@@ -192,6 +194,7 @@ const OPERATORS: &[(&str, Tok)] = &[
     (";", Tok::Semi),
     ("|", Tok::Pipe),
     ("@", Tok::At),
+    ("?", Tok::Question),
     ("(", Tok::LParen),
     (")", Tok::RParen),
     ("{", Tok::LBrace),

@@ -560,7 +560,7 @@ total: real = c.fechar(); // depois disto, `c` não existe mais
 - Um método recebe o objeto como primeiro parâmetro: `lent self` (empresta: pode ler e mudar os campos) ou `own self` (consome: precisa terminar com `burn self`, `give` ou `return`). `c.metodo(...)` passa `c` sozinho. Um método `own self` só pode ser chamado numa variável que é dona do objeto.
 - Método sem `self` é da classe ("static"): `Conta.nova(...)`. Não há construtor especial; o objeto é criado preenchendo todos os campos, e só dentro da classe.
 - Campos podem ser de qualquer tipo, inclusive arrays e outros objetos. Um campo que possui algo (array ou objeto) não pode ser trocado, só alterado por dentro (`append(self.hist, x)`, `self.hist[i] = ...`). Lido de fora, ele vem emprestado.
-- Uma classe não pode conter a si mesma (nem por outra classe), porque o primeiro objeto nunca poderia ser criado. Um struct não pode conter objetos.
+- Uma classe não pode ter um campo **obrigatório** dela mesma (nem por outra classe), porque o primeiro objeto nunca poderia ser criado. Para árvores e listas ligadas, use um array (`filhos[]: No`, que pode começar vazio) ou um campo opcional (`proximo: No?`, veja abaixo). Um struct não pode conter objetos.
 - Emprestar o mesmo objeto (ou um campo dele) duas vezes na mesma chamada é erro: `c.f(lend c.hist)`.
 - `print(c)`, `{c}` e `%s` mostram todos os campos, inclusive os privados (para depurar).
 
@@ -583,6 +583,42 @@ burn contas;                   // libera o array e todos os objetos dentro dele
 - Emprestar um elemento e tirar um elemento do mesmo array na mesma chamada é erro: `f(lend contas[0], remove(contas, 0))`.
 - `burn contas` libera cada objeto (e o que eles possuem) antes do array. Um campo `contas[]: Conta` dentro de outra classe funciona igual.
 - O array inteiro não é impresso (como os de struct): imprima elemento por elemento.
+#### Objetos opcionais (`T?`)
+
+```
+class No {
+    public valor: int;
+    public proximo: No?;          // pode estar vazio
+    public proc novo(v: int) -> No { return No { valor: v, proximo: NaT }; }
+}
+
+proc soma(lent n: No?) -> int {
+    if isNaT(n) {
+        return 0;
+    }
+    return n.valor + soma(lend n.proximo);   // aqui `n` já foi conferido
+}
+
+if !isNaT(lista.proximo) {
+    printl(lista.proximo.valor);             // só aqui dentro
+}
+resto: No? = give lista.proximo;             // tira o objeto; o campo fica vazio
+```
+
+- `T?` (com `T` uma classe ou interface) é um objeto que **pode estar vazio**. Vazio é NaT: `proximo: NaT` ao criar, `x: No?;` declarado sem valor, e `isNaT(x)` confere. Vale em campos, variáveis, parâmetros (`own n: No?`, `lent n: No?`) e retornos (`-> No?`). Não vale em arrays nem em structs, nem para números e textos (que já podem ser NaT).
+- **O compilador obriga a conferir antes de usar** (como em Kotlin e Swift): chamar um método, ler um campo, emprestar como `lent No` ou guardar num `No` só é permitido onde uma conferência provou que não está vazio:
+  - dentro de `if !isNaT(x) { ... }` (ou no `else` de `if isNaT(x)`);
+  - depois de `if isNaT(x) { return; }` (ou `break`, `continue`, `exit`), até o fim do bloco;
+  - no lado direito de `!isNaT(x) && ...` e de `isNaT(x) || ...`;
+  - dentro de `while !isNaT(x) { ... }`.
+  Usar sem conferir é erro: `this is lent No?: it may be empty`.
+- A conferência vale para variáveis e caminhos de campos (`n.proximo.proximo`), não para elementos de arrays.
+- **A conferência de um campo deixa de valer** quando algo pode tê-lo esvaziado: emprestar o dono (ou um caminho acima do campo) numa chamada, chamar um método do dono (`n.mexer()`), ou `give n.proximo`. Usar o próprio campo (`n.proximo.metodo()`, `lend n.proximo`) não anula. Num laço, o que o corpo pode esvaziar não vale em nenhuma parte dele.
+- `give n.proximo` tira o objeto de um campo `T?` e o deixa vazio. Só campos `T?` podem ser dados assim.
+- `n.proximo = x` e `v = x` (com `v: No?`) só funcionam se estiver **vazio**; senão dispara Trap (o objeto antigo seria perdido). Para trocar: `velho: No? = give n.proximo;`, `burn velho;` e então atribua.
+- Uma variável `T?` tem dono como um objeto: precisa de `burn` (que não faz nada se estiver vazia) ou `give`. `burn` de um objeto libera também os campos `T?` que não estão vazios.
+- Ao imprimir um objeto, um campo `T?` (ou de interface) aparece como `...`.
+
 ### 8.11 `interface`, `@impl` e `@override`
 
 ```
@@ -635,7 +671,27 @@ proc criar(quadrado: bool) -> Forma { ... } // pode devolver classes diferentes
 - Arrays de interfaces seguem as regras dos arrays de objetos: `formas[i]` fica no array (emprestado), sai com `pop`/`remove`, e não valem `claim`, `resize`, `clear` nem `formas[i] = ...`.
 - Ainda não dá para voltar de `Forma` para `Circulo` (descobrir a classe e usá-la como tal).
 
-### 8.12 Limites do compilador
+### 8.12 `assert`, `@test` e `@deprecated`
+
+```
+@test
+proc somaFunciona() {
+    assert(somar(2, 3) == 5);
+    assert(somar(-1, 1) == 0, "soma com negativo");
+}
+
+@deprecated("use somar")
+proc soma(a: int, b: int) -> int { return a + b; }
+```
+
+- `assert(cond);` confere que `cond` é verdade. Se for falsa (ou 0/NaT), dispara Trap com a linha e a condição como foi escrita: `assert failed (line 3): somar(2, 3) == 5`. Com uma mensagem, `assert(cond, "texto");`, ela aparece no lugar da condição. A mensagem é um texto literal. `assert` é um comando, não um valor.
+- `@test` marca um proc **sem parâmetros e sem retorno** como teste. `ksc --test arquivo.ks` compila e roda cada teste numa VM separada, sem gravar o `.ksb`, e mostra `ok`/`FAILED` de cada um, o motivo e o que o teste imprimiu (só quando falha), e no fim `test result: N passed, M failed`. O comando sai com código 1 se algum teste falhou.
+- Um teste falha se der Trap (um `assert` que falhou, uma divisão por zero...) ou se chamar `exit(n)` com `n` diferente de 0.
+- Os testes são compilados junto com o programa (o compilador confere tipos e posse deles também), mas o `main` não os chama. Com `--test`, o arquivo pode nem ter `main`.
+- `@deprecated` (ou `@deprecated("use outra")`) marca um proc, um método ou uma classe como **obsoleto**. Continua funcionando, mas cada uso fora dele mostra um aviso (`warning:`) com a mensagem, e a compilação segue. Dentro da própria classe (ou do próprio proc) não há aviso.
+- Onde cada anotação vale: proc (`@test`, `@deprecated`), método (`@override`, `@deprecated`), classe (`@impl(...)`, `@deprecated`). Uma anotação desconhecida, ou no lugar errado, é erro.
+
+### 8.13 Limites do compilador
 
 | Limite | Valor | Ao passar |
 |---|---|---|

@@ -73,7 +73,7 @@ fn check_proc(p: &HProc) -> R<()> {
 }
 
 fn is_own(t: Type) -> bool {
-    matches!(t, Type::Own(_) | Type::Class(_) | Type::Iface(_))
+    matches!(t, Type::Own(_) | Type::Class(_) | Type::Iface(_) | Type::OptClass(_) | Type::OptIface(_))
 }
 
 struct Checker<'h> {
@@ -146,6 +146,9 @@ impl Checker<'_> {
                 if index.is_some() {
                     // Checked after the operands so `b[0] = f(give b)` is caught.
                     self.require_alive(*local, &st, s.span)?;
+                } else if self.p.locals[*local].ty.is_opt() {
+                    // A `T?` may be assigned in any state: sema checks it is empty when it runs.
+                    st[*local] = St::Alive;
                 } else if is_own(self.p.locals[*local].ty) {
                     let name = self.name(*local);
                     match st[*local] {
@@ -162,7 +165,8 @@ impl Checker<'_> {
             }
             HStmtKind::Declare(local) => {
                 if is_own(self.p.locals[*local].ty) {
-                    st[*local] = St::Empty;
+                    // `x: No?;` holds a valid (empty) value; `x: No;` has none yet.
+                    st[*local] = if self.p.locals[*local].ty.is_opt() { St::Alive } else { St::Empty };
                     if let Some(l) = self.loops.last_mut() {
                         l.inner.push(*local);
                     }
@@ -386,6 +390,10 @@ impl Checker<'_> {
                     _ => self.expr(arr, st)?,
                 }
             }
+            HExprKind::TakeField(obj, _) => match obj.kind {
+                HExprKind::Local(id) => self.require_alive(id, st, e.span)?,
+                _ => self.expr(obj, st)?,
+            },
             HExprKind::Bind(_, value, body) => {
                 self.expr(value, st)?;
                 self.expr(body, st)?;
@@ -398,7 +406,7 @@ impl Checker<'_> {
 /// The local a lent argument borrows from (`lend c`, or `c.items` read
 /// through an object), if it is one.
 fn lent_root(e: &HExpr) -> Option<LocalId> {
-    if !matches!(e.ty, Type::Lent(_) | Type::LentClass(_) | Type::LentIface(_)) {
+    if !matches!(e.ty, Type::Lent(_) | Type::LentClass(_) | Type::LentIface(_) | Type::LentOptClass(_) | Type::LentOptIface(_)) {
         return None;
     }
     let mut e = e;
@@ -420,6 +428,7 @@ fn gives(e: &HExpr, id: LocalId) -> Option<crate::diag::Span> {
         HExprKind::DynCall { args, .. } => args.iter().find_map(sub),
         HExprKind::Binary(_, a, b) | HExprKind::Index(a, b) | HExprKind::Bind(_, a, b) => sub(a).or_else(|| sub(b)),
         HExprKind::ElemField(a, b, _) => sub(a).or_else(|| sub(b)),
+        HExprKind::TakeField(a, _) => sub(a),
         HExprKind::Call(_, xs) | HExprKind::Builtin(_, xs) | HExprKind::Pack(xs) | HExprKind::StructLit(xs) => xs.iter().find_map(sub),
         HExprKind::Print(ps) => ps.iter().find_map(|(_, x)| sub(x)),
         _ => None,
@@ -435,6 +444,7 @@ fn takes_out(e: &HExpr, id: LocalId) -> Option<crate::diag::Span> {
         HExprKind::DynCall { args, .. } => args.iter().find_map(sub),
         HExprKind::Binary(_, a, b) | HExprKind::Index(a, b) | HExprKind::Bind(_, a, b) => sub(a).or_else(|| sub(b)),
         HExprKind::ElemField(a, b, _) => sub(a).or_else(|| sub(b)),
+        HExprKind::TakeField(a, _) => sub(a),
         HExprKind::Call(_, xs) | HExprKind::Builtin(_, xs) | HExprKind::Pack(xs) | HExprKind::StructLit(xs) => xs.iter().find_map(sub),
         HExprKind::Print(ps) => ps.iter().find_map(|(_, x)| sub(x)),
         _ => None,

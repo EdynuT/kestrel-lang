@@ -40,7 +40,7 @@ A biblioteca padrão da 0.7 e o `ksc.ks` (0.8 e 0.9) são escritos como **aulas*
   - `Conta { ... }` só cria o objeto dentro da própria classe; fora dela se usa um método static (`Conta.nova()`), o "construtor" sem palavra especial.
   - `c.metodo()` empresta `c` (`lent self`); um método `own self` consome o objeto. `print(c)` mostra os campos.
   - Arrays de objetos (2026-11-20): o array é dono dos objetos, que entram com `give` e saem com `pop`/`remove` (que agora devolve o elemento). `v[i]` fica no array (emprestado). Sem elementos vazios: `claim`, `resize` e `clear` não valem para eles, e trocar `v[i] = ...` é erro. `burn v` libera cada objeto.
-  - Próximo: valores de interface com dono (variáveis, `own`, arrays de interfaces).
+  - Interfaces com dono (2026-11-20): variáveis, campos, `own`, retorno e arrays de uma interface guardam objetos de classes diferentes; `burn` libera conforme a classe. Falta: voltar da interface para a classe concreta.
   - Um objeto de classe tem dono, como um array: `burn`, `give`, `lend` e `return`, e esquecer é erro de compilação.
 - **Sem herança:** reaproveitamento por composição (uma classe tem outra como campo) e por interfaces, como em Go e Rust. Herança conflita com a posse (quem é dono da parte herdada? o que o `burn` libera?).
 - **Sem construtor especial:** o objeto é criado preenchendo os campos: `Token { kind: 1, start: 0, len: 4 }`.

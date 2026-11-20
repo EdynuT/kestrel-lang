@@ -73,7 +73,7 @@ fn check_proc(p: &HProc) -> R<()> {
 }
 
 fn is_own(t: Type) -> bool {
-    matches!(t, Type::Own(_) | Type::Class(_))
+    matches!(t, Type::Own(_) | Type::Class(_) | Type::Iface(_))
 }
 
 struct Checker<'h> {
@@ -398,7 +398,7 @@ impl Checker<'_> {
 /// The local a lent argument borrows from (`lend c`, or `c.items` read
 /// through an object), if it is one.
 fn lent_root(e: &HExpr) -> Option<LocalId> {
-    if !matches!(e.ty, Type::Lent(_) | Type::LentClass(_)) {
+    if !matches!(e.ty, Type::Lent(_) | Type::LentClass(_) | Type::LentIface(_)) {
         return None;
     }
     let mut e = e;

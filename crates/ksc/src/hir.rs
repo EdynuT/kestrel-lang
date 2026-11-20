@@ -22,7 +22,11 @@ pub struct Hir {
     pub structs: Structs,
     /// Fields of each class, in declared order (`burn` frees what they own).
     pub classes: Structs,
+    /// The classes that implement each interface, with their numbers.
+    pub ifaces: Ifaces,
 }
+
+pub type Ifaces = HashMap<&'static str, Vec<(i64, &'static str)>>;
 
 /// Struct layouts. A struct value is its fields side by side, nested
 /// structs flattened: `struct A { x: int; b: B; }` with `B { y; z }` takes
@@ -35,7 +39,7 @@ pub fn width(structs: &Structs, ty: Type) -> usize {
         Type::Struct(n) => structs[n].iter().map(|(_, t)| width(structs, *t)).sum(),
         Type::Void => 0,
         // An interface value: the object's pointer and its class number.
-        Type::LentIface(_) => 2,
+        Type::LentIface(_) | Type::Iface(_) => 2,
         _ => 1,
     }
 }
@@ -227,9 +231,10 @@ pub enum HExprKind {
     /// An object seen through an interface: its pointer (the inner
     /// expression) and its class number.
     ToIface(Box<HExpr>, i64),
-    /// `d.m(args)` on an interface value (local `recv`): calls the method of
-    /// the object's class, chosen by its class number from `impls`.
-    DynCall { recv: LocalId, impls: Vec<(i64, ProcId)>, args: Vec<HExpr> },
+    /// `d.m(args)` on an interface value: calls the method of the object's
+    /// class, chosen by its class number from `impls`. `args[0]` is the
+    /// receiver (a lent interface value: pointer and class number).
+    DynCall { impls: Vec<(i64, ProcId)>, args: Vec<HExpr> },
     /// A field of an array element, `pts[i].x`: the array (a pointer),
     /// index, offset of the field inside the element.
     ElemField(Box<HExpr>, Box<HExpr>, usize),

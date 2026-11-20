@@ -855,7 +855,7 @@ proc main() {
         ("@impl(F) class A { x: real; @override proc area(lent self) -> real { return 1.0; } }", "must be public"),
         ("proc f(lent g: F) { g.voar(); }", "interface `F` has no method `voar`"),
         ("@impl(G) class A { x: real; }", "`G` is not an interface"),
-        ("proc f(own g: F) { }", "an interface is used borrowed"),
+        ("proc f(g: F) { }", "an object parameter needs `lent` or `own`"),
         ("interface G { proc criar() -> int; }", "interface method `criar` needs `self`"),
     ] {
         let e = ksc::compile(&format!("{i} {decls} proc main() {{ }}")).unwrap_err();
@@ -951,6 +951,100 @@ proc main() {
         ("cs[0].pega(pop(cs));", "has an element taken out in the same call"),
     ] {
         let e = ksc::compile(&format!("{cls} proc main() {{ cs[]: C = {{C.novo()}}; {body} burn cs; }}")).unwrap_err();
+        assert!(e.message.contains(why) || e.note.as_ref().is_some_and(|n| n.contains(why)), "{body}: {} {:?}", e.message, e.note);
+    }
+}
+
+#[test]
+fn owned_interfaces() {
+    let src = r#"interface Forma {
+    proc area(lent self) -> real;
+    proc nome(lent self) -> text;
+}
+
+@impl(Forma)
+class Circulo {
+    raio: real;
+    public proc novo(raio: real) -> Circulo { return Circulo { raio: raio }; }
+    @override
+    public proc area(lent self) -> real { return 3.0 * self.raio * self.raio; }
+    @override
+    public proc nome(lent self) -> text { return "circulo"; }
+}
+
+@impl(Forma)
+class Poligono {
+    lados[]: real;
+    public proc novo(a: real, b: real) -> Poligono {
+        ls[]: real = {a, b};
+        return Poligono { lados: give ls };
+    }
+    @override
+    public proc area(lent self) -> real { return self.lados[0] * self.lados[1]; }
+    @override
+    public proc nome(lent self) -> text { return "poligono"; }
+}
+
+class Desenho {
+    principal: Forma;
+    public proc novo(own f: Forma) -> Desenho { return Desenho { principal: give f }; }
+    public proc mostrar(lent self) { mostrar(lend self.principal); }
+}
+
+proc mostrar(lent f: Forma) { printf("{f.nome()}: {f.area()}\n"); }
+
+proc criar(quadrado: bool) -> Forma {
+    if quadrado { return Poligono.novo(2.0, 2.0); }
+    return Circulo.novo(1.0);
+}
+
+proc main() {
+    c: Circulo = Circulo.novo(2.0);
+    f: Forma = give c;
+    printl(f.area());
+    formas[]: Forma = {give f, Poligono.novo(3.0, 4.0)};
+    append(formas, criar(false));
+    for i: int = 0; i < len(formas); i++ {
+        mostrar(lend formas[i]);
+    }
+    g: Forma = remove(formas, 1);
+    d: Desenho = Desenho.novo(give g);
+    d.mostrar();
+    vazia: Forma;
+    vazia = criar(true);
+    printl(vazia.nome(), formas[1].area());
+    dump("antes");
+    burn vazia;
+    burn d;
+    burn formas;
+    dump("depois");
+}
+"#;
+    let o = out(src);
+    assert!(
+        o.starts_with("12.0\ncirculo: 12.0\npoligono: 12.0\ncirculo: 3.0\npoligono: 12.0\npoligono 3.0\n"),
+        "{o}"
+    );
+    // `burn` through an interface frees what that object's class owns.
+    let after = &o[o.find("dump: depois").unwrap()..];
+    assert!(o.contains("heap #") && !after.contains("heap #"), "{o}");
+
+    let decls = "interface F { proc n(lent self) -> int; }
+        @impl(F) class A { x: int; public proc novo() -> A { return A { x: 1 }; }
+                           @override public proc n(lent self) -> int { return self.x; } }
+        class B { y: int; public proc novo() -> B { return B { y: 1 }; } }";
+    for (body, why) in [
+        ("a: A = A.novo(); f: F = a; burn f;", "object `a` cannot be copied"),
+        ("f: F = B.novo(); burn f;", "`B` does not implement `F`"),
+        ("fs[]: F = {A.novo()}; x: F = fs[0]; burn x; burn fs;", "take it out with `remove(v, i)`"),
+        ("f: F = A.novo(); printl(f.x); burn f;", "`x` is hidden"),
+        ("f: F = A.novo(); print(f); burn f;", "cannot be printed"),
+        ("f: F = A.novo();", "`f` is never burned"),
+        ("printl(A.novo().n());", "would be lost"),
+        ("fs[]: F = claim 2; burn fs;", "`claim` would make empty `F` elements"),
+        ("g: F; printl(g.n());", "`g` has no value yet"),
+    ] {
+        let e = ksc::compile(&format!("{decls} proc main() {{ {body} }}")).unwrap_err();
         assert!(e.message.contains(why) || e.note.as_ref().is_some_and(|n| n.contains(why)), "{body}: {} {:?}", e.message, e.note);
     }
 }

@@ -611,9 +611,29 @@ mostrar(lend c);
 - Uma `interface` lista métodos sem corpo, cada um terminado em `;`. Todos recebem `self` e são públicos.
 - `@impl(A, B)` em cima da classe diz quais interfaces ela cumpre. O compilador confere que a classe tem **todos** os métodos de cada uma, públicos e com a mesma assinatura (`self`, parâmetros e retorno).
 - **`@override` é obrigatório** em cada método que cumpre uma interface, e um `@override` que não cumpre nada é erro (pega erros de digitação). Não há herança: cada classe escreve os seus métodos.
-- Por enquanto um valor de interface só existe **emprestado**: parâmetros `lent f: Forma`, passados com `lend c` (de qualquer classe que implemente `Forma`) ou repassados com `lend f`. Por dentro, ele leva o ponteiro do objeto e o número da sua classe, e `f.area()` chama o `area` daquela classe.
+- Um parâmetro `lent f: Forma` aceita `lend c` de qualquer classe que implemente `Forma`, ou `lend f` de outro valor `Forma`. Por dentro, um valor de interface leva o ponteiro do objeto e o número da sua classe, e `f.area()` chama o `area` daquela classe.
 - Pela interface só se chamam métodos dela: os campos e os outros métodos da classe não aparecem. Métodos `own self` não podem ser chamados por uma interface (o objeto está emprestado).
-- Variáveis, `own` e arrays de interfaces (uma lista com formas diferentes) ainda não existem: são o próximo passo depois dos arrays de objetos.
+
+#### Interfaces com dono
+
+```
+f: Forma = Circulo.novo(1.0);              // o objeto passa a ser visto como Forma
+formas[]: Forma = {give f, Poligono.novo(3.0, 4.0)};
+append(formas, Circulo.novo(2.0));
+for i: int = 0; i < len(formas); i++ {
+    mostrar(lend formas[i]);               // cada uma chama o seu `area`
+}
+burn formas;                               // libera cada objeto, seja de que classe for
+
+proc criar(quadrado: bool) -> Forma { ... } // pode devolver classes diferentes
+```
+
+- Uma variável, um campo, um parâmetro `own f: Forma`, um retorno `-> Forma` ou um array `formas[]: Forma` pode **ser dono** de um objeto de qualquer classe que implemente a interface. O objeto entra já novo ou com `give`, e a conversão está escrita no tipo da declaração (`f: Forma = ...`), sem adivinhação. Uma classe que não implementa a interface é erro.
+- O valor com dono segue as mesmas regras de um objeto: `give`, `lend`, `return`, `burn`, e esquecer é erro. Declarado sem valor (`f: Forma;`), não pode ser usado antes de receber um.
+- Pela interface só aparecem os métodos dela: `f.raio` é erro, e o valor não pode ser impresso inteiro (imprima o que os métodos devolvem).
+- `burn f` olha a classe do objeto para liberar também o que os campos dele possuem.
+- Arrays de interfaces seguem as regras dos arrays de objetos: `formas[i]` fica no array (emprestado), sai com `pop`/`remove`, e não valem `claim`, `resize`, `clear` nem `formas[i] = ...`.
+- Ainda não dá para voltar de `Forma` para `Circulo` (descobrir a classe e usá-la como tal).
 
 ### 8.12 Limites do compilador
 

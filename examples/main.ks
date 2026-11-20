@@ -22,12 +22,36 @@ class Circulo {
     }
 }
 
-proc mostrar(lent f: Forma) {
+ @impl(Forma)
+ class Poligono {
+     largura: real;
+     altura: real;
+
+     public proc novo(largura: real, altura: real) -> Poligono {
+         return Poligono { largura: largura, altura: altura };
+     }
+
+     @override
+     public proc area(lent self) -> real {
+         return self.largura * self.altura;
+     }
+
+     @override
+     public proc nome(lent self) -> text {
+         return "polígono";
+     }
+ }
+
+ proc mostrar(lent f: Forma) {
     printf("{f.nome()}: {f.area()}\n");
 }
 
 proc main() {
-    c: Circulo = Circulo.novo(2.0);
-    mostrar(lend c);
-    burn c;
+    f: Forma = Circulo.novo(1.0);
+    formas[]: Forma = {give f, Poligono.novo(3.0, 4.0)};
+    append(formas, Circulo.novo(2.0));
+    for i: int = 0; i < len(formas); i++ {
+        mostrar(lend formas[i]);   // cada uma chama o seu próprio `area`
+    }
+    burn formas;
 }

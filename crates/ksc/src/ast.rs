@@ -128,6 +128,8 @@ pub enum Elem {
     Struct(&'static str),
     /// An object: the array owns it, each element is a pointer.
     Class(&'static str),
+    /// An object seen through an interface: pointer and class number.
+    Iface(&'static str),
     /// A type name as written; the checker resolves it.
     Named(&'static str),
 }
@@ -156,6 +158,8 @@ pub enum Type {
     /// A borrowed object seen through an interface (`lent d: Desenhavel`):
     /// its pointer and the number of its class.
     LentIface(&'static str),
+    /// An owned object seen through an interface (`f: Forma = Circulo.novo();`).
+    Iface(&'static str),
     /// No value: the result of `print(...)` or of a proc without `->`.
     /// Only produced by the checker, never by the parser.
     Void,
@@ -211,6 +215,7 @@ impl Elem {
             Elem::Enum(n) => Type::Enum(n),
             Elem::Struct(n) => Type::Struct(n),
             Elem::Class(n) => Type::Class(n),
+            Elem::Iface(n) => Type::Iface(n),
             Elem::Named(n) => Type::Named(n),
         }
     }
@@ -224,6 +229,7 @@ impl Elem {
             Type::Enum(n) => Elem::Enum(n),
             Type::Struct(n) => Elem::Struct(n),
             Type::Class(n) => Elem::Class(n),
+            Type::Iface(n) => Elem::Iface(n),
             Type::Named(n) => Elem::Named(n),
             Type::Own(_) | Type::Lent(_) | Type::Void | Type::LentClass(_) | Type::LentNamed(_) | Type::LentIface(_) => {
                 return None;
@@ -261,7 +267,7 @@ impl std::fmt::Display for Type {
             Type::Text => f.write_str("text"),
             Type::Own(b) => write!(f, "{b}"),
             Type::Lent(b) => write!(f, "lent {b}"),
-            Type::Enum(name) | Type::Struct(name) | Type::Named(name) | Type::Class(name) => f.write_str(name),
+            Type::Enum(name) | Type::Struct(name) | Type::Named(name) | Type::Class(name) | Type::Iface(name) => f.write_str(name),
             Type::LentClass(name) | Type::LentNamed(name) | Type::LentIface(name) => write!(f, "lent {name}"),
             Type::Void => f.write_str("no value"),
         }

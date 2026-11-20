@@ -20,7 +20,7 @@ pub fn generate(hir: &Hir) -> R<Module> {
     let mut pools = Pools::default();
     let mut functions = Vec::new();
     for p in &hir.procs {
-        functions.push(ProcGen::new(p, &hir.structs, &hir.classes, &mut pools)?.run()?);
+        functions.push(ProcGen::new(p, &hir.structs, &hir.classes, &hir.ifaces, &mut pools)?.run()?);
     }
     let m = Module { entry: hir.entry as u32, consts: pools.consts, strings: pools.strings, functions };
     debug_assert_eq!(m.verify(), Ok(()));
@@ -64,6 +64,7 @@ struct ProcGen<'a> {
     p: &'a HProc,
     structs: &'a Structs,
     classes: &'a Structs,
+    ifaces: &'a Ifaces,
     pools: &'a mut Pools,
     slots: Vec<Slot>,
     names: Vec<String>,
@@ -74,7 +75,7 @@ struct ProcGen<'a> {
 }
 
 impl<'a> ProcGen<'a> {
-    fn new(p: &'a HProc, structs: &'a Structs, classes: &'a Structs, pools: &'a mut Pools) -> R<Self> {
+    fn new(p: &'a HProc, structs: &'a Structs, classes: &'a Structs, ifaces: &'a Ifaces, pools: &'a mut Pools) -> R<Self> {
         // Each local takes as many slots as its type (a struct: one per
         // field). Parameters come first, in order, as the caller pushes them.
         // User variables get the low registers next; walk variables and
@@ -110,7 +111,7 @@ impl<'a> ProcGen<'a> {
             )
             .with_note("each struct field counts as one value"));
         }
-        Ok(ProcGen { p, structs, classes, pools, slots, names, code: Vec::new(), loops: Vec::new(), param_slots })
+        Ok(ProcGen { p, structs, classes, ifaces, pools, slots, names, code: Vec::new(), loops: Vec::new(), param_slots })
     }
 
     fn width(&self, ty: Type) -> usize {
@@ -134,6 +135,10 @@ impl<'a> ProcGen<'a> {
     fn push_nat(&mut self, ty: Type) {
         match ty {
             Type::Scalar(Scalar::Real) => self.push_real(Real::NAT),
+            Type::Iface(_) => {
+                self.push_word(Word::NAT);
+                self.push_word(Word::NAT);
+            }
             Type::Struct(n) => {
                 for (_, t) in self.structs[n].clone() {
                     self.push_nat(t);
@@ -161,46 +166,88 @@ impl<'a> ProcGen<'a> {
         }
     }
 
-    /// Frees what `slot` owns: an object first frees the arrays and objects
-    /// in its fields (each read into a scratch slot), then itself.
-    fn burn(&mut self, slot: Slot, ty: Type) {
-        if let Type::Class(c) = ty {
-            let mut off = 0;
-            for (_, t) in self.classes[c].clone() {
-                if let Type::Own(_) | Type::Class(_) = t {
-                    let tmp = self.names.len() as Slot;
-                    self.names.push("$burn".into());
-                    self.emit(Op::Load(slot));
-                    self.push_word(Word::ZERO);
-                    self.emit(Op::LdElem { off: off as u8, n: 1 });
-                    self.emit(Op::Store(tmp));
-                    self.burn(tmp, t);
-                }
-                off += self.width(t);
-            }
+    /// `w` scratch slots, for values the generated code keeps for a moment.
+    fn scratch(&mut self, name: &str, w: usize) -> Slot {
+        let s = self.names.len() as Slot;
+        for _ in 0..w {
+            self.names.push(name.into());
         }
-        if let Type::Own(b) = ty
-            && let elem @ Type::Class(_) = b.ty()
-        {
-            // An array of objects: pop and burn each one until it is empty.
-            // top: load v; tlen; br3 end, end, body
-            // body: load v; popel; store $burn; <burn $burn>; jmp top
-            let tmp = self.names.len() as Slot;
-            self.names.push("$burn".into());
-            let top = self.here();
-            self.emit(Op::Load(slot));
-            self.emit(Op::TLen);
-            let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
-            let body = self.here();
-            self.emit(Op::Load(slot));
-            self.emit(Op::PopEl);
-            self.emit(Op::Store(tmp));
-            self.burn(tmp, elem);
-            self.emit(Op::Jmp(top));
-            let end = self.here();
-            self.patch(br, 0, end);
-            self.patch(br, 1, end);
-            self.patch(br, 2, body);
+        s
+    }
+
+    /// Frees what `slot` owns. An object first frees what its fields own
+    /// (each read into a scratch slot), an array of objects each element.
+    fn burn(&mut self, slot: Slot, ty: Type) {
+        match ty {
+            Type::Class(c) => {
+                let mut off = 0;
+                for (_, t) in self.classes[c].clone() {
+                    let w = self.width(t);
+                    if owns(t) {
+                        let tmp = self.scratch("$burn", w);
+                        self.emit(Op::Load(slot));
+                        self.push_word(Word::ZERO);
+                        self.emit(Op::LdElem { off: off as u8, n: w as u8 });
+                        self.store(tmp, w);
+                        self.burn(tmp, t);
+                    }
+                    off += w;
+                }
+            }
+            Type::Iface(i) => {
+                // Which class it is decides what its fields own. Classes whose
+                // fields own nothing just need the purge at the end.
+                //   load v.class; push k; cmp3; test ==; br3 next, next, this
+                //   this: <burn v as K>; jmp end
+                //   next: ...; purge v
+                let classes = self.classes;
+                let deep: Vec<(i64, &'static str)> =
+                    self.ifaces[i].iter().filter(|(_, c)| classes[c].iter().any(|(_, t)| owns(*t))).copied().collect();
+                let mut exits = Vec::new();
+                for (tag, c) in deep {
+                    self.emit(Op::Load(slot + 1));
+                    self.push_word(Word::new(tag));
+                    self.emit(Op::Cmp3);
+                    self.emit(Op::Test(0b010));
+                    let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
+                    let this = self.here();
+                    self.burn(slot, Type::Class(c));
+                    exits.push(self.emit(Op::Jmp(0)));
+                    let next = self.here();
+                    self.patch(br, 0, next);
+                    self.patch(br, 1, next);
+                    self.patch(br, 2, this);
+                }
+                self.emit(Op::Purge(slot));
+                let end = self.here();
+                for at in exits {
+                    self.patch(at, 0, end);
+                }
+                return;
+            }
+            Type::Own(b) if owns(b.ty()) => {
+                // An array of objects: pop and burn each one until it is empty.
+                //   top: load v; tlen; br3 end, end, body
+                //   body: load v; popel; store $burn; <burn $burn>; jmp top
+                let elem = b.ty();
+                let w = self.width(elem);
+                let tmp = self.scratch("$burn", w);
+                let top = self.here();
+                self.emit(Op::Load(slot));
+                self.emit(Op::TLen);
+                let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
+                let body = self.here();
+                self.emit(Op::Load(slot));
+                self.emit(Op::PopEl);
+                self.store(tmp, w);
+                self.burn(tmp, elem);
+                self.emit(Op::Jmp(top));
+                let end = self.here();
+                self.patch(br, 0, end);
+                self.patch(br, 1, end);
+                self.patch(br, 2, body);
+            }
+            _ => {}
         }
         self.emit(Op::Purge(slot));
     }
@@ -393,7 +440,7 @@ impl<'a> ProcGen<'a> {
                     None => self.push_word(Word::ZERO),
                 }
                 match self.p.ret {
-                    Type::Struct(_) => self.emit(Op::RetN(self.width(self.p.ret) as u16)),
+                    Type::Struct(_) | Type::Iface(_) => self.emit(Op::RetN(self.width(self.p.ret) as u16)),
                     _ => self.emit(Op::Ret),
                 };
             }
@@ -556,14 +603,17 @@ impl<'a> ProcGen<'a> {
                 self.expr(obj)?;
                 self.push_word(Word::new(*tag));
             }
-            HExprKind::DynCall { recv, impls, args } => {
-                // self, args; then for each class: tag == k ? call K.m : next
-                let s = self.slot(*recv);
+            HExprKind::DynCall { impls, args } => {
+                // The receiver goes to scratch slots (pointer, class); then
+                // self, args; for each class: tag == k ? call K.m : next
+                self.expr(&args[0])?;
+                let s = self.scratch("$recv", 2);
+                self.store(s, 2);
                 self.emit(Op::Load(s));
-                for a in args {
+                for a in &args[1..] {
                     self.expr(a)?;
                 }
-                let argc = 1 + args.iter().map(|a| self.width(a.ty)).sum::<usize>();
+                let argc = 1 + args[1..].iter().map(|a| self.width(a.ty)).sum::<usize>();
                 let mut exits = Vec::new();
                 for (tag, pid) in impls {
                     self.emit(Op::Load(s + 1));
@@ -598,7 +648,12 @@ impl<'a> ProcGen<'a> {
                 self.expr(body)?;
             }
             HExprKind::Give(id) => {
-                self.emit(Op::Move(self.slot(*id)));
+                // The pointer moves; an interface value also carries its class number.
+                let s = self.slot(*id);
+                self.emit(Op::Move(s));
+                if let Type::Iface(_) = e.ty {
+                    self.emit(Op::Load(s + 1));
+                }
             }
             HExprKind::Neg(a) => {
                 self.expr(a)?;
@@ -858,6 +913,11 @@ impl<'a> ProcGen<'a> {
     }
 }
 
+/// Whether a value of type `t` owns something that `burn` frees.
+fn owns(t: Type) -> bool {
+    matches!(t, Type::Own(_) | Type::Class(_) | Type::Iface(_))
+}
+
 /// The element type of an array type.
 fn elem_ty(t: Type) -> Type {
     match t {
@@ -878,7 +938,7 @@ fn leaf_names(structs: &Structs, ty: Type, name: &str, out: &mut Vec<String>) {
                 leaf_names(structs, *t, &format!("{name}.{f}"), out);
             }
         }
-        Type::LentIface(_) => {
+        Type::LentIface(_) | Type::Iface(_) => {
             out.push(name.to_string());
             out.push(format!("{name}.class"));
         }

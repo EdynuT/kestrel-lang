@@ -141,7 +141,8 @@ pub fn check(program: &Program) -> R<Hir> {
     // Procs were declared in another order than they were checked: put each at its id.
     procs.sort_by_key(|p| cx.proc_ids[&p.name]);
     let classes = cx.classes.values().map(|c| (c.name, c.fields.iter().map(|(n, t, _)| (n.clone(), *t)).collect())).collect();
-    Ok(Hir { procs, entry, structs: cx.structs, classes })
+    let ifaces = cx.ifaces.values().map(|i| (i.name, i.impls.iter().map(|c| (cx.class_tags[c], *c)).collect())).collect();
+    Ok(Hir { procs, entry, structs: cx.structs, classes, ifaces })
 }
 
 #[derive(Clone)]
@@ -369,9 +370,8 @@ impl Checker {
         if let Some(c) = self.classes.get(n) {
             return Ok(Type::Class(c.name));
         }
-        if self.ifaces.contains_key(n) {
-            return Err(err(format!("an interface is used borrowed: `lent x: {n}`"), t.span)
-                .with_note("owned interface values (`own`, variables, arrays) come with arrays of objects"));
+        if let Some(i) = self.ifaces.get(n) {
+            return Ok(Type::Iface(i.name));
         }
         if let Some(info) = self.enums.get(n) {
             return Ok(Type::Enum(info.name));
@@ -555,7 +555,7 @@ impl Checker {
     /// its pointer cell (like a field holding an object).
     fn element(arr: HExpr, idx: HExpr, ty: Type, span: Span) -> HExpr {
         match ty {
-            Type::Class(c) => hx(HExprKind::ElemField(Box::new(arr), Box::new(idx), 0), Type::LentClass(c), span),
+            Type::Class(_) | Type::Iface(_) => hx(HExprKind::ElemField(Box::new(arr), Box::new(idx), 0), Self::view(ty), span),
             _ => hx(HExprKind::Index(Box::new(arr), Box::new(idx)), ty, span),
         }
     }
@@ -565,6 +565,7 @@ impl Checker {
         match ty {
             Type::Own(b) => Type::Lent(b),
             Type::Class(n) => Type::LentClass(n),
+            Type::Iface(n) => Type::LentIface(n),
             t => t,
         }
     }
@@ -661,7 +662,7 @@ impl Checker {
         for (n, t) in &decl {
             let (_, e) = fields.iter().find(|(f, _)| f.name == *n).expect("checked above");
             let h = match (t, &e.kind) {
-                (Type::Own(_) | Type::Class(_), ExprKind::Give(x)) => {
+                (Type::Own(_) | Type::Class(_) | Type::Iface(_), ExprKind::Give(x)) => {
                     let lid = self.lookup(&x.name).ok_or_else(|| self.unknown(&x.name, x.span))?;
                     let h = self.give(lid, e.span)?;
                     self.coerce(h, *t)?
@@ -686,10 +687,8 @@ impl Checker {
             }
             return self.call_proc(m.id, &format!("{c}.{}", name.name), args, None, span);
         }
-        if let ExprKind::Var(n) = &recv.kind
-            && let Some(id) = self.lookup(n)
-            && let Type::LentIface(i) = self.f.locals[id].ty
-        {
+        if let Some(this) = self.iface_recv(recv)? {
+            let Type::LentIface(i) = this.ty else { unreachable!("iface_recv gives lent interfaces") };
             let info = &self.ifaces[i];
             let Some(m) = info.methods.iter().find(|m| m.name == name.name).cloned() else {
                 let names: Vec<&str> = info.methods.iter().map(|m| m.name.as_str()).collect();
@@ -698,11 +697,11 @@ impl Checker {
             };
             if m.this == Some(ast::SelfMode::Own) {
                 return Err(err(format!("`{}` consumes the object (`own self`)", name.name), recv.span)
-                    .with_note("an object seen through an interface is lent and cannot be given away"));
+                    .with_note("an object called through an interface is lent and cannot be given away"));
             }
             let impls: Vec<(i64, ProcId)> = info.impls.iter().map(|c| (self.class_tags[c], self.classes[*c].methods[&name.name].id)).collect();
-            let hargs = self.call_args(&format!("{i}.{}", name.name), &m.params, args, None, span)?;
-            return Ok(hx(HExprKind::DynCall { recv: id, impls, args: hargs }, m.ret, span));
+            let hargs = self.call_args(&format!("{i}.{}", name.name), &m.params, args, Some(this), span)?;
+            return Ok(hx(HExprKind::DynCall { impls, args: hargs }, m.ret, span));
         }
         let Some((obj, c)) = self.object(recv)? else {
             let ty = self.expr(recv, None).map(|h| h.ty.to_string()).unwrap_or_else(|_| "this".into());
@@ -727,6 +726,26 @@ impl Checker {
         self.call_proc(m.id, &format!("{c}.{}", name.name), args, Some(this), span)
     }
 
+    /// The receiver of `x.m()` when `x` is an interface value, lent to the
+    /// call: a variable, an element `v[i]` or a field. `None` otherwise.
+    fn iface_recv(&mut self, recv: &Expr) -> R<Option<HExpr>> {
+        let h = match &recv.kind {
+            ExprKind::Var(n) => match self.lookup(n) {
+                Some(id) => match self.f.locals[id].ty {
+                    Type::LentIface(i) | Type::Iface(i) => hx(HExprKind::Lend(id), Type::LentIface(i), recv.span),
+                    _ => return Ok(None),
+                },
+                None => return Ok(None),
+            },
+            _ => self.expr(recv, None)?,
+        };
+        match h.ty {
+            Type::LentIface(_) => Ok(Some(h)),
+            Type::Iface(_) => Err(err("the object made here would be lost", recv.span).with_note("store it in a variable first, then use it and burn it")),
+            _ => Ok(None),
+        }
+    }
+
     fn declare_struct(&mut self, s: &ast::StructDecl) -> R<()> {
         if s.fields.is_empty() {
             return Err(err(format!("struct `{}` needs at least one field", s.name.name), s.name.span));
@@ -737,7 +756,7 @@ impl Checker {
                 return Err(err(format!("field `{}` appears twice in struct `{}`", f.name, s.name.name), f.span));
             }
             let ty = self.resolve(t)?;
-            if let Type::Class(c) = ty {
+            if let Type::Class(c) | Type::Iface(c) = ty {
                 return Err(err(format!("a struct cannot hold an object (`{c}`)"), t.span)
                     .with_note("a struct is copied, and an object has one owner; use a class instead"));
             }
@@ -873,13 +892,13 @@ impl Checker {
                 return Err(err(format!("parameter `{}` appears twice", param.name.name), param.name.span));
             }
             let ty = self.resolve(&param.ty)?;
-            if let Type::Class(c) = ty
+            if let Type::Class(c) | Type::Iface(c) = ty
                 && param.mode.is_none()
             {
                 return Err(err("an object parameter needs `lent` or `own`", param.name.span)
                     .with_note(format!("`lent {0}: {c}` borrows it, `own {0}: {c}` takes it", param.name.name)));
             }
-            if param.mode.is_some() && !matches!(ty, Type::Own(_) | Type::Lent(_) | Type::Class(_) | Type::LentClass(_) | Type::LentIface(_)) {
+            if param.mode.is_some() && !matches!(ty, Type::Own(_) | Type::Lent(_) | Type::Class(_) | Type::LentClass(_) | Type::Iface(_) | Type::LentIface(_)) {
                 return Err(err("`lent` and `own` only apply to arrays and objects", param.name.span));
             }
             params.push((param.name.name.clone(), ty));
@@ -1032,8 +1051,8 @@ impl Checker {
             StmtKind::Burn(name) => {
                 let id = self.lookup(&name.name).ok_or_else(|| self.unknown(&name.name, name.span))?;
                 match self.f.locals[id].ty {
-                    Type::Own(_) | Type::Class(_) => HStmtKind::Burn(id),
-                    Type::LentClass(_) => {
+                    Type::Own(_) | Type::Class(_) | Type::Iface(_) => HStmtKind::Burn(id),
+                    Type::LentClass(_) | Type::LentIface(_) => {
                         return Err(err("cannot burn a lent object", name.span).with_note("only its owner can burn it"));
                     }
                     Type::Lent(_) => {
@@ -1048,7 +1067,7 @@ impl Checker {
                     return Err(err("this proc has no return type, so it returns nothing", e.span).with_note("write `return;`"));
                 }
                 (t, None) => return Err(err(format!("this proc must return a {t}"), s.span)),
-                (t @ (Type::Own(_) | Type::Class(_)), Some(Expr { kind: ExprKind::Var(name), span })) => {
+                (t @ (Type::Own(_) | Type::Class(_) | Type::Iface(_)), Some(Expr { kind: ExprKind::Var(name), span })) => {
                     // `return b` hands ownership back to the caller.
                     let id = self.lookup(name).ok_or_else(|| self.unknown(name, *span))?;
                     let h = self.give(id, *span)?;
@@ -1174,7 +1193,7 @@ impl Checker {
                 if !matches!(h.kind, HExprKind::Call(..) | HExprKind::DynCall { .. } | HExprKind::Builtin(..) | HExprKind::Print(_)) {
                     return Err(err("this expression does nothing", e.span).with_note("only calls can be used as statements"));
                 }
-                if let Type::Own(_) | Type::Class(_) = h.ty {
+                if let Type::Own(_) | Type::Class(_) | Type::Iface(_) = h.ty {
                     return Err(err("the buffer or object returned by this call would be lost", e.span)
                         .with_note("store it, e.g. `sym b[]: int = f(...);`, then burn it"));
                 }
@@ -1204,12 +1223,12 @@ impl Checker {
                 Ok(HStmtKind::Assign { local: id, index: None, field: off, value: hv })
             }
             LVal::Elem { arr, idx, off, ty } => {
-                if let (Type::Class(_), Type::Own(_) | Type::Lent(_)) = (ty, arr.ty) {
+                if let (Type::Class(_) | Type::Iface(_), Type::Own(_) | Type::Lent(_)) = (ty, arr.ty) {
                     return Err(err("an object in an array cannot be replaced", target.span).with_note(
                         "the old one would be lost: take it out first (`old: T = remove(v, i);`, burn it), then `insert(v, i, give new)`",
                     ));
                 }
-                if let Type::Own(_) | Type::Class(_) = ty {
+                if let Type::Own(_) | Type::Class(_) | Type::Iface(_) = ty {
                     return Err(err("a field that owns an array or an object cannot be replaced", target.span)
                         .with_note("change what is inside it instead (`append(self.items, x)`, `self.items[i] = ...`)"));
                 }
@@ -1294,10 +1313,19 @@ impl Checker {
         if fits(h.ty, ty) {
             return Ok(h);
         }
+        // An object becomes an interface value: it keeps its class number.
+        if let (Type::Class(c), Type::Iface(i)) = (h.ty, ty) {
+            if self.ifaces[i].impls.contains(&c) {
+                let span = h.span;
+                return Ok(hx(HExprKind::ToIface(Box::new(h), self.class_tags[c]), ty, span));
+            }
+            return Err(err(format!("`{c}` does not implement `{i}`"), h.span)
+                .with_note(format!("add `@impl({i})` to the class and the methods it lists")));
+        }
         let d = err(format!("expected {ty}, found {}", h.ty), h.span);
         Err(match (h.ty, ty) {
             (from, Type::Bool) if from.is_int() => d.with_note("write `true` or `false`, or compare: `x != 0`"),
-            (Type::LentClass(_), Type::Class(_)) => d.with_note(
+            (Type::LentClass(_), Type::Class(_)) | (Type::LentIface(_), Type::Iface(_)) => d.with_note(
                 "an object held in an array or a field stays there: take it out with `remove(v, i)` or `pop(v)`, or pass it with `lend`",
             ),
             (Type::Scalar(Scalar::Real), t) | (t, Type::Scalar(Scalar::Real)) if t.is_int() => {
@@ -1357,7 +1385,8 @@ impl Checker {
         match self.f.locals[id].ty {
             Type::Own(e) => Ok(hx(HExprKind::Give(id), Type::Own(e), span)),
             Type::Class(c) => Ok(hx(HExprKind::Give(id), Type::Class(c), span)),
-            Type::Lent(_) | Type::LentClass(_) => Err(err("cannot give away something lent", span).with_note("only its owner can give it")),
+            Type::Iface(i) => Ok(hx(HExprKind::Give(id), Type::Iface(i), span)),
+            Type::Lent(_) | Type::LentClass(_) | Type::LentIface(_) => Err(err("cannot give away something lent", span).with_note("only its owner can give it")),
             t => Err(err(format!("only an own buffer can be given, this is {t}"), span)),
         }
     }
@@ -1435,7 +1464,7 @@ impl Checker {
             ExprKind::Var(name) => {
                 if let Some(id) = self.lookup(name) {
                     let ty = self.f.locals[id].ty;
-                    if let Type::Class(_) | Type::LentClass(_) = ty {
+                    if let Type::Class(_) | Type::LentClass(_) | Type::Iface(_) | Type::LentIface(_) = ty {
                         return Err(err(format!("object `{name}` cannot be copied"), span)
                             .with_note(format!("pass it with `lend {name}` or `give {name}`; read its fields with `{name}.x`")));
                     }
@@ -1479,6 +1508,10 @@ impl Checker {
                 hx(HExprKind::ElemField(Box::new(obj), Box::new(zero), off), Self::view(ty), span)
             }
             ExprKind::MethodCall { recv, name, args } => self.method_call(recv, name, args, span)?,
+            ExprKind::Member(base, field) if self.iface_recv(base).is_ok_and(|h| h.is_some()) => {
+                return Err(err(format!("`{}` is hidden: an interface shows only its methods", field.name), field.span)
+                    .with_note("call one of them instead, like `x.nome()`"));
+            }
             ExprKind::Member(base, field) => {
                 let enum_name = match &base.kind {
                     ExprKind::Var(n) if self.lookup(n).is_none() && self.enums.contains_key(n) => Some(n),
@@ -1540,7 +1573,7 @@ impl Checker {
             ExprKind::Call { name, args } => self.call(name, args, span)?,
             ExprKind::Claim(size) => match want {
                 Some(Type::Own(el)) => {
-                    if let Type::Class(c) = el.ty() {
+                    if let Type::Class(c) | Type::Iface(c) = el.ty() {
                         return Err(err(format!("`claim` would make empty `{c}` elements"), span)
                             .with_note("an array of objects holds only real objects: start with `{}` and `append` them"));
                     }
@@ -1834,6 +1867,10 @@ impl Checker {
     /// Like `viewed`, for `print`/`printf`/`toText`: only arrays of numbers
     /// and texts print whole.
     fn shown(&mut self, e: &Expr, want: Option<Type>) -> R<HExpr> {
+        if self.iface_recv(e).is_ok_and(|h| h.is_some()) {
+            return Err(err("an object seen through an interface cannot be printed", e.span)
+                .with_note("print what its methods return, like `printl(f.nome())`"));
+        }
         if self.is_object(e) {
             let (h, _) = self.object(e)?.expect("checked");
             return Ok(h);
@@ -2191,7 +2228,7 @@ impl Checker {
                 };
                 arity(n)?;
                 let (arr, buf) = self.array_arg(&args[0], &name.name)?;
-                if let (Type::Class(c), "resize" | "clear") = (buf.ty(), name.name.as_str()) {
+                if let (Type::Class(c) | Type::Iface(c), "resize" | "clear") = (buf.ty(), name.name.as_str()) {
                     let note = if name.name == "resize" {
                         "growing would make empty elements and shrinking would lose objects: use `append` and `pop`/`remove`"
                     } else {
@@ -2265,7 +2302,7 @@ impl Checker {
         let mut hargs: Vec<HExpr> = this.into_iter().collect();
         for (arg, (pname, pty)) in args.iter().zip(params) {
             let h = match (pty, &arg.kind) {
-                (Type::Own(_) | Type::Class(_), ExprKind::Give(x)) => {
+                (Type::Own(_) | Type::Class(_) | Type::Iface(_), ExprKind::Give(x)) => {
                     let lid = self.lookup(&x.name).ok_or_else(|| self.unknown(&x.name, x.span))?;
                     let h = self.give(lid, arg.span)?;
                     self.coerce(h, *pty)?
@@ -2305,7 +2342,7 @@ impl Checker {
                 (Type::LentIface(i), ExprKind::Lend(x)) => {
                     let h = self.lent_arg(x)?;
                     match h.ty {
-                        Type::LentIface(j) if j == *i => HExpr { span: arg.span, ..h },
+                        Type::LentIface(j) | Type::Iface(j) if j == *i => HExpr { ty: *pty, span: arg.span, ..h },
                         Type::Class(c) | Type::LentClass(c) if self.ifaces[*i].impls.contains(&c) => {
                             let h = HExpr { ty: Type::LentClass(c), ..h };
                             hx(HExprKind::ToIface(Box::new(h), self.class_tags[c]), *pty, arg.span)
@@ -2332,14 +2369,14 @@ impl Checker {
         if let ExprKind::Var(name) = &x.kind {
             let lid = self.lookup(name).ok_or_else(|| self.unknown(name, x.span))?;
             let ty = self.f.locals[lid].ty;
-            if !matches!(ty, Type::Own(_) | Type::Lent(_) | Type::Class(_) | Type::LentClass(_) | Type::LentIface(_)) {
+            if !matches!(ty, Type::Own(_) | Type::Lent(_) | Type::Class(_) | Type::LentClass(_) | Type::Iface(_) | Type::LentIface(_)) {
                 return Err(err(format!("only arrays and objects are lent; `{name}` is {ty}"), x.span)
                     .with_note("numbers, texts and structs are copied: pass them without `lend`"));
             }
             return Ok(hx(HExprKind::Lend(lid), ty, x.span));
         }
         let h = self.expr(x, None)?;
-        if !matches!(h.ty, Type::Lent(_) | Type::LentClass(_)) {
+        if !matches!(h.ty, Type::Lent(_) | Type::LentClass(_) | Type::LentIface(_)) {
             return Err(err(format!("only arrays and objects are lent; this is {}", h.ty), x.span));
         }
         Ok(h)

@@ -341,8 +341,8 @@ fn text_operations() {
     assert!(r.unwrap_err().reason.contains("needs 0 <= start <= end <= 3"));
     let e = ksc::compile(r#"proc main() { x: text = "a" + 1; }"#).unwrap_err();
     assert!(e.message.contains("joins text with text only"), "{}", e.message);
-    let e = ksc::compile(r#"proc main() { t: trit = "a" < "b"; }"#).unwrap_err();
-    assert!(e.note.unwrap().contains("`==` and `!=`"));
+    // Texts have an order: alphabetical, character by character.
+    assert_eq!(main_out(r#"printl("a" < "b", "b" <= "a", "ab" <=> "ab");"#), "true false 0\n");
 }
 
 #[test]
@@ -440,7 +440,6 @@ fn structs() {
         ("a: P = P { x: 1, y: 2, z: 3 }; }", "struct `P` has no field `z`"),
         ("a: P = P { x: 1, x: 2, y: 3 }; }", "field `x` is given twice"),
         ("final a: P = P { x: 1, y: 2 }; a.x = 3; }", "`a` is final"),
-        ("a: P = P { x: 1, y: 2 }; if a == a { } }", "expected a number, found P"),
         ("x: int = 1; x.y = 2; }", "int has no fields"),
     ] {
         let e = ksc::compile(&format!("{p}{body}")).unwrap_err();
@@ -667,7 +666,7 @@ class Conta {
     hist[]: real;
     pos: Ponto;
 
-    public proc nova(nome: text) -> Conta {
+    public proc Conta(nome: text) -> Conta {
         return Conta { nome: nome, saldo: 0.0, hist: {}, pos: Ponto { x: 1, y: 2 } };
     }
     public proc depositar(&self, v: real) {
@@ -687,8 +686,8 @@ class Conta {
 
 class Banco {
     principal: Conta;
-    public proc novo() -> Banco {
-        c: Conta = Conta.nova("Caixa");
+    public proc Banco() -> Banco {
+        c: Conta = Conta("Caixa");
         return Banco { principal: give c };
     }
     public proc depositar(&self, v: real) { self.principal.depositar(v); }
@@ -700,7 +699,7 @@ proc mostrar(c: &Conta) {
 }
 
 proc main() {
-    c: Conta = Conta.nova("Ana");
+    c: Conta = Conta("Ana");
     c.depositar(10.0);
     c.depositar(5.5);
     mostrar(&c);
@@ -709,7 +708,7 @@ proc main() {
     c.nome = "Ana Maria";
     total: real = c.fechar();
     printl(total);
-    b: Banco = Banco.novo();
+    b: Banco = Banco();
     b.depositar(3.0);
     printl(b.total(), b);
     burn b;
@@ -721,19 +720,19 @@ proc main() {
          3.0 Banco { principal: Conta { nome: \"Caixa\", saldo: 3.0, hist: [3.0], pos: Ponto { x: 2, y: 2 } } }\n"
     );
     let c = "class C { public n: int; v[]: int; proc mk() -> C { return C { n: 1, v: {} }; } \
-             public proc novo() -> C { return C.mk(); } public proc ler(&self) -> int { return self.n; } \
+             public proc C() -> C { return C.mk(); } public proc ler(&self) -> int { return self.n; } \
              public proc fim(self) { burn self; } public proc f(&self, &w[]: int) { } }";
     for (body, why) in [
-        ("c: C = C.novo();", "`c` is never burned or given away"),
-        ("c: C = C.novo(); x: int = c.v; burn c;", "`v` is private in `C`"),
-        ("c: C = C.novo(); d: C = c; burn c;", "object `c` cannot be copied"),
+        ("c: C = C();", "`c` is never burned or given away"),
+        ("c: C = C(); x: int = c.v; burn c;", "`v` is private in `C`"),
+        ("c: C = C(); d: C = c; burn c;", "object `c` cannot be copied"),
         ("c: C = C { n: 1, v: {} }; burn c;", "`C` objects are created inside the class"),
-        ("c: C = C.novo(); c.fim(); x: int = c.ler();", "`c` is used after it was given away"),
-        ("c: C = C.novo(); x: int = C.ler(); burn c;", "`ler` needs an object"),
-        ("c: C = C.novo(); c.novo(); burn c;", "`novo` is static"),
-        ("x: int = C.novo().n;", "the object made here would be lost"),
+        ("c: C = C(); c.fim(); x: int = c.ler();", "`c` is used after it was given away"),
+        ("c: C = C(); x: int = C.ler(); burn c;", "`ler` needs an object"),
+        ("c: C = C(); c.C(); burn c;", "`C` is static"),
+        ("x: int = C().n;", "the object made here would be lost"),
         ("c: C = C.mk(); burn c;", "method `mk` is private in `C`"),
-        ("c: C = C.novo(); c.f(&c.n); burn c;", "only arrays and objects are borrowed"),
+        ("c: C = C(); c.f(&c.n); burn c;", "only arrays and objects are borrowed"),
     ] {
         let e = ksc::compile(&format!("{c} proc main() {{ {body} }}")).unwrap_err();
         assert!(e.message.contains(why), "{body}: {}", e.message);
@@ -741,8 +740,8 @@ proc main() {
     let e = ksc::compile("class A { b: B; } class B { a: A; } proc main() {}").unwrap_err();
     assert!(e.message.contains("class `A` contains itself"), "{}", e.message);
     let e = ksc::compile(
-        "class C { public v[]: int; public proc novo() -> C { return C { v: {} }; } public proc f(&self, &w[]: int) { } } \
-         proc main() { c: C = C.novo(); c.f(&c.v); burn c; }",
+        "class C { public v[]: int; public proc C() -> C { return C { v: {} }; } public proc f(&self, &w[]: int) { } } \
+         proc main() { c: C = C(); c.f(&c.v); burn c; }",
     )
     .unwrap_err();
     assert!(e.message.contains("`c` is borrowed twice"), "{}", e.message);
@@ -754,7 +753,7 @@ fn every_variable_has_its_type_written() {
     assert!(e.message.contains("expected a type, found `=`"), "{}", e.message);
     assert_eq!(e.note.as_deref(), Some("every variable has its type written: `x: int = 5;`"));
     // Declared without a value: only a `T?`, and it starts as null.
-    let src = r#"class C { public n: int; public proc novo() -> C { return C { n: 7 }; } }
+    let src = r#"class C { public n: int; public proc C() -> C { return C { n: 7 }; } }
         struct P { x: int?; r: real?; t: text; }
         proc main() {
             total: int?; nome: text?; ok: bool?;
@@ -763,13 +762,13 @@ fn every_variable_has_its_type_written() {
             total = 10;
             printl(total + 1);
             c: C?;
-            if total > 5 { c = C.novo(); printl(c.n); }
+            if total > 5 { c = C(); printl(c.n); }
             burn c;
             y: int?;
             z: int = y on NaT { printl("y has no value"); return; };
         }"#;
     assert_eq!(out(src), "null null null P { x: null, r: 2.5, t: \"a\" }\n11\n7\ny has no value\n");
-    let c = "class C { public n: int; public proc novo() -> C { return C { n: 7 }; } }";
+    let c = "class C { public n: int; public proc C() -> C { return C { n: 7 }; } }";
     for (body, why) in [
         ("x: int;", "`x` needs a value"),
         ("c: C;", "`c` needs a value"),
@@ -788,7 +787,7 @@ fn null_safety() {
     let src = r#"class No {
     public valor: int;
     public proximo: No?;
-    public proc novo(v: int) -> No { return No { valor: v, proximo: null }; }
+    public proc No(v: int) -> No { return No { valor: v, proximo: null }; }
     public proc dobro(&self) -> int { return 2 * self.valor; }
     public proc avisar(&self) { printl("aviso", self.valor); }
 }
@@ -819,8 +818,8 @@ proc main() {
     printl(s + "!");
     s = null;
     printl(s);
-    lista: No = No.novo(1);
-    lista.proximo = No.novo(2);
+    lista: No = No(1);
+    lista.proximo = No(2);
     printl(lista.proximo.valor);
     mostrar(&lista.proximo.proximo);
     mostrar(&lista);
@@ -855,7 +854,7 @@ fn interfaces() {
 @impl(Forma)
 class Circulo {
     raio: real;
-    public proc novo(r: real) -> Circulo { return Circulo { raio: r }; }
+    public proc Circulo(r: real) -> Circulo { return Circulo { raio: r }; }
     @override
     public proc area(&self) -> real { return 3.0 * self.raio * self.raio; }
     @override
@@ -868,7 +867,7 @@ class Circulo {
 @impl(Forma)
 class Quadrado {
     lado: real;
-    public proc novo(l: real) -> Quadrado { return Quadrado { lado: l }; }
+    public proc Quadrado(l: real) -> Quadrado { return Quadrado { lado: l }; }
     @override
     public proc area(&self) -> real { return self.lado * self.lado; }
     @override
@@ -887,8 +886,8 @@ proc dobrarEMostrar(f: &Forma) {
 }
 
 proc main() {
-    c: Circulo = Circulo.novo(1.0);
-    q: Quadrado = Quadrado.novo(3.0);
+    c: Circulo = Circulo(1.0);
+    q: Quadrado = Quadrado(3.0);
     mostrar(&c);
     mostrar(&q);
     dobrarEMostrar(&c);
@@ -919,8 +918,8 @@ proc main() {
         assert!(e.message.contains(why), "{decls}: {}", e.message);
     }
     let e = ksc::compile(&format!(
-        "{i} class A {{ x: real; public proc novo() -> A {{ return A {{ x: 1.0 }}; }} }} proc f(g: &F) {{ }} \
-         proc main() {{ a: A = A.novo(); f(&a); burn a; }}"
+        "{i} class A {{ x: real; public proc A() -> A {{ return A {{ x: 1.0 }}; }} }} proc f(g: &F) {{ }} \
+         proc main() {{ a: A = A(); f(&a); burn a; }}"
     ))
     .unwrap_err();
     assert!(e.message.contains("`A` does not implement `F`"), "{}", e.message);
@@ -936,7 +935,7 @@ fn arrays_of_objects() {
 class Conta {
     dono: text;
     saldo: real;
-    public proc nova(dono: text) -> Conta { return Conta { dono: dono, saldo: 0.0 }; }
+    public proc Conta(dono: text) -> Conta { return Conta { dono: dono, saldo: 0.0 }; }
     @override
     public proc nome(&self) -> text { return self.dono; }
     public proc depositar(&self, v: real) { self.saldo += v; }
@@ -945,11 +944,11 @@ class Conta {
 
 class Banco {
     contas[]: Conta;
-    public proc novo() -> Banco {
+    public proc Banco() -> Banco {
         vazio[]: Conta = {};
         return Banco { contas: give vazio };
     }
-    public proc abrir(&self, dono: text) { append(self.contas, Conta.nova(dono)); }
+    public proc abrir(&self, dono: text) { append(self.contas, Conta(dono)); }
     public proc total(&self) -> real {
         t: real = 0.0;
         for i: int = 0; i < len(self.contas); i++ { t += self.contas[i].saldoAtual(); }
@@ -960,9 +959,9 @@ class Banco {
 proc mostrar(n: &Nomeado) { printl(n.nome()); }
 
 proc main() {
-    a: Conta = Conta.nova("Ana");
-    cs[]: Conta = {give a, Conta.nova("Bia")};
-    insert(cs, 1, Conta.nova("Caio"));
+    a: Conta = Conta("Ana");
+    cs[]: Conta = {give a, Conta("Bia")};
+    insert(cs, 1, Conta("Caio"));
     cs[0].depositar(2.5);
     mostrar(&cs[1]);
     printl(cs[2].nome(), len(cs));
@@ -970,7 +969,7 @@ proc main() {
     x: Conta = remove(cs, 1);
     printl(x.nome(), len(cs));
     burn x;
-    b: Banco = Banco.novo();
+    b: Banco = Banco();
     b.abrir("Davi");
     b.abrir("Eva");
     printl(b.total());
@@ -992,22 +991,22 @@ proc main() {
     let after = &o[o.find("dump: depois").unwrap()..];
     assert!(o.contains("heap #") && !after.contains("heap #"), "{o}");
 
-    let cls = "class C { x: int; public proc novo() -> C { return C { x: 1 }; } \
+    let cls = "class C { x: int; public proc C() -> C { return C { x: 1 }; } \
                public proc pega(&self, o: C) { burn o; } }
                proc par(c: &C, d: C) { burn d; }";
     for (body, why) in [
         ("x: C = cs[0];", "take it out with `remove(v, i)` or `pop(v)`"),
-        ("cs[0] = C.novo();", "an object in an array cannot be replaced"),
+        ("cs[0] = C();", "an object in an array cannot be replaced"),
         ("ds[]: C = claim 3; burn ds;", "`claim` would make empty `C` elements"),
         ("resize(cs, 3);", "`resize` does not work on an array of `C` objects"),
         ("clear(cs);", "`clear` does not work"),
         ("pop(cs);", "would be lost"),
         ("remove(cs, 0);", "would be lost"),
-        ("c: C = C.novo(); append(cs, c); burn c;", "object `c` cannot be copied"),
+        ("c: C = C(); append(cs, c); burn c;", "object `c` cannot be copied"),
         ("par(&cs[0], remove(cs, 0));", "has an element taken out in the same call"),
         ("cs[0].pega(pop(cs));", "has an element taken out in the same call"),
     ] {
-        let e = ksc::compile(&format!("{cls} proc main() {{ cs[]: C = {{C.novo()}}; {body} burn cs; }}")).unwrap_err();
+        let e = ksc::compile(&format!("{cls} proc main() {{ cs[]: C = {{C()}}; {body} burn cs; }}")).unwrap_err();
         assert!(e.message.contains(why) || e.note.as_ref().is_some_and(|n| n.contains(why)), "{body}: {} {:?}", e.message, e.note);
     }
 }
@@ -1022,7 +1021,7 @@ fn owned_interfaces() {
 @impl(Forma)
 class Circulo {
     raio: real;
-    public proc novo(raio: real) -> Circulo { return Circulo { raio: raio }; }
+    public proc Circulo(raio: real) -> Circulo { return Circulo { raio: raio }; }
     @override
     public proc area(&self) -> real { return 3.0 * self.raio * self.raio; }
     @override
@@ -1032,7 +1031,7 @@ class Circulo {
 @impl(Forma)
 class Poligono {
     lados[]: real;
-    public proc novo(a: real, b: real) -> Poligono {
+    public proc Poligono(a: real, b: real) -> Poligono {
         ls[]: real = {a, b};
         return Poligono { lados: give ls };
     }
@@ -1044,28 +1043,28 @@ class Poligono {
 
 class Desenho {
     principal: Forma;
-    public proc novo(f: Forma) -> Desenho { return Desenho { principal: give f }; }
+    public proc Desenho(f: Forma) -> Desenho { return Desenho { principal: give f }; }
     public proc mostrar(&self) { mostrar(&self.principal); }
 }
 
 proc mostrar(f: &Forma) { printf("{f.nome()}: {f.area()}\n"); }
 
 proc criar(quadrado: bool) -> Forma {
-    if quadrado { return Poligono.novo(2.0, 2.0); }
-    return Circulo.novo(1.0);
+    if quadrado { return Poligono(2.0, 2.0); }
+    return Circulo(1.0);
 }
 
 proc main() {
-    c: Circulo = Circulo.novo(2.0);
+    c: Circulo = Circulo(2.0);
     f: Forma = give c;
     printl(f.area());
-    formas[]: Forma = {give f, Poligono.novo(3.0, 4.0)};
+    formas[]: Forma = {give f, Poligono(3.0, 4.0)};
     append(formas, criar(false));
     for i: int = 0; i < len(formas); i++ {
         mostrar(&formas[i]);
     }
     g: Forma = remove(formas, 1);
-    d: Desenho = Desenho.novo(give g);
+    d: Desenho = Desenho(give g);
     d.mostrar();
     vazia: Forma?;
     vazia = criar(true);
@@ -1087,17 +1086,16 @@ proc main() {
     assert!(o.contains("heap #") && !after.contains("heap #"), "{o}");
 
     let decls = "interface F { proc n(&self) -> int; }
-        @impl(F) class A { x: int; public proc novo() -> A { return A { x: 1 }; }
+        @impl(F) class A { x: int; public proc A() -> A { return A { x: 1 }; }
                            @override public proc n(&self) -> int { return self.x; } }
-        class B { y: int; public proc novo() -> B { return B { y: 1 }; } }";
+        class B { y: int; public proc B() -> B { return B { y: 1 }; } }";
     for (body, why) in [
-        ("a: A = A.novo(); f: F = a; burn f;", "object `a` cannot be copied"),
-        ("f: F = B.novo(); burn f;", "`B` does not implement `F`"),
-        ("fs[]: F = {A.novo()}; x: F = fs[0]; burn x; burn fs;", "take it out with `remove(v, i)`"),
-        ("f: F = A.novo(); printl(f.x); burn f;", "`x` is hidden"),
-        ("f: F = A.novo(); print(f); burn f;", "cannot be printed"),
-        ("f: F = A.novo();", "`f` is never burned"),
-        ("printl(A.novo().n());", "would be lost"),
+        ("a: A = A(); f: F = a; burn f;", "object `a` cannot be copied"),
+        ("f: F = B(); burn f;", "`B` does not implement `F`"),
+        ("fs[]: F = {A()}; x: F = fs[0]; burn x; burn fs;", "take it out with `remove(v, i)`"),
+        ("f: F = A(); printl(f.x); burn f;", "`x` is hidden"),
+        ("f: F = A();", "`f` is never burned"),
+        ("printl(A().n());", "would be lost"),
         ("fs[]: F = claim 2; burn fs;", "`claim` would make empty `F` elements"),
         ("g: F; printl(g.n());", "`g` needs a value"),
         ("g: F?; printl(g.n()); burn g;", "it may be null"),
@@ -1121,7 +1119,7 @@ proc somar(a: int, b: int) -> int { return a + b; }
 @deprecated
 class Velha {
     x: int;
-    public proc nova() -> Velha { return Velha { x: 1 }; }
+    public proc Velha() -> Velha { return Velha { x: 1 }; }
     @deprecated("use ver")
     public proc olhar(&self) -> int { return self.ver(); }
     public proc ver(&self) -> int { return self.x; }
@@ -1135,7 +1133,7 @@ proc falha() { assert(somar(2, 2) == 5, "conta errada"); }
 
 proc main() {
     printl(soma(1, 2));
-    v: Velha = Velha.nova();
+    v: Velha = Velha();
     printl(v.olhar());
     burn v;
 }
@@ -1185,7 +1183,7 @@ fn recursive_and_optional_objects() {
     let tree = r#"class No {
     public valor: int;
     filhos[]: No;
-    public proc novo(v: int) -> No { f[]: No = {}; return No { valor: v, filhos: give f }; }
+    public proc No(v: int) -> No { f[]: No = {}; return No { valor: v, filhos: give f }; }
     public proc add(&self, n: No) { append(self.filhos, give n); }
     public proc soma(&self) -> int {
         s: int = self.valor;
@@ -1194,11 +1192,11 @@ fn recursive_and_optional_objects() {
     }
 }
 proc main() {
-    r: No = No.novo(1);
-    a: No = No.novo(2);
-    a.add(No.novo(4));
+    r: No = No(1);
+    a: No = No(2);
+    a.add(No(4));
     r.add(give a);
-    r.add(No.novo(3));
+    r.add(No(3));
     printl(r.soma());
     burn r;
     dump("fim");
@@ -1209,13 +1207,13 @@ proc main() {
 
     // A linked list: `proximo: No?` may be empty and is checked before use.
     let list = r#"interface F { proc nome(&self) -> text; }
-@impl(F) class A { x: int; public proc novo() -> A { return A { x: 1 }; }
+@impl(F) class A { x: int; public proc A() -> A { return A { x: 1 }; }
     @override public proc nome(&self) -> text { return "a"; } }
 
 class No {
     public valor: int;
     public proximo: No?;
-    public proc novo(v: int) -> No { return No { valor: v, proximo: null }; }
+    public proc No(v: int) -> No { return No { valor: v, proximo: null }; }
     public proc anexar(&self, n: No) {
         if self.proximo == null {
             self.proximo = give n;
@@ -1231,18 +1229,18 @@ proc soma(n: &No?) -> int {
 }
 
 proc main() {
-    lista: No = No.novo(1);
-    lista.anexar(No.novo(2));
-    lista.anexar(No.novo(3));
+    lista: No = No(1);
+    lista.anexar(No(2));
+    lista.anexar(No(3));
     printl(soma(&lista));
     if lista.proximo != null && lista.proximo.valor == 2 { printl("segundo"); }
     resto: No? = give lista.proximo;
     printl(soma(&lista), soma(&resto), lista.proximo == null);
     v: No?;
     printl(v == null);
-    v = No.novo(9);
+    v = No(9);
     if v.valor == 9 { printl("nove"); }
-    f: F? = A.novo();
+    f: F? = A();
     g: F?;
     if f != null { printl(f.nome(), g == null); }
     burn f;
@@ -1258,13 +1256,13 @@ proc main() {
 
     // Putting an object into a `T?` that still holds one traps (it would be lost).
     let decls = "class No { public valor: int; public proximo: No?;
-        public proc novo(v: int) -> No { return No { valor: v, proximo: null }; }
+        public proc No(v: int) -> No { return No { valor: v, proximo: null }; }
         public proc mexer(&self) { } }
         proc ver(n: &No) { }";
-    let run = |body: &str| run_with(&format!("{decls} proc main() {{ n: No = No.novo(1); {body} burn n; }}"), "").0;
-    assert!(run("n.proximo = No.novo(2); n.proximo = No.novo(3);").unwrap_err().reason.contains("`n.proximo` still holds an object"));
-    assert!(run("v: No? = No.novo(5); v = No.novo(6); burn v;").unwrap_err().reason.contains("`v` still holds an object"));
-    assert!(run("v: No?; burn v; v = No.novo(6); burn v;").is_ok());
+    let run = |body: &str| run_with(&format!("{decls} proc main() {{ n: No = No(1); {body} burn n; }}"), "").0;
+    assert!(run("n.proximo = No(2); n.proximo = No(3);").unwrap_err().reason.contains("`n.proximo` still holds an object"));
+    assert!(run("v: No? = No(5); v = No(6); burn v;").unwrap_err().reason.contains("`v` still holds an object"));
+    assert!(run("v: No?; burn v; v = No(6); burn v;").is_ok());
 
     for (body, why) in [
         ("printl(n.proximo.valor);", "it may be null"),
@@ -1277,12 +1275,12 @@ proc main() {
         ("v: No?;", "`v` is never burned"),
         ("x: Ponto? = null;", "unknown"),
     ] {
-        let e = ksc::compile(&format!("{decls} proc main() {{ n: No = No.novo(1); {body} burn n; }}")).unwrap_err();
+        let e = ksc::compile(&format!("{decls} proc main() {{ n: No = No(1); {body} burn n; }}")).unwrap_err();
         assert!(e.message.contains(why), "{body}: {}", e.message);
     }
     // Checked, then nothing that could empty it: fine.
     assert!(ksc::compile(&format!(
-        "{decls} proc main() {{ n: No = No.novo(1); if n.proximo != null {{ n.proximo.mexer(); ver(&n.proximo); }} burn n; }}"
+        "{decls} proc main() {{ n: No = No(1); if n.proximo != null {{ n.proximo.mexer(); ver(&n.proximo); }} burn n; }}"
     ))
     .is_ok());
 }
@@ -1292,22 +1290,22 @@ fn is_and_match_by_class() {
     let decls = r#"interface Forma { proc nome(&self) -> text; }
 @impl(Forma) class Circulo {
     public raio: real;
-    public proc novo(r: real) -> Circulo { return Circulo { raio: r }; }
+    public proc Circulo(r: real) -> Circulo { return Circulo { raio: r }; }
     @override public proc nome(&self) -> text { return "circulo"; }
 }
 @impl(Forma) class Quadrado {
     public lado: real;
-    public proc novo(l: real) -> Quadrado { return Quadrado { lado: l }; }
+    public proc Quadrado(l: real) -> Quadrado { return Quadrado { lado: l }; }
     @override public proc nome(&self) -> text { return "quadrado"; }
 }
 @impl(Forma) class Triangulo {
     b: real;
-    public proc novo(b: real) -> Triangulo { return Triangulo { b: b }; }
+    public proc Triangulo(b: real) -> Triangulo { return Triangulo { b: b }; }
     @override public proc nome(&self) -> text { return "triangulo"; }
 }
 class Desenho {
     public principal: Forma;
-    public proc novo(f: Forma) -> Desenho { return Desenho { principal: give f }; }
+    public proc Desenho(f: Forma) -> Desenho { return Desenho { principal: give f }; }
 }
 class Conta { x: int; }
 "#;
@@ -1331,7 +1329,7 @@ proc tipo(f: &Forma) -> text {{
 }}
 
 proc main() {{
-    fs[]: Forma = {{Circulo.novo(1.0), Quadrado.novo(2.0), Triangulo.novo(3.0)}};
+    fs[]: Forma = {{Circulo(1.0), Quadrado(2.0), Triangulo(3.0)}};
     n: int = 0;
     for i: int = 0; i < len(fs); i++ {{
         descrever(&fs[i]);
@@ -1347,7 +1345,7 @@ proc main() {{
     }}
     c: Circulo = give f;
     printl(c.raio);
-    d: Desenho = Desenho.novo(Quadrado.novo(5.0));
+    d: Desenho = Desenho(Quadrado(5.0));
     if d.principal is Quadrado {{ printl(d.principal.lado); }}
     o: Forma?;
     printl(o is Circulo);
@@ -1383,7 +1381,7 @@ fn lent_variables() {
     let decls = r#"class No {
     public valor: int;
     public proximo: No?;
-    public proc novo(v: int) -> No { return No { valor: v, proximo: null }; }
+    public proc No(v: int) -> No { return No { valor: v, proximo: null }; }
     public proc dobrar(&self) { self.valor *= 2; }
 }
 proc mexe(n: &No) { }
@@ -1411,16 +1409,16 @@ proc anexar(lista: &No, novo: No) {{
 
 proc main() {{
     // Built from the front: each new node takes the list as its `proximo`.
-    lista: No? = No.novo(1);
+    lista: No? = No(1);
     for i: int = 2; i <= 7000; i++ {{
-        n: No = No.novo(i);
+        n: No = No(i);
         n.proximo = give lista;
         lista = give n;
     }}
     if lista == null {{ burn lista; return; }}
-    anexar(&lista, No.novo(0));
+    anexar(&lista, No(0));
     printl(tamanho(&lista), lista.valor);
-    vs[]: No = {{No.novo(5), No.novo(6)}};
+    vs[]: No = {{No(5), No(6)}};
     c: &No = &vs[1];
     c.dobrar();
     printl(c.valor);
@@ -1443,14 +1441,14 @@ proc main() {{
         ("x: &int = 5;", "only arrays and objects are borrowed with `&`"),
     ] {
         let e = ksc::compile(&format!(
-            "{decls} proc main() {{ a: No = No.novo(1); a.proximo = No.novo(2); vs[]: No = {{No.novo(3), No.novo(4)}}; {body} burn vs; burn a; }}"
+            "{decls} proc main() {{ a: No = No(1); a.proximo = No(2); vs[]: No = {{No(3), No(4)}}; {body} burn vs; burn a; }}"
         ))
         .unwrap_err();
         assert!(e.message.contains(why), "{body}: {}", e.message);
     }
     // After the last use of the `lent` variable, the owner is free again.
     assert!(ksc::compile(&format!(
-        "{decls} proc main() {{ vs[]: No = {{No.novo(3)}}; x: &No = &vs[0]; x.dobrar(); mexe(&x); burn vs; }}"
+        "{decls} proc main() {{ vs[]: No = {{No(3)}}; x: &No = &vs[0]; x.dobrar(); mexe(&x); burn vs; }}"
     ))
     .is_ok());
 }
@@ -1471,7 +1469,7 @@ fn default_methods() {
 @impl(Forma)
 class Circulo {
     raio: real;
-    public proc novo(r: real) -> Circulo { return Circulo { raio: r }; }
+    public proc Circulo(r: real) -> Circulo { return Circulo { raio: r }; }
     @override public proc area(&self) -> real { return 3.0 * self.raio * self.raio; }
     @override public proc nome(&self) -> text { return "círculo"; }
     public proc resumo(&self) -> text { return "[" + self.descrever() + "]"; }
@@ -1480,18 +1478,18 @@ class Circulo {
 @impl(Forma)
 class Quadrado {
     lado: real;
-    public proc novo(l: real) -> Quadrado { return Quadrado { lado: l }; }
+    public proc Quadrado(l: real) -> Quadrado { return Quadrado { lado: l }; }
     @override public proc area(&self) -> real { return self.lado * self.lado; }
     @override public proc nome(&self) -> text { return "quadrado"; }
     @override public proc descrever(&self) -> text { return "um quadrado de lado " + toText(self.lado); }
 }
 
 proc main() {
-    c: Circulo = Circulo.novo(1.0);
+    c: Circulo = Circulo(1.0);
     printl(c.descrever());
     printl(c.resumo());
     printl(c.dobro(2.0));
-    fs[]: Forma = {Circulo.novo(2.0), Quadrado.novo(3.0)};
+    fs[]: Forma = {Circulo(2.0), Quadrado(3.0)};
     for i: int = 0; i < len(fs); i++ {
         printl(fs[i].descrever(), fs[i].dobro(10.0));
     }
@@ -1514,7 +1512,7 @@ proc main() {
 fn generics() {
     let src = r#"class Box<T> {
     public value: T?;
-    public proc new(v: T) -> Box<T> { return Box<T> { value: give v }; }
+    public proc Box(v: T) -> Box<T> { return Box<T> { value: give v }; }
     public proc take(&self) -> T? { return give self.value; }
     public proc put(&self, v: T) { self.value = give v; }
 }
@@ -1536,11 +1534,11 @@ proc pick<T>(a: T, b: T, primeiro: bool) -> T {
 
 class Conta {
     public saldo: real;
-    public proc nova(s: real) -> Conta { return Conta { saldo: s }; }
+    public proc Conta(s: real) -> Conta { return Conta { saldo: s }; }
 }
 
 proc main() {
-    b: Box<int> = Box<int>.new(5);
+    b: Box<int> = Box<int>(5);
     printl(b.value);
     old: int? = b.take();
     b.put(7);
@@ -1550,11 +1548,11 @@ proc main() {
     printl(p.first, p.second);
     burn p;
     printl(pick<int>(4, 5, false));
-    c: Conta = pick<Conta>(Conta.nova(1.0), Conta.nova(2.0), true);
+    c: Conta = pick<Conta>(Conta(1.0), Conta(2.0), true);
     printl(c.saldo);
-    bc: Box<Conta> = Box<Conta>.new(give c);
+    bc: Box<Conta> = Box<Conta>(give c);
     velha: Conta? = bc.take();
-    bc.put(Conta.nova(9.0));
+    bc.put(Conta(9.0));
     printl(velha?.saldo, bc.value?.saldo);
     burn velha;
     burn bc;
@@ -1567,13 +1565,13 @@ proc main() {
 @impl(Forma)
 class Quadrado {
     lado: real;
-    public proc novo(l: real) -> Quadrado { return Quadrado { lado: l }; }
+    public proc Quadrado(l: real) -> Quadrado { return Quadrado { lado: l }; }
     @override public proc area(&self) -> real { return self.lado * self.lado; }
 }
 
 class List<T> {
     items[]: T;
-    public proc new() -> List<T> {
+    public proc List() -> List<T> {
         xs[]: T = {};
         return List<T> { items: give xs };
     }
@@ -1592,22 +1590,22 @@ proc maior<T extends Forma>(a: &T, b: &T) -> real {
 }
 
 proc main() {
-    ns: List<int> = List<int>.new();
+    ns: List<int> = List<int>();
     ns.add(3);
     ns.add(4);
     printl(ns.size(), ns.removeAt(0), ns.size());
     burn ns;
-    qs: List<Quadrado> = List<Quadrado>.new();
-    qs.add(Quadrado.novo(2.0));
+    qs: List<Quadrado> = List<Quadrado>();
+    qs.add(Quadrado(2.0));
     q: Quadrado = qs.removeAt(0);
     printl(q.area());
-    p: Quadrado = Quadrado.novo(3.0);
+    p: Quadrado = Quadrado(3.0);
     printl(maior<Quadrado>(&q, &p));
     burn p;
     burn q;
     burn qs;
-    nested: List<List<int>> = List<List<int>>.new();
-    nested.add(List<int>.new());
+    nested: List<List<int>> = List<List<int>>();
+    nested.add(List<int>());
     printl(nested.size());
     burn nested;
 }
@@ -1628,4 +1626,619 @@ proc main() {
     }
     // `<` and `>` are still comparisons where no type arguments fit.
     assert_eq!(main_out("a: int = 3; b: int = 4; printl(a < b, a > b, a < b && b > a);"), "true false true\n");
+}
+
+#[test]
+fn constructors() {
+    let src = r#"class Conta {
+    public dono: text;
+    saldo: real;
+    public proc Conta(dono: text) -> Conta { return Conta { dono: dono, saldo: 0.0 }; }
+    public proc vazia() -> Conta { return Conta("?"); }
+}
+class Box<T> {
+    public v: T?;
+    public proc Box() -> Box<T> { return Box<T> { v: null }; }
+}
+proc main() {
+    c: Conta = Conta("Ana");
+    d: Conta = Conta.vazia();
+    b: Box<int> = Box<int>();
+    printl(c.dono, d.dono, b.v);
+    burn c;
+    burn d;
+    burn b;
+}
+"#;
+    assert_eq!(out(src), "Ana ? null\n");
+    for (src, why) in [
+        ("class C { x: int; } proc main() { c: C = C(); burn c; }", "`C` has no constructor"),
+        ("interface F { proc a(&self) -> int; } proc main() { f: F = F(); burn f; }", "is an interface: it has no constructor"),
+        ("class C { x: int; public proc C(&self) -> C { return C { x: 1 }; } } proc main() { }", "is the constructor"),
+        ("class C { x: int; public proc C() -> int { return 1; } } proc main() { }", "is the constructor"),
+        ("class C { x: int; proc C() -> C { return C { x: 1 }; } } proc main() { c: C = C(); burn c; }", "is private"),
+    ] {
+        let e = ksc::compile(src).unwrap_err();
+        assert!(e.message.contains(why), "{src}: {}", e.message);
+    }
+}
+
+#[test]
+fn returning_borrows() {
+    let src = r#"class Conta {
+    public saldo: real;
+    public proc Conta(s: real) -> Conta { return Conta { saldo: s }; }
+    public proc depositar(&self, v: real) { self.saldo += v; }
+}
+
+class List<T> {
+    items[]: T;
+    public proc List() -> List<T> {
+        xs[]: T = {};
+        return List<T> { items: give xs };
+    }
+    public proc add(&self, x: T) { append(self.items, give x); }
+    public proc get(&self, i: int) -> &T { return &self.items[i]; }
+    public proc size(&self) -> int { return len(self.items); }
+}
+
+proc ver(c: &Conta) { printl("saldo", c.saldo); }
+
+proc primeiro(&v[]: Conta) -> &Conta { return &v[0]; }
+
+proc main() {
+    contas: List<Conta> = List<Conta>();
+    contas.add(Conta(10.0));
+    contas.add(Conta(20.0));
+    contas.get(1).depositar(5.0);
+    ver(contas.get(1));
+    c: &Conta = contas.get(0);
+    c.depositar(1.0);
+    printl(c.saldo);
+    printl(contas.get(0).saldo);
+    ns: List<int> = List<int>();
+    ns.add(7);
+    n: int = ns.get(0);
+    printl(n + 1);
+    vs[]: Conta = {Conta(3.0)};
+    printl(primeiro(&vs).saldo);
+    burn vs;
+    burn ns;
+    burn contas;
+}
+"#;
+    assert_eq!(out(src), "saldo 25.0\n11.0\n11.0\n8\n3.0\n");
+    let decls = r#"class Conta {
+    public saldo: real;
+    public proc Conta(s: real) -> Conta { return Conta { saldo: s }; }
+    public proc depositar(&self, v: real) { self.saldo += v; }
+}
+
+class List<T> {
+    items[]: T;
+    public proc List() -> List<T> {
+        xs[]: T = {};
+        return List<T> { items: give xs };
+    }
+    public proc add(&self, x: T) { append(self.items, give x); }
+    public proc get(&self, i: int) -> &T { return &self.items[i]; }
+    public proc size(&self) -> int { return len(self.items); }
+}
+"#;
+    for (body, why) in [
+        ("c: &Conta = contas.get(0); burn contas; printl(c.saldo);", "`contas` cannot be burned while `c` borrows from it"),
+        ("c: &Conta = contas.get(0); printl(contas.get(0).saldo); printl(c.saldo); burn contas;", "cannot be borrowed by a call while `c`"),
+        ("c: Conta = contas.get(0); burn c; burn contas;", "expected Conta, found &Conta"),
+    ] {
+        let e = ksc::compile(&format!("{decls} proc main() {{ contas: List<Conta> = List<Conta>(); contas.add(Conta(1.0)); {body} }}")).unwrap_err();
+        assert!(e.message.contains(why), "{body}: {}", e.message);
+    }
+    for (src, why) in [
+        ("class C { x: int; } proc mk() -> &C { } proc main() { }", "must take a `&` parameter"),
+        ("class C { x: int; } proc f(a: &C, b: &C) -> &C { return b; } proc main() { }", "must be borrowed from `a`"),
+        ("class C { x: int; } proc f(a: &C) -> &C { return C { x: 1 }; } proc main() { }", "returns a borrow"),
+    ] {
+        let e = ksc::compile(src).unwrap_err();
+        assert!(e.message.contains(why), "{src}: {}", e.message);
+    }
+}
+
+#[test]
+fn reference_parameters() {
+    // `x: &int`: the proc changes the caller's value (copied in, written back).
+    let src = r#"struct Ponto { x: int; y: int; }
+
+class Conta {
+    public saldo: real;
+    public proc Conta(s: real) -> Conta { return Conta { saldo: s }; }
+}
+
+proc dobrar(x: &int) { x *= 2; }
+
+proc trocar(a: &text, b: &text) {
+    t: text = a;
+    a = b;
+    b = t;
+}
+
+proc dividir(a: int, b: int, resto: &int) -> int {
+    resto = a % b;
+    return a / b;
+}
+
+proc mover(p: &Ponto) { p.x += 10; }
+
+proc zerar(v: &int?) { v = null; }
+
+proc main() {
+    n: int = 5;
+    dobrar(&n);
+    printl(n);
+    s1: text = "a";
+    s2: text = "b";
+    trocar(&s1, &s2);
+    printl(s1, s2);
+    r: int = 0;
+    q: int = dividir(17, 5, &r);
+    printl(q, r);
+    p: Ponto = Ponto { x: 1, y: 2 };
+    mover(&p);
+    dobrar(&p.y);
+    printl(p);
+    vs[]: int = {1, 2, 3};
+    i: int = 2;
+    dobrar(&vs[i]);
+    dobrar(&vs[0]);
+    printl(vs);
+    c: Conta = Conta(1.5);
+    k: int = 3;
+    dobrar(&k);
+    printl(k, c.saldo);
+    m: int? = 4;
+    zerar(&m);
+    printl(m);
+    burn vs;
+    burn c;
+}
+"#;
+    assert_eq!(out(src), "10\nb a\n3 2\nPonto { x: 11, y: 4 }\n[2, 2, 6]\n6 1.5\nnull\n");
+    for (body, why) in [
+        ("n: int = 1; dobrar(n);", "pass it with `&`"),
+        ("final n: int = 1; dobrar(&n);", "`n` is final"),
+        ("t: tryte = 1; dobrar(&t);", "is &int, found tryte"),
+        ("n: int = 1; ambos(&n, &n);", "passed with `&` twice"),
+        ("vs[]: int = {1}; dobrar(&vs[len(vs) - 1]); burn vs;", "index is a number or a variable"),
+        ("walk i in 0..2 { dobrar(&i); }", "read-only"),
+    ] {
+        let e = ksc::compile(&format!("proc dobrar(x: &int) {{ x *= 2; }} proc ambos(a: &int, b: &int) {{ }} proc main() {{ {body} }}")).unwrap_err();
+        assert!(e.message.contains(why), "{body}: {}", e.message);
+    }
+    let e = ksc::compile("interface F { proc m(&self, x: &int); } proc main() { }").unwrap_err();
+    assert!(e.message.contains("cannot take a value with `&` yet"), "{}", e.message);
+}
+
+#[test]
+fn object_methods() {
+    // Every value has `toString`, `hashCode` and `equals`.
+    let src = r#"enum Cor { Verde, Azul }
+struct Ponto { x: int; y: int?; nome: text; }
+proc main() {
+    n: int = 42;
+    printl(n.toString() + "!", n.hashCode(), n.equals(&n), n.equals(43));
+    t: text = "abc";
+    printl(t.toString(), t.hashCode() == "abc".hashCode(), t.hashCode() == "abd".hashCode(), t.equals("abc"));
+    c: Cor = Cor.Azul;
+    printl(c.toString(), c.equals(Cor.Verde));
+    p: Ponto = Ponto { x: 1, y: null, nome: "a" };
+    q: Ponto = Ponto { x: 1, y: null, nome: "a" };
+    r: Ponto = Ponto { x: 1, y: 2, nome: "a" };
+    printl(p.toString());
+    printl(p.equals(&q), p.equals(&r), p.hashCode() == q.hashCode(), p.hashCode() == r.hashCode());
+    m: int? = null;
+    printl(m.toString(), m.hashCode(), m.equals(null), m.equals(3));
+    printl(hashMix(1, 2), 3.5.toString());
+}
+"#;
+    assert_eq!(
+        out(src),
+        "42! 42 true false\nabc true false true\nAzul false\nPonto { x: 1, y: null, nome: \"a\" }\ntrue false true false\nnull 0 true false\n33 3.5\n"
+    );
+    // A class gets them field by field (or writes its own); `==` calls `equals`,
+    // `print` calls `toString`, also through an interface.
+    let src = r#"enum Cor { Verde, Azul }
+interface Forma {
+    proc area(&self) -> real;
+}
+@impl(Forma)
+class Circulo {
+    raio: real;
+    public proc Circulo(r: real) -> Circulo { return Circulo { raio: r }; }
+    @override public proc area(&self) -> real { return 3.0 * self.raio * self.raio; }
+}
+@impl(Forma)
+class Quadrado {
+    lado: real;
+    public proc Quadrado(l: real) -> Quadrado { return Quadrado { lado: l }; }
+    @override public proc area(&self) -> real { return self.lado * self.lado; }
+    @override public proc toString(&self) -> text { return "quadrado " + toText(self.lado); }
+}
+class No {
+    public valor: int;
+    public cor: Cor;
+    public nome: text;
+    public proximo: No?;
+    public tags[]: text;
+    public proc No(v: int) -> No { t[]: text = {"a"}; return No { valor: v, cor: Cor.Azul, nome: "n", proximo: null, tags: give t }; }
+}
+proc main() {
+    a: No = No(1);
+    b: No = No(1);
+    printl(a);
+    printl(a == b, a.hashCode() == b.hashCode());
+    b.proximo = No(2);
+    printl(b.toString());
+    printl(a == b, a != b);
+    f: Forma = Circulo(1.0);
+    g: Forma = Circulo(1.0);
+    h: Forma = Quadrado(1.0);
+    printl(f, h);
+    printl(f == g, f == h, f.hashCode() == g.hashCode());
+    burn f; burn g; burn h; burn a; burn b;
+}
+"#;
+    assert_eq!(
+        out(src),
+        "No { valor: 1, cor: Azul, nome: \"n\", proximo: null, tags: [\"a\"] }\ntrue true\nNo { valor: 1, cor: Azul, nome: \"n\", proximo: No { valor: 2, cor: Azul, nome: \"n\", proximo: null, tags: [\"a\"] }, tags: [\"a\"] }\nfalse true\nCirculo { raio: 1.0 } quadrado 1.0\ntrue false true\n"
+    );
+    for (src, why) in [
+        ("class C { x: int; public proc toString(&self) -> text { return \"c\"; } } proc main() { }", "comes from `Object`; mark it `@override`"),
+        ("class C { x: int; @override public proc toString(&self) -> int { return 1; } } proc main() { }", "must be `proc toString(&self) -> text`"),
+        ("class C { x: int; @override public proc equals(&self, o: &int) -> bool { return true; } } proc main() { }", "must be `proc equals(&self, other: &C) -> bool`"),
+    ] {
+        let e = ksc::compile(src).unwrap_err();
+        assert!(e.message.contains(why), "{src}: {}", e.message);
+    }
+}
+
+#[test]
+fn comparable() {
+    let src = r#"enum Nivel { Baixo, Alto }
+
+@impl(Comparable)
+class Conta {
+    public saldo: real;
+    public proc Conta(s: real) -> Conta { return Conta { saldo: s }; }
+    @override public proc compareTo(&self, other: &Conta) -> int {
+        if self.saldo < other.saldo { return -1; }
+        if self.saldo > other.saldo { return 1; }
+        return 0;
+    }
+}
+
+proc maiorQue<T extends Comparable>(a: &T, b: &T) -> bool {
+    return a > b;
+}
+
+proc maiorValor<T extends Comparable>(a: T, b: T) -> T {
+    if a.compareTo(&b) >= 0 { burn b; return a; }
+    burn a;
+    return b;
+}
+
+proc main() {
+    printl("abc" < "abd", "b" > "abc", "x".compareTo("x"), 3.compareTo(7));
+    printl(maiorValor<int>(3, 9), maiorValor<text>("pera", "maçã"), maiorValor<Nivel>(Nivel.Alto, Nivel.Baixo));
+    a: Conta = Conta(10.0);
+    b: Conta = Conta(20.0);
+    printl(a < b, a >= b, a <=> b);
+    printl(maiorQue<Conta>(&b, &a), maiorQue<int>(1, 2));
+    c: Conta = maiorValor<Conta>(give a, give b);
+    printl(c.saldo);
+    burn c;
+}
+"#;
+    assert_eq!(out(src), "true true 0 -1\n9 pera Alto\ntrue false -1\ntrue false\n20.0\n");
+    for (src, why) in [
+        ("@impl(Comparable) class C { x: int; } proc main() { }", "has no method `compareTo`"),
+        ("@impl(Comparable) class C { x: int; @override public proc compareTo(&self, o: &int) -> int { return 0; } } proc main() { }", "must be `@override public proc compareTo(&self, other: &C) -> int`"),
+        ("class C { x: int; public proc C() -> C { return C { x: 1 }; } } proc main() { a: C = C(); b: C = C(); printl(a < b); burn a; burn b; }", "has no method `compareTo`"),
+        ("struct P { x: int; } proc m<T extends Comparable>(a: T) { } proc main() { m<P>(P { x: 1 }); }", "`P` does not implement `Comparable`"),
+    ] {
+        let e = ksc::compile(src).unwrap_err();
+        assert!(e.message.contains(why), "{src}: {}", e.message);
+    }
+}
+
+#[test]
+fn elvis_default() {
+    // `a ?: b`: `a`, or `b` when `a` is null (as in Kotlin, looser than `+`).
+    let src = r#"class C { x: int; public proc C() -> C { return C { x: 1 }; } }
+proc main() {
+    n: int = toInt("12") ?: 0;
+    m: int = toInt("abc") ?: -1;
+    printl(n, m, 1 + (toInt("x") ?: 5) * 2);
+    a: int? = null;
+    b: int? = 7;
+    c: int? = a ?: b;
+    d: int = a ?: b ?: 0;
+    s: text? = null;
+    nome: text = s ?: "anônimo";
+    printl(c, d, nome);
+}
+"#;
+    assert_eq!(out(src), "12 -1 11\n7 7 anônimo\n");
+    let c = "class C { x: int; public proc C() -> C { return C { x: 1 }; } }";
+    for (body, why) in [
+        ("x: int = 1; y: int = x ?: 2;", "never null"),
+        ("c: C? = null; d: C = c ?: C(); burn d; burn c;", "`?:` works on numbers"),
+        ("c: C? = C(); printl(c); burn c;", "it may be null"),
+        ("x: int = 1 + toInt(\"x\") ?: 2;", "it may be null"),
+    ] {
+        let e = ksc::compile(&format!("{c} proc main() {{ {body} }}")).unwrap_err();
+        assert!(e.message.contains(why), "{body}: {}", e.message);
+    }
+}
+
+/// Compiles a program of several files: `main` is `Main.ks`, `files` maps
+/// `Shapes.Circle` to the text of `Shapes/Circle.ks`.
+fn project(main: &str, files: &[(&str, &str)]) -> Result<Module, String> {
+    let files: std::collections::HashMap<String, String> = files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let (map, r) = ksc::compile_program("Main.ks", main, &files, true);
+    r.map(|o| o.module).map_err(|d| map.render(&d))
+}
+
+fn project_out(main: &str, files: &[(&str, &str)]) -> String {
+    let m = project(main, files).unwrap_or_else(|e| panic!("compile error:\n{e}"));
+    let mut out = Vec::new();
+    Vm::new(&m, "".as_bytes(), &mut out).run().unwrap_or_else(|t| panic!("trapped: {t}"));
+    String::from_utf8(out).unwrap()
+}
+
+fn project_err(main: &str, files: &[(&str, &str)]) -> String {
+    project(main, files).expect_err("expected a compile error")
+}
+
+#[test]
+fn modules() {
+    let geometry = "public const PI: real = 3.0;
+        public struct Point { x: int; y: int; }
+        public enum Color { Red, Green }
+        public interface Shape { proc name(&self) -> text; }
+        public proc area(r: real) -> real { return PI * square(r); }
+        proc square(x: real) -> real { return x * x; }";
+    let circle = "use Geometry;
+        @impl(Geometry.Shape) public class Circle {
+            r: real;
+            public proc Circle(r: real) -> Circle { return Circle { r: r }; }
+            public proc radius(&self) -> real { return self.r; }
+            @override public proc name(&self) -> text { return \"circle\"; }
+        }";
+    let list = "public class List<T> {
+            items[]: T;
+            public proc List() -> List<T> { return List<T> { items: {} }; }
+            public proc add(&self, x: T) { append(self.items, give x); }
+            public proc size(&self) -> int { return len(self.items); }
+        }";
+    let files = [("Geometry", geometry), ("shapes.Circle", circle), ("List", list)];
+    let main = "use Geometry;
+        use shapes.Circle;
+        use List;
+        proc show(s: &Geometry.Shape) { printl(s.name()); }
+        proc main() {
+            printl(Geometry.area(2.0));
+            c: Circle = Circle(1.5);
+            printl(c.radius());
+            printl(c);
+            show(&c);
+            p: Geometry.Point = Geometry.Point { x: 1, y: 2 };
+            k: Geometry.Color = Geometry.Color.Green;
+            printf(\"{p.x + p.y} {k} {Geometry.PI}\\n\");
+            l: List<int> = List<int>();
+            l.add(3);
+            printl(l.size());
+            burn l;
+            burn c;
+        }";
+    assert_eq!(project_out(main, &files), "12.0\n1.5\nCircle { r: 1.5 }\ncircle\n3 Green 3.0\n1\n");
+
+    // Two files may use each other.
+    let a = "use B;\npublic proc a(n: int) -> int { if n <= 0 { return 0; } return B.b(n - 1) + 1; }";
+    let b = "use A;\npublic proc b(n: int) -> int { if n <= 0 { return 0; } return A.a(n - 1) + 10; }";
+    assert_eq!(project_out("use A;\nproc main() { printl(A.a(4)); }", &[("A", a), ("B", b)]), "22\n");
+    // Each file has its own private names.
+    let x = "public proc get() -> int { return helper(); }\nproc helper() -> int { return 1; }";
+    let y = "public proc get() -> int { return helper(); }\nproc helper() -> int { return 2; }";
+    assert_eq!(project_out("use X;\nuse Y;\nproc main() { printl(X.get() + Y.get()); }", &[("X", x), ("Y", y)]), "3\n");
+
+    // Interface calls and frees reach classes of files the caller does not
+    // know: the linker writes them knowing every class.
+    let shapes = "public interface Shape { proc area(&self) -> real; }
+        public proc show(s: &Shape) -> real { return s.area(); }
+        public proc isSquare(s: &Shape) -> bool { return s is Sq; }
+        public proc drop(s: Shape) { burn s; }
+        @impl(Shape) class Sq { a: real; @override public proc area(&self) -> real { return self.a; } }
+        public proc name(s: &Shape) -> text { match s { Sq => return \"sq\"; } }";
+    let circle = "use Shapes;
+        @impl(Shapes.Shape) public class Circle {
+            r: real;
+            marks[]: int;
+            public proc Circle(r: real) -> Circle { return Circle { r: r, marks: {1, 2} }; }
+            @override public proc area(&self) -> real { return 3.0 * self.r * self.r; }
+        }";
+    let files = [("Shapes", shapes), ("Circle", circle)];
+    let main = "use Shapes;\nuse Circle;
+        proc main() { s: Shapes.Shape = Circle(1.0); printl(Shapes.show(&s)); printl(s); printl(Shapes.isSquare(&s)); Shapes.drop(give s); }";
+    assert_eq!(project_out(main, &files), "3.0\nCircle { r: 1.0, marks: [1, 2] }\nfalse\n");
+    let m = project("use Shapes;\nuse Circle;\nproc main() { s: Shapes.Shape = Circle(1.0); printl(Shapes.name(&s)); burn s; }", &files).unwrap();
+    let trap = Vm::new(&m, "".as_bytes(), &mut Vec::new()).run().unwrap_err();
+    assert!(trap.reason.contains("no arm of this `match` lists"), "{}", trap.reason);
+
+    let e = project_err("use X;\nproc main() { printl(X.helper()); }", &[("X", x)]);
+    assert!(e.contains("`helper` is private to `X`") && e.contains("Main.ks:2:"), "{e}");
+    let e = project_err("use X;\nproc main() { printl(X.nope()); }", &[("X", x)]);
+    assert!(e.contains("`X` has no item `nope`"), "{e}");
+    let e = project_err("use Nope;\nproc main() { }", &[]);
+    assert!(e.contains("cannot find `Nope.ks`"), "{e}");
+    let e = project_err("use x;\nproc main() { }", &[]);
+    assert!(e.contains("PascalCase"), "{e}");
+    let e = project_err("use Main;\nproc main() { }", &[]);
+    assert!(e.contains("main file"), "{e}");
+    let e = project_err("proc main() { printl(X.get()); }", &[("X", x)]);
+    assert!(e.contains("add `use X;`"), "{e}");
+    // An error in another file is shown in that file.
+    let e = project_err("use Bad;\nproc main() { printl(Bad.f()); }", &[("Bad", "public proc f() -> int { return \"x\"; }")]);
+    assert!(e.contains("--> Bad.ks:1:"), "{e}");
+    let e = project_err("proc main() { }\nuse X;", &[("X", x)]);
+    assert!(e.contains("`use` goes at the top"), "{e}");
+    let e = project_err("public proc f() { }\nprivate proc g() { }\nproc main() { }", &[]);
+    assert!(e.contains("private to their file already"), "{e}");
+}
+
+#[test]
+fn build_cache() {
+    // A folder of its own for this test.
+    let dir = std::env::temp_dir().join(format!("kestrel-build-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+    write("Lib.ks", "public proc f() -> int { return 1; }");
+    write("Other.ks", "public proc g() -> int { return 2; }");
+    let main = "use Lib;\nuse Other;\nproc main() { printl(Lib.f() + Other.g()); }";
+    let cache = ksc::Cache { dir: dir.join("build"), compiler: 7 };
+    let build = || {
+        let (map, r) = ksc::build("Main.ks", main, &ksc::modules::Disk { src: dir.clone(), lib: None }, true, Some(&cache));
+        let o = r.unwrap_or_else(|d| panic!("{}", map.render(&d)));
+        let mut out = Vec::new();
+        Vm::new(&o.module, "".as_bytes(), &mut out).run().unwrap();
+        let mut compiled: Vec<String> = o.compiled.iter().map(|p| p.rsplit('/').next().unwrap().to_string()).collect();
+        compiled.sort();
+        (String::from_utf8(out).unwrap(), compiled)
+    };
+    assert_eq!(build(), ("3\n".to_string(), vec!["Lib.ks".to_string(), "Main.ks".into(), "Other.ks".into()]));
+    // Nothing changed: nothing is compiled.
+    assert_eq!(build().1, Vec::<String>::new());
+    // A body changed: only that file.
+    write("Lib.ks", "public proc f() -> int { return 10; }");
+    assert_eq!(build(), ("12\n".to_string(), vec!["Lib.ks".to_string()]));
+    // Its public part changed: the files that use it too.
+    write("Lib.ks", "public proc f() -> int { return 10; }\npublic proc h() { }");
+    assert_eq!(build().1, vec!["Lib.ks".to_string(), "Main.ks".into()]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn modules_with_generics_and_defaults() {
+    // Generics, default methods, `Comparable` and enums across files; a
+    // copy of a generic of `Util` calls a private proc of `Util`.
+    let util = r#"public enum Color { Red, Green, Blue }
+public const LIMIT: int = 10;
+public interface Named {
+    proc name(&self) -> text;
+    proc greet(&self) -> text { return "hi " + self.name(); }
+}
+public proc bigger<T extends Comparable>(a: &T, b: &T) -> bool { return a > b; }
+public class Box<T> {
+    item: T;
+    public proc Box(x: T) -> Box<T> { return Box<T> { item: give x }; }
+    public proc get(&self) -> &T { return &self.item; }
+    public proc twice(&self) -> int { return helper() * 2; }
+}
+proc helper() -> int { printf("limit {LIMIT}\n"); return LIMIT; }
+"#;
+    let pets = r#"use Util;
+@impl(Util.Named, Comparable) public class Dog {
+    n: text;
+    age: int;
+    public proc Dog(n: text, age: int) -> Dog { return Dog { n: n, age: age }; }
+    @override public proc name(&self) -> text { return self.n; }
+    @override public proc compareTo(&self, other: &Dog) -> int { return self.age - other.age; }
+}
+"#;
+    let main = r#"use Util;
+use Pets;
+proc main() {
+    k: Util.Color = Util.Color.Blue;
+    match k {
+        Util.Color.Red => printl("red");
+        Util.Color.Blue => printl("blue");
+        else => printl("other");
+    }
+    x: int = 3;
+    y: int = 9;
+    printl(Util.bigger<int>(&y, &x));
+    d: Pets.Dog = Pets.Dog("Rex", 3);
+    e: Pets.Dog = Pets.Dog("Bo", 5);
+    printl(d < e);
+    n: Util.Named = give d;
+    printl(n.greet());
+    printl(n is Pets.Dog);
+    b: Util.Box<Pets.Dog> = Util.Box<Pets.Dog>(give e);
+    printl(b.get().name());
+    printl(b.twice());
+    b2: Util.Box<int> = Util.Box<int>(4);
+    printl(b2);
+    burn n;
+    burn b;
+    burn b2;
+}
+"#;
+    let out = project_out(main, &[("Util", util), ("Pets", pets)]);
+    assert_eq!(out, "blue\ntrue\ntrue\nhi Rex\ntrue\nBo\nlimit 10\n20\nBox { item: 4 }\n");
+    // Comparisons after a dotted name still parse.
+    assert_eq!(project_out("use Util;\nproc main() { printl(Util.LIMIT < 11 && Util.LIMIT > 9); }", &[("Util", util)]), "true\n");
+}
+
+#[test]
+fn libraries() {
+    // A library compiled in one folder works in another with only its `.ksb`.
+    let dir = std::env::temp_dir().join(format!("kestrel-libraries-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (lib_src, app) = (dir.join("lib-src"), dir.join("app"));
+    std::fs::create_dir_all(lib_src.join("corpos")).unwrap();
+    std::fs::write(
+        lib_src.join("corpos/Corpo.ks"),
+        "public class Corpo {
+            m: real;
+            public proc Corpo(m: real) -> Corpo { return Corpo { m: m }; }
+            public proc peso(&self) -> real { return self.m * g(); }
+        }
+        public class Box<T> { x: T; public proc Box(x: T) -> Box<T> { return Box<T> { x: give x }; } public proc twice(&self) -> real { return g() * 2.0; } }
+        proc g() -> real { return 9.8; }
+        @test proc pesoCerto() { c: Corpo = Corpo(2.0); assert(c.peso() == 19.6); burn c; }",
+    )
+    .unwrap();
+    let lib_cache = ksc::Cache { dir: lib_src.join("build/obj"), compiler: 1 };
+    let disk = ksc::modules::Disk { src: lib_src.clone(), lib: None };
+    let (map, r) = ksc::build("$all.ks", "use corpos.Corpo;", &disk, false, Some(&lib_cache));
+    let o = r.unwrap_or_else(|d| panic!("{}", map.render(&d)));
+    assert_eq!(o.tests.iter().map(|t| t.0.as_str()).collect::<Vec<_>>(), ["corpos.Corpo.pesoCerto"]);
+    std::fs::create_dir_all(app.join("lib/corpos")).unwrap();
+    std::fs::copy(lib_src.join("build/obj/corpos/Corpo.ksb"), app.join("lib/corpos/Corpo.ksb")).unwrap();
+    std::fs::create_dir_all(app.join("src")).unwrap();
+
+    let run = |main: &str| -> Result<String, String> {
+        let cache = ksc::Cache { dir: app.join("build/obj"), compiler: 1 };
+        let (map, r) = ksc::build("Main.ks", main, &ksc::modules::Disk::project(&app), true, Some(&cache));
+        let o = r.map_err(|d| map.render(&d))?;
+        let mut out = Vec::new();
+        Vm::new(&o.module, "".as_bytes(), &mut out).run().unwrap();
+        Ok(String::from_utf8(out).unwrap())
+    };
+    // A generic of the library is compiled here and calls its private `g`.
+    let main = "use corpos.Corpo;
+        proc main() { c: Corpo = Corpo(1.0); printl(c.peso()); burn c; b: Corpo.Box<int> = Corpo.Box<int>(3); printl(b.twice()); burn b; }";
+    assert_eq!(run(main).unwrap(), "9.8\n19.6\n");
+    let e = run("use corpos.Corpo;\nproc main() { printl(Corpo.g()); }").unwrap_err();
+    assert!(e.contains("`g` is private to `corpos.Corpo`"), "{e}");
+    let e = run("use corpos.Corpo;\nproc main() { c: Corpo = Corpo(\"x\"); burn c; }").unwrap_err();
+    assert!(e.contains("expected real, found text") && e.contains("Main.ks:2:"), "{e}");
+    // Names: lowercase folders, PascalCase files, keywords as folders.
+    assert!(run("use Corpos.Corpo;\nproc main() { }").unwrap_err().contains("folder names are lowercase"));
+    assert!(run("use corpos.corpo;\nproc main() { }").unwrap_err().contains("PascalCase"));
+    assert!(run("use std.text.Nope;\nproc main() { }").unwrap_err().contains("standard library has no `std.text.Nope`"));
+    // The same file in src/ and lib/ is an error.
+    std::fs::create_dir_all(app.join("src/corpos")).unwrap();
+    std::fs::write(app.join("src/corpos/Corpo.ks"), "public proc f() { }").unwrap();
+    assert!(run("use corpos.Corpo;\nproc main() { }").unwrap_err().contains("keep one"));
+    std::fs::remove_dir_all(&dir).unwrap();
 }

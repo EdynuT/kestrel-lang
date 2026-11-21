@@ -22,15 +22,45 @@ pub struct Hir {
     pub structs: Structs,
     /// Fields of each class, in declared order (`burn` frees what they own).
     pub classes: Structs,
-    /// The classes that implement each interface, with their numbers.
-    pub ifaces: Ifaces,
+    /// Every class: its number, where its code is, and the interfaces it
+    /// implements (for the linker's interface calls and frees).
+    pub class_info: Vec<ClassLink>,
+    /// Every interface's name.
+    pub iface_names: Vec<&'static str>,
+    /// How the classes of this file answer interface calls: the dispatch
+    /// proc's name (`$dispatch.I.m`), the class number, the proc that runs,
+    /// and whether it takes the receiver whole (a default method).
+    pub impls: Vec<(String, i64, ProcId, bool)>,
     /// `@test` procs, in the order they are written.
     pub tests: Vec<(String, ProcId)>,
     /// Uses of `@deprecated` things.
     pub warnings: Vec<crate::diag::Diagnostic>,
+    /// For each proc that returns a borrow (`-> &T`): which of its
+    /// parameters the result borrows from (the first `&` one).
+    pub borrows: Vec<Option<usize>>,
 }
 
-pub type Ifaces = HashMap<&'static str, Vec<(i64, &'static str)>>;
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClassLink {
+    pub name: &'static str,
+    pub tag: i64,
+    pub link: Link,
+    pub ifaces: Vec<&'static str>,
+}
+
+/// Where a proc's code comes from (see `kestrel_core::ksb::Kind`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    /// Written in the file being compiled.
+    Own,
+    /// A copy of a generic: every file that uses it compiles it, the
+    /// linker keeps one.
+    Shared,
+    /// Written in another file: only its signature is here.
+    Import,
+    /// `$dispatch.I.m`, an interface call; the linker writes it.
+    Dispatch,
+}
 
 /// Struct layouts. A struct value is its fields side by side, nested
 /// structs flattened: `struct A { x: int; b: B; }` with `B { y; z }` takes
@@ -56,6 +86,10 @@ pub struct HProc {
     pub ret: Type,
     pub locals: Vec<Local>,
     pub body: HBlock,
+    /// For each parameter: whether it is `x: &int` (a value the caller
+    /// passed with `&n`; its final value is written back to `n`).
+    pub refs: Vec<bool>,
+    pub link: Link,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,6 +197,12 @@ pub enum Builtin {
     Arg,
     /// `isNaT(x)`: whether `x` has no value.
     IsNaT,
+    /// `x.hashCode()` of a number, bool, enum or text.
+    Hash,
+    /// Order of two texts: -1, 0 or 1.
+    TCmp,
+    /// `hashMix(h, x)`: `h * 31 + x`, wrapped into the `int` range.
+    HashMix,
     /// Arrays that change size; the first argument is the (lent) array.
     Append,
     Pop,
@@ -235,12 +275,6 @@ pub enum HExprKind {
     /// An object seen through an interface: its pointer (the inner
     /// expression) and its class number.
     ToIface(Box<HExpr>, i64),
-    /// `d.m(args)` on an interface value: calls the method of the object's
-    /// class, chosen by its class number from `impls`. `args[0]` is the
-    /// receiver (a lent interface value: pointer and class number).
-    /// Each entry: class number, the proc, and whether it takes the receiver
-    /// whole (a default method: pointer and class number) or just the pointer.
-    DynCall { impls: Vec<(i64, ProcId, bool)>, args: Vec<HExpr> },
     /// A field of an array element, `pts[i].x`: the array (a pointer),
     /// index, offset of the field inside the element.
     ElemField(Box<HExpr>, Box<HExpr>, usize),

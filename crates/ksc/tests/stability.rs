@@ -33,7 +33,7 @@ impl Rng {
 
 /// Valid programs covering most of the language (no file writes).
 const SEEDS: &[&str] = &[
-    include_str!("../../../examples/tour.ks"),
+    include_str!("tour.ks"),
     r#"enum Cor { Vermelho, Verde, Azul }
 proc nome(c: Cor) -> text { match c { Cor.Vermelho => return "r"; Cor.Verde => return "g"; Cor.Azul => return "b"; } }
 proc main() {
@@ -78,20 +78,20 @@ proc main() {
     r#"class Pilha {
     itens[]: int;
     public topo: int;
-    public proc nova() -> Pilha { return Pilha { itens: {}, topo: 0 }; }
+    public proc Pilha() -> Pilha { return Pilha { itens: {}, topo: 0 }; }
     public proc por(&self, x: int) { append(self.itens, x); self.topo = x; }
     public proc tirar(&self) -> int { return pop(self.itens); }
     public proc vazia(&self) -> bool { return len(self.itens) == 0; }
     public proc fim(self) -> int { n: int = len(self.itens); burn self; return n; }
 }
 class Dupla { a: Pilha; b: Pilha;
-    public proc nova() -> Dupla { x: Pilha = Pilha.nova(); y: Pilha = Pilha.nova(); return Dupla { a: give x, b: give y }; }
+    public proc Dupla() -> Dupla { x: Pilha = Pilha(); y: Pilha = Pilha(); return Dupla { a: give x, b: give y }; }
     public proc mover(&self) { while !self.a.vazia() { self.b.por(self.a.tirar()); } }
     public proc encher(&self, n: int) { for i: int = 0; i < n; i++ { self.a.por(i * 3); } }
 }
 proc main() {
-    d: Dupla = Dupla.nova(); d.encher(4); d.mover(); printl(d);
-    p: Pilha = Pilha.nova(); p.por(7); printf("{p.topo} %s\n", p.vazia()); k: int = p.fim(); printl(k);
+    d: Dupla = Dupla(); d.encher(4); d.mover(); printl(d);
+    p: Pilha = Pilha(); p.por(7); printf("{p.topo} %s\n", p.vazia()); k: int = p.fim(); printl(k);
     burn d;
 }"#,
 ];

@@ -4,9 +4,37 @@ use kestrel_core::{Real, Word};
 
 use crate::diag::Span;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Program {
     pub items: Vec<Item>,
+    /// `use Geometry;` / `use Shapes.Circle;` at the top of the file.
+    pub uses: Vec<UseDecl>,
+    /// Names of the top-level items written with `public` (visible to the
+    /// files that `use` this one).
+    pub public: std::collections::HashSet<String>,
+    /// Items that belong to another file of the program (their code is in
+    /// that file's `.ksb`): they are declared here, never compiled.
+    pub external: std::collections::HashSet<String>,
+}
+
+/// `use Shapes.Circle;`: the path of a file (`Shapes/Circle.ks`), whose
+/// items are then written `Circle.area(...)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UseDecl {
+    pub path: Vec<Ident>,
+    pub span: Span,
+}
+
+impl UseDecl {
+    /// `Shapes.Circle`
+    pub fn dotted(&self) -> String {
+        self.path.iter().map(|i| i.name.as_str()).collect::<Vec<_>>().join(".")
+    }
+
+    /// The name its items are written with: the last part (`Circle`).
+    pub fn alias(&self) -> &Ident {
+        self.path.last().expect("a use has a name")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -56,6 +84,13 @@ pub fn generic_name(base: &str, args: &[Type]) -> &'static str {
     let name = intern(&text);
     table.insert(text, (intern(base), args.to_vec()));
     name
+}
+
+/// How a class's constructor and `toString` name it: `Box` for
+/// `Box<int>`, `Circle` for `Shapes.Circle` (a class of another file).
+pub fn short_name(name: &str) -> &str {
+    let base = name.split('<').next().unwrap_or(name);
+    base.rsplit('.').next().unwrap_or(base)
 }
 
 /// `Box<int>` -> (`Box`, [int]); `None` for a name that is not generic.
@@ -528,6 +563,8 @@ pub enum ExprKind {
     /// `a?.rest`: `rest` is a member or method call on the hidden variable
     /// `var`, which holds `a` when it is not null; null otherwise.
     Safe { recv: Box<Expr>, var: String, rest: Box<Expr> },
+    /// `a ?: b`: `a` if it is not null, `b` otherwise.
+    Elvis(Box<Expr>, Box<Expr>),
     /// `f is Circulo`: whether an interface value holds an object of that class.
     Is(Box<Expr>, Ident),
     /// `lend x`, or `lend self.items` (a path to an array or object).

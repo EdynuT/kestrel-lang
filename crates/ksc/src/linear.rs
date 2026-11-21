@@ -54,8 +54,27 @@ struct LoopCx {
     inner: Vec<LocalId>,
 }
 
+thread_local! {
+    /// [`Hir::borrows`] of the program being checked: which argument the
+    /// result of a `-> &T` call borrows from.
+    static BORROWS: std::cell::RefCell<Vec<Option<usize>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The argument of a call whose borrow its result is (`contas.get(0)`
+/// borrows from `contas`), if the proc returns `-> &T`.
+fn borrowed_arg(e: &HExpr) -> Option<&HExpr> {
+    let (pid, args) = match &e.kind {
+        HExprKind::Call(pid, args) => (*pid, args),
+        _ => return None,
+    };
+    let k = BORROWS.with(|b| b.borrow().get(pid).copied().flatten())?;
+    args.get(k)
+}
+
 pub fn check(hir: &Hir) -> R<()> {
-    hir.procs.iter().try_for_each(check_proc)
+    BORROWS.with(|b| *b.borrow_mut() = hir.borrows.clone());
+    // Procs of other files were checked there; the linker writes dispatches.
+    hir.procs.iter().filter(|p| matches!(p.link, Link::Own | Link::Shared)).try_for_each(check_proc)
 }
 
 fn check_proc(p: &HProc) -> R<()> {
@@ -121,10 +140,14 @@ fn expr_uses(x: &HExpr, id: LocalId) -> bool {
         HExprKind::Call(_, xs) | HExprKind::Builtin(_, xs) | HExprKind::Pack(xs) | HExprKind::StructLit(xs) | HExprKind::NewObj(xs) => {
             xs.iter().any(e)
         }
-        HExprKind::DynCall { args, .. } => args.iter().any(e),
         HExprKind::Print(ps) => ps.iter().any(|(_, y)| e(y)),
         HExprKind::IfNull { value, then, null, .. } => e(value) || e(then) || null.as_deref().is_some_and(e),
     }
+}
+
+/// A borrowed type (`&Conta`, `&No?`, `&v[]`).
+fn is_lent_ty(t: Type) -> bool {
+    matches!(t, Type::Lent(_) | Type::LentClass(_) | Type::LentIface(_) | Type::LentOptClass(_) | Type::LentOptIface(_))
 }
 
 /// A `lent` variable (not a parameter).
@@ -140,7 +163,7 @@ fn base_local(e: &HExpr) -> Option<LocalId> {
         match &e.kind {
             HExprKind::Lend(id) | HExprKind::Local(id) | HExprKind::Give(id) => return Some(*id),
             HExprKind::ElemField(arr, _, _) | HExprKind::ToIface(arr, _) | HExprKind::TakeField(arr, _) => e = arr,
-            _ => return None,
+            _ => e = borrowed_arg(e)?,
         }
     }
 }
@@ -332,6 +355,19 @@ impl Checker<'_> {
             HStmtKind::Return(v) => {
                 if let Some(e) = v {
                     self.expr(e, &mut st)?;
+                    // `-> &T`: the result must come from the first `&` parameter.
+                    let ps = &self.p.locals[..self.p.params];
+                    if let Some(k) = ps.iter().position(|l| is_lent_ty(l.ty))
+                        && is_lent_ty(self.p.ret)
+                    {
+                        let from = lent_root(e).map(|d| self.root(d));
+                        if from != Some(k) {
+                            let src = &ps[k].name;
+                            return Err(Diagnostic::new(format!("the result must be borrowed from `{src}`"), e.span).with_note(
+                                format!("a `-> &T` proc lends part of its first `&` parameter (`{src}`), so the caller knows what stays borrowed"),
+                            ));
+                        }
+                    }
                 }
                 self.no_alive(&st, s.span, "the proc returns")?;
                 return Ok(None);
@@ -476,7 +512,7 @@ impl Checker<'_> {
                 }
             }
             HExprKind::ToIface(inner, _) => self.expr(inner, st)?,
-            HExprKind::DynCall { args, .. } | HExprKind::Call(_, args) => {
+            HExprKind::Call(_, args) => {
                 // What each lent argument borrows from: a local, maybe through
                 // fields (`&c` and `&c.items` both borrow from `c`).
                 let lent: Vec<Option<LocalId>> = args.iter().map(lent_root).collect();
@@ -572,7 +608,7 @@ fn lent_root(e: &HExpr) -> Option<LocalId> {
         match &e.kind {
             HExprKind::Lend(id) | HExprKind::Local(id) => return Some(*id),
             HExprKind::ElemField(arr, _, _) | HExprKind::ToIface(arr, _) => e = arr,
-            _ => return None,
+            _ => e = borrowed_arg(e)?,
         }
     }
 }
@@ -583,7 +619,6 @@ fn gives(e: &HExpr, id: LocalId) -> Option<crate::diag::Span> {
     match &e.kind {
         HExprKind::Give(g) if *g == id => Some(e.span),
         HExprKind::Neg(a) | HExprKind::Convert(a) | HExprKind::Claim(a) | HExprKind::ToIface(a, _) => sub(a),
-        HExprKind::DynCall { args, .. } => args.iter().find_map(sub),
         HExprKind::Binary(_, a, b) | HExprKind::Index(a, b) | HExprKind::Bind(_, a, b) => sub(a).or_else(|| sub(b)),
         HExprKind::ElemField(a, b, _) => sub(a).or_else(|| sub(b)),
         HExprKind::TakeField(a, _) | HExprKind::IsClass(a, ..) => sub(a),
@@ -600,7 +635,6 @@ fn takes_out(e: &HExpr, id: LocalId) -> Option<crate::diag::Span> {
     match &e.kind {
         HExprKind::Builtin(Builtin::Pop | Builtin::Remove, xs) if lent_root(&xs[0]) == Some(id) => Some(e.span),
         HExprKind::Neg(a) | HExprKind::Convert(a) | HExprKind::Claim(a) | HExprKind::ToIface(a, _) => sub(a),
-        HExprKind::DynCall { args, .. } => args.iter().find_map(sub),
         HExprKind::Binary(_, a, b) | HExprKind::Index(a, b) | HExprKind::Bind(_, a, b) => sub(a).or_else(|| sub(b)),
         HExprKind::ElemField(a, b, _) => sub(a).or_else(|| sub(b)),
         HExprKind::TakeField(a, _) | HExprKind::IsClass(a, ..) => sub(a),

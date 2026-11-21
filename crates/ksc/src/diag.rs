@@ -54,6 +54,17 @@ impl Diagnostic {
     ///   |     ^
     /// ```
     pub fn render(&self, path: &str, src: &str) -> String {
+        self.render_at(path, src, 0)
+    }
+
+    /// Like [`Diagnostic::render`], for a file whose spans start at `base`.
+    pub fn render_at(&self, path: &str, src: &str, base: usize) -> String {
+        let local = Span::new(self.span.start.saturating_sub(base), self.span.end.saturating_sub(base));
+        let d = Diagnostic { span: local, ..self.clone() };
+        d.render_local(path, src)
+    }
+
+    fn render_local(&self, path: &str, src: &str) -> String {
         let start = self.span.start.min(src.len());
         let line_start = src[..start].rfind('\n').map_or(0, |i| i + 1);
         let line_end = src[start..].find('\n').map_or(src.len(), |i| start + i);
@@ -71,6 +82,45 @@ impl Diagnostic {
             out += &format!("{gutter} = note: {note}\n");
         }
         out
+    }
+}
+
+/// One file of a program.
+#[derive(Clone, Debug)]
+pub struct SourceFile {
+    /// The path shown in messages (`Shapes/Circle.ks`).
+    pub path: String,
+    pub src: String,
+    /// Where the file's first byte sits in the spans.
+    pub base: usize,
+}
+
+/// Every file of a program, laid end to end: a span says which file it is
+/// in by where it falls (as rustc's `SourceMap` does), so spans stay two numbers.
+#[derive(Clone, Debug, Default)]
+pub struct SourceMap {
+    pub files: Vec<SourceFile>,
+}
+
+impl SourceMap {
+    /// Adds a file and gives its base (one byte of gap after the previous file).
+    pub fn add(&mut self, path: impl Into<String>, src: impl Into<String>) -> usize {
+        let base = self.files.last().map_or(0, |f| f.base + f.src.len() + 1);
+        self.files.push(SourceFile { path: path.into(), src: src.into(), base });
+        base
+    }
+
+    /// The file a position falls in.
+    pub fn file_at(&self, pos: usize) -> Option<&SourceFile> {
+        self.files.iter().rev().find(|f| f.base <= pos)
+    }
+
+    /// The message, pointed at the right file.
+    pub fn render(&self, d: &Diagnostic) -> String {
+        match self.file_at(d.span.start) {
+            Some(f) => d.render_at(&f.path, &f.src, f.base),
+            None => d.render("?", ""),
+        }
     }
 }
 

@@ -9,11 +9,35 @@ use crate::bet::Word27;
 use crate::isa::{DecodeError, Op};
 use crate::KSB_MAGIC;
 
-pub const KSB_VERSION: u16 = 1;
+pub const KSB_VERSION: u16 = 2;
 /// Flag bit 0: each function carries the names of its local slots.
 pub const FLAG_DEBUG_NAMES: u16 = 1;
+/// Flag bit 1: an object file (one `.ks` file, not yet linked): it ends
+/// with a [`Link`] section.
+pub const FLAG_OBJECT: u16 = 2;
 
 const HEADER_LEN: usize = 24;
+
+/// The end of an executable made by `ksc`: a copy of `ksvm` with the
+/// program's `.ksb` after it, then the `.ksb`'s size (u64) and this mark.
+pub const EXE_MARK: [u8; 8] = *b"K3B-EXE1";
+
+/// `runtime` (the `ksvm` executable) with `program` stuck to its end.
+pub fn bundle(runtime: &[u8], program: &[u8]) -> Vec<u8> {
+    let mut out = runtime.to_vec();
+    out.extend_from_slice(program);
+    out.extend_from_slice(&(program.len() as u64).to_le_bytes());
+    out.extend_from_slice(&EXE_MARK);
+    out
+}
+
+/// The program stuck to the end of an executable by [`bundle`], if any.
+pub fn bundled(exe: &[u8]) -> Option<&[u8]> {
+    let rest = exe.strip_suffix(&EXE_MARK)?;
+    let (rest, len) = rest.split_at_checked(rest.len().checked_sub(8)?)?;
+    let len = usize::try_from(u64::from_le_bytes(len.try_into().ok()?)).ok()?;
+    rest.get(rest.len().checked_sub(len)?..)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Module {
@@ -24,6 +48,56 @@ pub struct Module {
     /// String pool: `text` literals and `dump` labels.
     pub strings: Vec<String>,
     pub functions: Vec<Function>,
+    /// What the linker needs, in an object file (`None` in a program).
+    pub link: Option<Link>,
+}
+
+/// What an object file tells the linker, besides its functions.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Link {
+    /// The classes it defines, with their numbers (two classes must never
+    /// share a number).
+    pub classes: Vec<(String, i64)>,
+    /// How its classes answer interface calls: for the dispatch function
+    /// `$dispatch.I.m`, objects of class number `tag` run `function`;
+    /// `whole` passes the receiver as the interface (pointer and class
+    /// number), for a default method, instead of just the pointer.
+    pub impls: Vec<Impl>,
+    /// `$burnI.I` frees an object of class number `tag` with `function`
+    /// (`$burn.C`); classes not listed own nothing and are just freed.
+    pub burns: Vec<(String, i64, String)>,
+    /// For `ksc`'s build cache: what this object was made from.
+    pub stamp: Vec<(String, u64)>,
+    /// The file's declarations, as Kestrel text (its source with the bodies
+    /// of plain procs and methods emptied): what other files need to use
+    /// it, so a library works without its `.ks`, as C's `.h` files.
+    pub decls: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Impl {
+    pub dispatch: String,
+    pub tag: i64,
+    pub function: String,
+    pub whole: bool,
+}
+
+/// Where a function's code comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Kind {
+    /// Its code is here.
+    #[default]
+    Code,
+    /// Its code is here, and other objects may have the same one (a copy of
+    /// a generic, `Box<int>.get`): the linker keeps one.
+    Shared,
+    /// Defined in another object; no code.
+    Import,
+    /// An interface call (`$dispatch.I.m`), written by the linker from
+    /// every object's [`Impl`]s. `ret` is how many values it returns.
+    Dispatch { ret: u16 },
+    /// Frees an object seen through an interface (`$burnI.I`), written by the linker.
+    BurnDispatch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -35,6 +109,7 @@ pub struct Function {
     pub code: Vec<u8>,
     /// Optional debug names, one per local slot (empty if absent).
     pub local_names: Vec<String>,
+    pub kind: Kind,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -45,6 +120,9 @@ pub enum KsbError {
     TrailingBytes,
     BadUtf8,
     BadEntry(u32),
+    BadKind(u8),
+    /// A program (not an object) with a function that has no code.
+    Unlinked(String),
     /// A problem inside a function's code.
     Code { func: String, at: usize, problem: CodeProblem },
 }
@@ -71,6 +149,8 @@ impl fmt::Display for KsbError {
             KsbError::TrailingBytes => f.write_str("unexpected bytes after the last function"),
             KsbError::BadUtf8 => f.write_str("string is not valid UTF-8"),
             KsbError::BadEntry(e) => write!(f, "entry function #{e} does not exist"),
+            KsbError::BadKind(k) => write!(f, "unknown function kind {k}"),
+            KsbError::Unlinked(name) => write!(f, "`{name}` has no code: this is an unlinked object file (link it with ksc)"),
             KsbError::Code { func, at, problem } => write!(f, "in {func}() at byte {at}: {problem:?}"),
         }
     }
@@ -84,7 +164,7 @@ impl Module {
     pub fn to_bytes(&self) -> Vec<u8> {
         let debug = !self.functions.is_empty()
             && self.functions.iter().all(|f| f.local_names.len() == usize::from(f.locals));
-        let flags = if debug { FLAG_DEBUG_NAMES } else { 0 };
+        let flags = if debug { FLAG_DEBUG_NAMES } else { 0 } | if self.link.is_some() { FLAG_OBJECT } else { 0 };
 
         let mut out = Vec::new();
         out.extend_from_slice(&KSB_MAGIC);
@@ -104,6 +184,16 @@ impl Module {
             write_name16(&mut out, &f.name);
             out.push(f.params);
             out.extend_from_slice(&f.locals.to_le_bytes());
+            match f.kind {
+                Kind::Code => out.push(0),
+                Kind::Shared => out.push(1),
+                Kind::Import => out.push(2),
+                Kind::Dispatch { ret } => {
+                    out.push(3);
+                    out.extend_from_slice(&ret.to_le_bytes());
+                }
+                Kind::BurnDispatch => out.push(4),
+            }
             out.extend_from_slice(&len32(&f.code).to_le_bytes());
             out.extend_from_slice(&f.code);
             if debug {
@@ -111,6 +201,33 @@ impl Module {
                     write_name16(&mut out, n);
                 }
             }
+        }
+        if let Some(link) = &self.link {
+            out.extend_from_slice(&len32(&link.classes).to_le_bytes());
+            for (name, tag) in &link.classes {
+                write_name16(&mut out, name);
+                out.extend_from_slice(&tag.to_le_bytes());
+            }
+            out.extend_from_slice(&len32(&link.impls).to_le_bytes());
+            for i in &link.impls {
+                write_name16(&mut out, &i.dispatch);
+                out.extend_from_slice(&i.tag.to_le_bytes());
+                write_name16(&mut out, &i.function);
+                out.push(u8::from(i.whole));
+            }
+            out.extend_from_slice(&len32(&link.burns).to_le_bytes());
+            for (dispatch, tag, function) in &link.burns {
+                write_name16(&mut out, dispatch);
+                out.extend_from_slice(&tag.to_le_bytes());
+                write_name16(&mut out, function);
+            }
+            out.extend_from_slice(&len32(&link.stamp).to_le_bytes());
+            for (name, hash) in &link.stamp {
+                write_name16(&mut out, name);
+                out.extend_from_slice(&hash.to_le_bytes());
+            }
+            out.extend_from_slice(&len32(link.decls.as_bytes()).to_le_bytes());
+            out.extend_from_slice(link.decls.as_bytes());
         }
         out
     }
@@ -144,6 +261,14 @@ impl Module {
             let mut f = Function { name: r.string(name_len)?, ..Default::default() };
             f.params = r.take(1)?[0];
             f.locals = r.u16()?;
+            f.kind = match r.take(1)?[0] {
+                0 => Kind::Code,
+                1 => Kind::Shared,
+                2 => Kind::Import,
+                3 => Kind::Dispatch { ret: r.u16()? },
+                4 => Kind::BurnDispatch,
+                k => return Err(KsbError::BadKind(k)),
+            };
             let code_len = r.u32()? as usize;
             f.code = r.take(code_len)?.to_vec();
             if flags & FLAG_DEBUG_NAMES != 0 {
@@ -154,6 +279,32 @@ impl Module {
             }
             m.functions.push(f);
         }
+        if flags & FLAG_OBJECT != 0 {
+            let mut link = Link::default();
+            for _ in 0..r.u32()? {
+                let name = r.name16()?;
+                link.classes.push((name, i64::from_le_bytes(r.array()?)));
+            }
+            for _ in 0..r.u32()? {
+                let dispatch = r.name16()?;
+                let tag = i64::from_le_bytes(r.array()?);
+                let function = r.name16()?;
+                let whole = r.take(1)?[0] != 0;
+                link.impls.push(Impl { dispatch, tag, function, whole });
+            }
+            for _ in 0..r.u32()? {
+                let dispatch = r.name16()?;
+                let tag = i64::from_le_bytes(r.array()?);
+                link.burns.push((dispatch, tag, r.name16()?));
+            }
+            for _ in 0..r.u32()? {
+                let name = r.name16()?;
+                link.stamp.push((name, u64::from_le_bytes(r.array()?)));
+            }
+            let len = r.u32()? as usize;
+            link.decls = r.string(len)?;
+            m.link = Some(link);
+        }
         if r.pos != bytes.len() {
             return Err(KsbError::TrailingBytes);
         }
@@ -163,10 +314,16 @@ impl Module {
 
     /// Checks indices, slots, call arity and jump targets in every function.
     pub fn verify(&self) -> Result<(), KsbError> {
-        if self.entry as usize >= self.functions.len() {
+        if self.entry as usize >= self.functions.len() && !(self.link.is_some() && self.entry == 0) {
             return Err(KsbError::BadEntry(self.entry));
         }
         for f in &self.functions {
+            if !matches!(f.kind, Kind::Code | Kind::Shared) {
+                if self.link.is_none() {
+                    return Err(KsbError::Unlinked(f.name.clone()));
+                }
+                continue;
+            }
             let fail = |at: usize, problem| KsbError::Code { func: f.name.clone(), at, problem };
             if u16::from(f.params) > f.locals {
                 return Err(fail(0, CodeProblem::ParamsExceedLocals));
@@ -303,6 +460,11 @@ impl<'a> Cursor<'a> {
     fn string(&mut self, len: usize) -> Result<String, KsbError> {
         String::from_utf8(self.take(len)?.to_vec()).map_err(|_| KsbError::BadUtf8)
     }
+
+    fn name16(&mut self) -> Result<String, KsbError> {
+        let len = usize::from(self.u16()?);
+        self.string(len)
+    }
 }
 
 #[cfg(test)]
@@ -336,6 +498,7 @@ mod tests {
                 Op::Ret,
             ]),
             local_names: vec!["x".into()],
+            kind: Kind::Code,
         };
         let sum = Function {
             name: "sum".into(),
@@ -343,6 +506,7 @@ mod tests {
             locals: 1,
             code: code(&[Op::Load(0), Op::Load(0), Op::Add, Op::Ret]),
             local_names: vec!["v".into()],
+            kind: Kind::Code,
         };
         Module {
             entry: 0,
@@ -353,6 +517,7 @@ mod tests {
             ],
             strings: vec!["Hello".into()],
             functions: vec![main, sum],
+            link: None,
         }
     }
 
@@ -363,6 +528,37 @@ mod tests {
         assert_eq!(&bytes[..4], b"K3B\x01");
         assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), FLAG_DEBUG_NAMES);
         assert_eq!(Module::from_bytes(&bytes), Ok(m));
+    }
+
+    #[test]
+    fn bundles() {
+        let program = sample().to_bytes();
+        let exe = bundle(b"\x7fELF...runtime", &program);
+        assert_eq!(bundled(&exe), Some(&program[..]));
+        assert_eq!(bundled(b"\x7fELF...runtime"), None);
+        assert_eq!(bundled(&EXE_MARK), None);
+    }
+
+    #[test]
+    fn object_roundtrip() {
+        let mut m = sample();
+        m.functions.push(Function { name: "other".into(), params: 2, locals: 2, kind: Kind::Import, ..Default::default() });
+        m.functions.push(Function { name: "$dispatch.I.m".into(), params: 2, locals: 2, kind: Kind::Dispatch { ret: 1 }, ..Default::default() });
+        for f in &mut m.functions[2..] {
+            f.local_names = vec![String::new(); 2];
+        }
+        let link = Link {
+            classes: vec![("Circle".into(), 77)],
+            impls: vec![Impl { dispatch: "$dispatch.I.m".into(), tag: 77, function: "Circle.m".into(), whole: false }],
+            burns: vec![("$burnI.I".into(), 77, "$burn.Circle".into())],
+            stamp: vec![("source".into(), 42)],
+            decls: "public proc other(a: int, b: int) { }".into(),
+        };
+        m.link = Some(link);
+        assert_eq!(Module::from_bytes(&m.to_bytes()), Ok(m.clone()));
+        // A program must be linked: no function without code.
+        m.link = None;
+        assert_eq!(Module::from_bytes(&m.to_bytes()), Err(KsbError::Unlinked("other".into())));
     }
 
     #[test]
@@ -379,8 +575,8 @@ mod tests {
         let bytes = sample().to_bytes();
         assert_eq!(Module::from_bytes(b"ELF\x7f"), Err(KsbError::BadMagic));
         let mut v2 = bytes.clone();
-        v2[4] = 2;
-        assert_eq!(Module::from_bytes(&v2), Err(KsbError::UnsupportedVersion(2)));
+        v2[4] = 9;
+        assert_eq!(Module::from_bytes(&v2), Err(KsbError::UnsupportedVersion(9)));
         assert_eq!(Module::from_bytes(&bytes[..bytes.len() - 1]), Err(KsbError::Truncated));
         let mut extra = bytes.clone();
         extra.push(0);

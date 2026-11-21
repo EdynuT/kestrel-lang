@@ -17,17 +17,43 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
 /// Like [`parse`], with the source text the tokens came from: a failed
 /// `assert` then shows its line and its condition as written.
 pub fn parse_source(tokens: Vec<Token>, src: &str) -> Result<Program, Diagnostic> {
-    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0, class: None, src: src.to_string(), safe_vars: 0, splits: Vec::new() };
-    let mut items = Vec::new();
-    while p.peek() != &Tok::Eof {
-        items.push(p.item()?);
+    parse_source_at(tokens, src, 0)
+}
+
+/// Like [`parse_source`], for a file whose spans start at `base` (see
+/// [`crate::lexer::lex_at`]).
+pub fn parse_source_at(tokens: Vec<Token>, src: &str, base: usize) -> Result<Program, Diagnostic> {
+    let mut p =
+        Parser { tokens, pos: 0, in_head: false, depth: 0, class: None, src: src.to_string(), base, safe_vars: 0, splits: Vec::new() };
+    let mut program = Program::default();
+    while p.peek() == &Tok::Use {
+        program.uses.push(p.use_decl()?);
     }
-    Ok(Program { items })
+    while p.peek() != &Tok::Eof {
+        let (item, public) = p.item()?;
+        if public {
+            program.public.insert(item_name(&item).name.clone());
+        }
+        program.items.push(item);
+    }
+    Ok(program)
+}
+
+/// The name an item is declared with.
+pub fn item_name(item: &Item) -> &Ident {
+    match item {
+        Item::Const(c) => &c.name,
+        Item::Proc(p) => &p.name,
+        Item::Enum(e) => &e.name,
+        Item::Struct(s) => &s.name,
+        Item::Class(c) => &c.name,
+        Item::Interface(d) => &d.name,
+    }
 }
 
 /// One expression and nothing else (the `{...}` of a `printf` format).
 pub fn parse_expr(tokens: Vec<Token>) -> Result<Expr, Diagnostic> {
-    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0, class: None, src: String::new(), safe_vars: 0, splits: Vec::new() };
+    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0, class: None, src: String::new(), base: 0, safe_vars: 0, splits: Vec::new() };
     let e = p.expr()?;
     if p.peek() != &Tok::Eof {
         return Err(p.unexpected("the end of `{...}`"));
@@ -39,6 +65,8 @@ struct Parser {
     tokens: Vec<Token>,
     /// The source text (empty when unknown), for `assert` messages.
     src: String,
+    /// Where `src` starts in the spans (see [`crate::lexer::lex_at`]).
+    base: usize,
     /// `?.` seen so far: each gets its own hidden variable.
     safe_vars: u32,
     /// `>>` tokens split in two by [`Parser::close_angle`], to undo when a
@@ -123,27 +151,70 @@ impl Parser {
 
     // ---- items ----
 
-    fn item(&mut self) -> PResult<Item> {
+    /// One top-level item, and whether it is `public`. Annotations come
+    /// first: `@impl(Forma) public class Circulo { ... }`.
+    fn item(&mut self) -> PResult<(Item, bool)> {
+        let annotations = self.annotations()?;
+        let public = self.eat(&Tok::Public);
         match self.peek() {
-            Tok::Proc => self.proc_decl().map(Item::Proc),
-            Tok::Const => self.const_decl().map(Item::Const),
-            Tok::Enum => self.enum_decl().map(Item::Enum),
-            Tok::Struct => self.struct_decl().map(Item::Struct),
-            Tok::Interface => self.interface_decl().map(Item::Interface),
-            Tok::Class | Tok::At => {
-                let annotations = self.annotations()?;
-                match self.peek() {
-                    Tok::Class => self.class_decl(annotations).map(Item::Class),
-                    Tok::Proc => {
-                        let mut p = self.proc_decl()?;
-                        p.annotations = annotations;
-                        Ok(Item::Proc(p))
-                    }
-                    _ => Err(self.unexpected("`proc` or `class` after the annotations")),
-                }
+            Tok::Private => {
+                return Err(Diagnostic::new("items are private to their file already", self.span())
+                    .with_note("remove `private`; `public` makes an item visible to the files that `use` this one"));
             }
-            _ => Err(self.unexpected("`proc`, `const`, `enum`, `struct`, `class` or `interface`")),
+            Tok::At if public => {
+                return Err(Diagnostic::new("annotations go before `public`", self.span())
+                    .with_note("write `@impl(Forma) public class Circulo { ... }`"));
+            }
+            Tok::Use => {
+                return Err(Diagnostic::new("`use` goes at the top of the file, before everything else", self.span()));
+            }
+            _ => {}
         }
+        let item = match self.peek() {
+            Tok::Class => Item::Class(self.class_decl(annotations)?),
+            Tok::Proc => {
+                let mut p = self.proc_decl()?;
+                p.annotations = annotations;
+                Item::Proc(p)
+            }
+            _ if !annotations.is_empty() => return Err(self.unexpected("`proc` or `class` after the annotations")),
+            Tok::Const => Item::Const(self.const_decl()?),
+            Tok::Enum => Item::Enum(self.enum_decl()?),
+            Tok::Struct => Item::Struct(self.struct_decl()?),
+            Tok::Interface => Item::Interface(self.interface_decl()?),
+            _ => return Err(self.unexpected("`proc`, `const`, `enum`, `struct`, `class` or `interface`")),
+        };
+        Ok((item, public))
+    }
+
+    /// `use Geometry;` or `use Shapes.Circle;` (the file `Shapes/Circle.ks`).
+    fn use_decl(&mut self) -> PResult<UseDecl> {
+        let start = self.expect(Tok::Use)?;
+        let mut path = vec![self.path_part()?];
+        while self.eat(&Tok::Dot) {
+            path.push(self.path_part()?);
+        }
+        let end = self.expect(Tok::Semi)?;
+        Ok(UseDecl { path, span: start.to(end) })
+    }
+
+    /// A part of a `use` path: a name, or a word like `text` (`std.text`).
+    fn path_part(&mut self) -> PResult<Ident> {
+        if let Some(word) = crate::lexer::keyword_text(self.peek()) {
+            return Ok(Ident { name: word.to_string(), span: self.bump().span });
+        }
+        self.ident()
+    }
+
+    /// A name that may come from another file: `Forma` or `Geometry.Forma`.
+    fn dotted(&mut self) -> PResult<Ident> {
+        let mut name = self.ident()?;
+        while self.peek() == &Tok::Dot && matches!(self.peek_at(1), Tok::Ident(_)) {
+            self.bump();
+            let next = self.ident()?;
+            name = Ident { name: format!("{}.{}", name.name, next.name), span: name.span.to(next.span) };
+        }
+        Ok(name)
     }
 
     fn const_decl(&mut self) -> PResult<ConstDecl> {
@@ -170,7 +241,7 @@ impl Parser {
                         self.bump();
                         text = Some(s);
                     } else {
-                        args.push(self.ident()?);
+                        args.push(self.dotted()?);
                     }
                     if !self.eat(&Tok::Comma) {
                         break;
@@ -221,6 +292,26 @@ impl Parser {
         Ok(ClassDecl { name, generics, instance: false, annotations, fields, methods })
     }
 
+    /// The type after `->`: also `&T` and `&int[]` (a borrow of something
+    /// the proc borrowed).
+    fn ret_type(&mut self) -> PResult<TypeExpr> {
+        if self.peek() != &Tok::Amp {
+            return self.type_expr();
+        }
+        let start = self.bump().span;
+        let inner = self.type_expr()?;
+        let ty = match inner.ty {
+            Type::Named(n) => Type::LentNamed(n),
+            Type::NamedOpt(n) => Type::LentNamedOpt(n),
+            Type::Own(b) => Type::Lent(b),
+            t => {
+                return Err(Diagnostic::new(format!("only arrays and objects are borrowed with `&`; {t} is copied"), start)
+                    .with_note("return it without `&`"));
+            }
+        };
+        Ok(TypeExpr { ty, span: start.to(inner.span) })
+    }
+
     /// `<T, K extends Hash>` after a class or proc name (nothing if absent).
     fn type_params(&mut self) -> PResult<Vec<TypeParam>> {
         let mut out: Vec<TypeParam> = Vec::new();
@@ -232,7 +323,7 @@ impl Parser {
             if out.iter().any(|p| p.name.name == name.name) {
                 return Err(Diagnostic::new(format!("type parameter `{}` appears twice", name.name), name.span));
             }
-            let bound = if self.eat(&Tok::Extends) { Some(self.ident()?) } else { None };
+            let bound = if self.eat(&Tok::Extends) { Some(self.dotted()?) } else { None };
             out.push(TypeParam { name, bound });
             if !self.eat(&Tok::Comma) {
                 break;
@@ -331,6 +422,27 @@ impl Parser {
                 }
                 continue;
             }
+            // `x: &int`: a value the proc may change for the caller (passed with `&n`).
+            if !sym && !amp && matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon && self.peek_at(2) == &Tok::Amp {
+                let pname = self.ident()?;
+                self.expect(Tok::Colon)?;
+                let amp_at = self.bump().span;
+                let inner = self.type_expr()?;
+                let ty = match inner.ty {
+                    Type::Named(n) => Type::LentNamed(n),
+                    Type::NamedOpt(n) => Type::LentNamedOpt(n),
+                    Type::Own(_) => {
+                        return Err(Diagnostic::new("a borrowed array puts `&` before its name", amp_at)
+                            .with_note(format!("write `&{}[]: ...`", pname.name)));
+                    }
+                    t => t,
+                };
+                params.push(Param { name: pname, ty: TypeExpr { ty, span: amp_at.to(inner.span) }, mode: Some(SelfMode::Lent) });
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+                continue;
+            }
             let (pname, mut ty) = self.typed_name(sym, sym_span)?;
             let mode = match ty.ty {
                 Type::Own(b) if amp => {
@@ -352,7 +464,7 @@ impl Parser {
             }
         }
         self.expect(Tok::RParen)?;
-        let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
+        let ret = if self.eat(&Tok::Arrow) { Some(self.ret_type()?) } else { None };
         // In an interface, a method ends with `;` (no body), unless it is a
         // default method with a `{ ... }` body.
         if self.class.is_some_and(|c| c.starts_with('@')) && self.peek() != &Tok::LBrace {
@@ -523,8 +635,9 @@ impl Parser {
             Type::Bool
         } else {
             match self.peek().clone() {
-                Tok::Ident(name) => {
-                    self.bump();
+                Tok::Ident(_) => {
+                    // `Geometry.Circle`: a type from another file.
+                    let name = self.dotted()?.name;
                     // `Box<int>`: a generic class with its type arguments.
                     let name = if self.peek() == &Tok::Lt { generic_name(&name, &self.type_args()?).to_string() } else { name };
                     if self.eat(&Tok::Question) {
@@ -616,8 +729,9 @@ impl Parser {
         };
         self.expect(Tok::RParen)?;
         self.expect(Tok::Semi)?;
-        let written = self.src.get(cond.span.start..cond.span.end).map(str::to_string);
-        let line = self.src.get(..at.start).map(|s| s.matches('\n').count() + 1);
+        let local = |i: usize| i.saturating_sub(self.base);
+        let written = self.src.get(local(cond.span.start)..local(cond.span.end)).map(str::to_string);
+        let line = self.src.get(..local(at.start)).map(|s| s.matches('\n').count() + 1);
         let what = text.or(written).unwrap_or_else(|| "assert failed".into());
         let msg = match line {
             Some(n) if !self.src.is_empty() => format!("assert failed (line {n}): {what}"),
@@ -974,6 +1088,9 @@ impl Parser {
                 (Tok::Le, BinOp::Le),
                 (Tok::Ge, BinOp::Ge),
             ],
+            // Level 3 is `a ?: b` (handled below): looser than `+`, tighter
+            // than comparisons, as in Kotlin.
+            &[],
             &[(Tok::Plus, BinOp::Add), (Tok::Minus, BinOp::Sub)],
             &[(Tok::Star, BinOp::Mul), (Tok::Slash, BinOp::Div), (Tok::Percent, BinOp::Mod)],
             &[(Tok::Shl, BinOp::Shl), (Tok::Shr, BinOp::Shr)],
@@ -981,10 +1098,21 @@ impl Parser {
         let Some(ops) = LEVELS.get(level) else {
             return self.unary();
         };
+        if level == 3 {
+            let lhs = self.binary(level + 1)?;
+            if !self.eat(&Tok::Elvis) {
+                return Ok(lhs);
+            }
+            self.nest()?;
+            let rhs = self.binary(level)?; // right-associative: a ?: b ?: c
+            self.depth -= 1;
+            let span = lhs.span.to(rhs.span);
+            return Ok(Expr { kind: ExprKind::Elvis(Box::new(lhs), Box::new(rhs)), span });
+        }
         let mut lhs = self.binary(level + 1)?;
         // `f is Circulo` sits with the comparisons (`a is B && ...`).
         if level == 2 && self.eat(&Tok::Is) {
-            let class = self.ident()?;
+            let class = self.dotted()?;
             let span = lhs.span.to(class.span);
             return Ok(Expr { kind: ExprKind::Is(Box::new(lhs), class), span });
         }
@@ -1083,7 +1211,29 @@ impl Parser {
             } else if self.peek() == &Tok::Dot || self.peek() == &Tok::QuestionDot {
                 // `a?.b`: the member is read from a hidden variable that holds `a`.
                 let safe = self.bump().tok == Tok::QuestionDot;
-                let field = self.ident()?;
+                let mut field = self.ident()?;
+                // `Collections.List<int>()`, `Util.max<int>(a, b)`: a generic
+                // from another file (`<` after `name.x` is a comparison otherwise).
+                if !safe
+                    && matches!(e.kind, ExprKind::Var(_))
+                    && let Some(g) = self.generic_ref(&field.name)
+                {
+                    field = Ident { name: g.to_string(), span: field.span.to(self.tokens[self.pos - 1].span) };
+                }
+                if !safe && field.name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                    // `Geometry.Ponto { x: 1 }`: a struct from another file.
+                    if let ExprKind::Var(module) = &e.kind
+                        && !self.in_head
+                        && self.peek() == &Tok::LBrace
+                        && matches!(self.peek_at(1), Tok::Ident(_))
+                        && self.peek_at(2) == &Tok::Colon
+                    {
+                        let name = Ident { name: format!("{module}.{}", field.name), span: e.span.to(field.span) };
+                        let start = e.span;
+                        e = self.struct_lit(name, start)?;
+                        continue;
+                    }
+                }
                 let (recv, var) = if safe {
                     self.safe_vars += 1;
                     let var = format!("$safe{}", self.safe_vars);
@@ -1313,6 +1463,7 @@ mod tests {
             ExprKind::Give(n) => format!("(give {})", n.name),
             ExprKind::GiveField(p) => format!("(give {})", sx(p)),
             ExprKind::Is(a, c) => format!("(is {} {})", sx(a), c.name),
+            ExprKind::Elvis(a, b) => format!("(?: {} {})", sx(a), sx(b)),
             ExprKind::Safe { recv, rest, .. } => format!("(?. {} {})", sx(recv), sx(rest)),
             ExprKind::Lend(n) => format!("(&{})", sx(n)),
             ExprKind::MethodCall { recv, name, args } => {
@@ -1425,7 +1576,7 @@ mod tests {
         let e = parse_err("proc main() { walk i in 3.. { print(i); } }");
         assert!(e.message.contains("the end of the range"), "{}", e.message);
         assert!(parse_err("proc main() { if {1} { } }").message.contains("expected an expression, found `{`"));
-        assert!(parse_err("proc f() -> &int[] { } proc main() {}").message.contains("before its name"));
+        assert!(parse_err("proc f() -> &int { } proc main() {}").message.contains("only arrays and objects are borrowed"));
         assert!(parse_err("proc main() { x: trit = a <=> b <=> c; }").message.contains("cannot be chained"));
         assert!(parse_err("x: int = 1;").message.contains("expected `proc`, `const`, `enum`, `struct`, `class` or `interface`"));
         assert!(parse_err("proc main() { x: int = ; }").message.contains("expected an expression, found `;`"));

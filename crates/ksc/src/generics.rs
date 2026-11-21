@@ -27,7 +27,9 @@ const MAX_INSTANCES: usize = 729;
 pub fn expand(program: Program) -> R<Program> {
     let mut templates: HashMap<String, Item> = HashMap::new();
     let mut items = Vec::new();
-    for item in program.items {
+    let Program { items: program_items, uses, public, external } = program;
+    let program_rest = Program { items: Vec::new(), uses, public, external: external.clone() };
+    for item in program_items {
         let generic = match &item {
             Item::Class(c) => {
                 if let Some(m) = c.methods.iter().find(|m| !m.decl.generics.is_empty()) {
@@ -46,7 +48,8 @@ pub fn expand(program: Program) -> R<Program> {
             None => items.push(item),
         }
     }
-    let mut cx = Expander { templates, objects: HashSet::new(), impls: HashMap::new(), done: HashSet::new(), queue: Vec::new() };
+    let enums = items.iter().filter_map(|i| if let Item::Enum(e) = i { Some(e.name.name.clone()) } else { None }).collect();
+    let mut cx = Expander { templates, objects: HashSet::new(), impls: HashMap::new(), enums, done: HashSet::new(), queue: Vec::new() };
     cx.objects.extend(items.iter().filter_map(|i| match i {
         Item::Class(c) => Some(c.name.name.clone()),
         Item::Interface(d) => Some(d.name.name.clone()),
@@ -74,6 +77,10 @@ pub fn expand(program: Program) -> R<Program> {
     template_names.sort();
     for t in &template_names {
         let params = cx.params(t).to_vec();
+        // A generic of another file was checked when that file was compiled.
+        if external.contains(t) {
+            continue;
+        }
         if let Some(Item::Class(c)) = cx.templates.get(t) {
             cx.objects.insert(c.name.name.clone());
         }
@@ -118,7 +125,7 @@ pub fn expand(program: Program) -> R<Program> {
     }
     items.extend(stand_ins);
     items.extend(made);
-    Ok(Program { items })
+    Ok(Program { items, ..program_rest })
 }
 
 /// The interfaces `@impl(...)` lists for a class.
@@ -133,6 +140,8 @@ struct Expander {
     objects: HashSet<String>,
     /// The interfaces each class implements (for `T extends Forma`).
     impls: HashMap<String, Vec<String>>,
+    /// Enum names (enums are `Comparable`).
+    enums: HashSet<String>,
     done: HashSet<String>,
     queue: Vec<(&'static str, Span)>,
 }
@@ -207,6 +216,8 @@ impl Expander {
         // A parameter whose type became a value (`lent x: T` with `T = int`) is just copied.
         let fix = |p: &mut ProcDecl| {
             for param in &mut p.params {
+                // A `T` that became a value (`int`) is copied, `&T` too: generic
+                // code cannot change a `T`, so a copy behaves the same.
                 if param.mode.is_some() && !matches!(param.ty.ty, Type::Named(_) | Type::NamedOpt(_) | Type::LentNamed(_) | Type::LentNamedOpt(_) | Type::Own(_) | Type::Lent(_)) {
                     param.mode = None;
                 }
@@ -223,6 +234,9 @@ impl Expander {
     /// Whether type argument `a` implements interface `bound`.
     fn satisfies(&self, a: Type, bound: &str) -> bool {
         match a {
+            // Numbers, texts and enums are `Comparable` by themselves.
+            Type::Named(n) if bound == crate::object::COMPARABLE && self.enums.contains(n) => true,
+            Type::Scalar(_) | Type::Text => bound == crate::object::COMPARABLE,
             Type::Named(n) => n == bound || self.impls.get(n).is_some_and(|i| i.iter().any(|x| x == bound)),
             _ => false,
         }
@@ -471,7 +485,7 @@ fn walk_expr(e: &mut Expr, f: &mut dyn FnMut(Site)) {
             walk_expr(a, f);
             f(Site::Type(t, span));
         }
-        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b) => {
+        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b) | ExprKind::Elvis(a, b) => {
             walk_expr(a, f);
             walk_expr(b, f);
         }

@@ -80,6 +80,7 @@ pub enum Tok {
     Struct,
     Class,
     Interface,
+    Use,
     Public,
     Private,
     At,
@@ -87,6 +88,8 @@ pub enum Tok {
     Question,
     /// `a?.b`: reads `b` only if `a` is not null.
     QuestionDot,
+    /// `a ?: b`: `a`, or `b` if `a` is null.
+    Elvis,
     Null,
     Sym,
     Match,
@@ -145,6 +148,7 @@ const KEYWORDS: &[(&str, Tok)] = &[
     ("struct", Tok::Struct),
     ("class", Tok::Class),
     ("interface", Tok::Interface),
+    ("use", Tok::Use),
     ("public", Tok::Public),
     ("private", Tok::Private),
     ("sym", Tok::Sym),
@@ -190,6 +194,7 @@ const OPERATORS: &[(&str, Tok)] = &[
     ("&", Tok::Amp),
     ("||", Tok::OrOr),
     ("?.", Tok::QuestionDot),
+    ("?:", Tok::Elvis),
     ("..", Tok::DotDot),
     (".", Tok::Dot),
     ("=>", Tok::FatArrow),
@@ -238,9 +243,24 @@ impl fmt::Display for Tok {
     }
 }
 
+/// The text of a keyword token (`text` for `Tok::Text`); `None` for others.
+pub fn keyword_text(tok: &Tok) -> Option<&'static str> {
+    KEYWORDS.iter().find(|(_, t)| t == tok).map(|(s, _)| *s)
+}
+
 pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
+    lex_at(src, 0)
+}
+
+/// Like [`lex`], for a file whose first byte sits at `base` in the
+/// [`crate::diag::SourceMap`]: every span is moved by `base`.
+pub fn lex_at(src: &str, base: usize) -> Result<Vec<Token>, Diagnostic> {
     let mut lx = Lexer { src, pos: 0, tokens: Vec::new() };
-    lx.run()?;
+    let shift = |sp: Span| Span::new(sp.start + base, sp.end + base);
+    lx.run().map_err(|d| Diagnostic { span: shift(d.span), ..d })?;
+    for t in &mut lx.tokens {
+        t.span = shift(t.span);
+    }
     Ok(lx.tokens)
 }
 

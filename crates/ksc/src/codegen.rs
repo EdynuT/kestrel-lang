@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use kestrel_core::isa::{Addr, Op, Slot};
 use kestrel_core::limits::{MAX_LOCALS, MAX_PARAMS};
-use kestrel_core::ksb::{Function, Module};
+use kestrel_core::ksb::{Function, Impl, Kind, Module};
 use kestrel_core::{Real, Word, Word27};
 
 use crate::diag::{Diagnostic, Span};
@@ -16,9 +16,13 @@ use crate::hir::*;
 
 type R<T> = Result<T, Diagnostic>;
 
+/// Compiles one file: an object for the linker (see `kestrel_core::link`).
+/// Procs of other files are imports; interface calls and frees go to
+/// functions the linker writes.
 pub fn generate(hir: &Hir) -> R<Module> {
     let mut pools = Pools::default();
     let mut functions = Vec::new();
+    let link_of: HashMap<&'static str, &ClassLink> = hir.class_info.iter().map(|c| (c.name, c)).collect();
     // A class whose fields own something gets a hidden function that frees
     // an object of it, after the user's procs. `burn` calls it, so a class
     // that holds objects of its own class (a tree) frees them by recursion.
@@ -26,23 +30,90 @@ pub fn generate(hir: &Hir) -> R<Module> {
         hir.classes.iter().filter(|(_, fields)| fields.iter().any(|(_, t)| owns(*t))).map(|(c, _)| *c).collect();
     owners.sort_unstable();
     let burners: HashMap<&'static str, u32> = owners.iter().enumerate().map(|(k, c)| (*c, (hir.procs.len() + k) as u32)).collect();
+    // Then one `$burnI.I` per interface, written by the linker.
+    let first = (hir.procs.len() + owners.len()) as u32;
+    let burn_ifaces: HashMap<&'static str, u32> = hir.iface_names.iter().enumerate().map(|(k, i)| (*i, first + k as u32)).collect();
     let burn_procs: Vec<(&'static str, HProc)> = owners
         .iter()
         .map(|c| {
             let obj = Local { name: "obj".into(), ty: Type::Class(c), kind: LocalKind::Param, span: Span::default(), is_final: false };
             let body = HBlock { stmts: Vec::new(), scope: Vec::new(), span: Span::default() };
-            (*c, HProc { name: format!("$burn.{c}"), params: 1, ret: Type::Void, locals: vec![obj], body })
+            let link = link_of.get(c).map_or(Link::Own, |l| l.link);
+            (*c, HProc { name: format!("$burn.{c}"), params: 1, ret: Type::Void, locals: vec![obj], body, refs: vec![false], link })
         })
         .collect();
+    // Which parameters of each proc are `x: &int` (written back after a call).
+    let refs: Vec<Vec<bool>> = hir.procs.iter().map(|p| p.refs.clone()).collect();
+    let cx = Shared { structs: &hir.structs, classes: &hir.classes, burners: &burners, burn_ifaces: &burn_ifaces, refs: &refs };
     for p in &hir.procs {
-        functions.push(ProcGen::new(p, &hir.structs, &hir.classes, &hir.ifaces, &burners, &mut pools)?.run()?);
+        functions.push(match p.link {
+            Link::Own | Link::Shared => {
+                let mut f = ProcGen::new(p, &cx, &mut pools)?.run()?;
+                f.kind = if p.link == Link::Shared { Kind::Shared } else { Kind::Code };
+                f
+            }
+            Link::Import => stub(&hir.structs, p, Kind::Import),
+            Link::Dispatch => {
+                let ret = match p.ret {
+                    Type::Void => 1,
+                    t => width(&hir.structs, t) as u16,
+                };
+                stub(&hir.structs, p, Kind::Dispatch { ret })
+            }
+        });
     }
     for (c, hp) in &burn_procs {
-        functions.push(ProcGen::new(hp, &hir.structs, &hir.classes, &hir.ifaces, &burners, &mut pools)?.burn_fn(c));
+        functions.push(match hp.link {
+            Link::Import => stub(&hir.structs, hp, Kind::Import),
+            link => {
+                let mut f = ProcGen::new(hp, &cx, &mut pools)?.burn_fn(c);
+                f.kind = if link == Link::Shared { Kind::Shared } else { Kind::Code };
+                f
+            }
+        });
     }
-    let m = Module { entry: hir.entry as u32, consts: pools.consts, strings: pools.strings, functions };
+    for i in &hir.iface_names {
+        let names = vec!["$obj".to_string(), "$class".to_string()];
+        functions.push(Function { name: format!("$burnI.{i}"), params: 2, locals: 2, code: Vec::new(), local_names: names, kind: Kind::BurnDispatch });
+    }
+    // What the linker needs: this file's classes and how they answer.
+    let mut link = kestrel_core::ksb::Link::default();
+    for c in hir.class_info.iter().filter(|c| c.link != Link::Import) {
+        link.classes.push((c.name.to_string(), c.tag));
+        if burners.contains_key(c.name) {
+            for i in &c.ifaces {
+                link.burns.push((format!("$burnI.{i}"), c.tag, format!("$burn.{}", c.name)));
+            }
+        }
+    }
+    for (dispatch, tag, pid, whole) in &hir.impls {
+        link.impls.push(Impl { dispatch: dispatch.clone(), tag: *tag, function: hir.procs[*pid].name.clone(), whole: *whole });
+    }
+    let m = Module { entry: hir.entry as u32, consts: pools.consts, strings: pools.strings, functions, link: Some(link) };
     debug_assert_eq!(m.verify(), Ok(()));
     Ok(m)
+}
+
+/// A function without code (written elsewhere): its parameters only.
+fn stub(structs: &Structs, p: &HProc, kind: Kind) -> Function {
+    let mut names = Vec::new();
+    for l in &p.locals[..p.params] {
+        leaf_names(structs, l.ty, &l.name, &mut names);
+    }
+    let n = names.len();
+    Function { name: p.name.clone(), params: n as u8, locals: n as u16, code: Vec::new(), local_names: names, kind }
+}
+
+/// What every proc's code generation reads.
+struct Shared<'a> {
+    structs: &'a Structs,
+    classes: &'a Structs,
+    /// The hidden function that frees an object of each class that owns something.
+    burners: &'a HashMap<&'static str, u32>,
+    /// `$burnI.I` for each interface.
+    burn_ifaces: &'a HashMap<&'static str, u32>,
+    /// `x: &int` parameters of every proc, by proc number.
+    refs: &'a [Vec<bool>],
 }
 
 #[derive(Default)]
@@ -82,9 +153,11 @@ struct ProcGen<'a> {
     p: &'a HProc,
     structs: &'a Structs,
     classes: &'a Structs,
-    ifaces: &'a Ifaces,
     /// The hidden function that frees an object of each class that owns something.
     burners: &'a HashMap<&'static str, u32>,
+    burn_ifaces: &'a HashMap<&'static str, u32>,
+    /// `x: &int` parameters of every proc, by proc number.
+    refs: &'a [Vec<bool>],
     pools: &'a mut Pools,
     slots: Vec<Slot>,
     names: Vec<String>,
@@ -95,14 +168,8 @@ struct ProcGen<'a> {
 }
 
 impl<'a> ProcGen<'a> {
-    fn new(
-        p: &'a HProc,
-        structs: &'a Structs,
-        classes: &'a Structs,
-        ifaces: &'a Ifaces,
-        burners: &'a HashMap<&'static str, u32>,
-        pools: &'a mut Pools,
-    ) -> R<Self> {
+    fn new(p: &'a HProc, cx: &Shared<'a>, pools: &'a mut Pools) -> R<Self> {
+        let Shared { structs, classes, burners, burn_ifaces, refs } = *cx;
         // Each local takes as many slots as its type (a struct: one per
         // field). Parameters come first, in order, as the caller pushes them.
         // User variables get the low registers next; walk variables and
@@ -138,7 +205,7 @@ impl<'a> ProcGen<'a> {
             )
             .with_note("each struct field counts as one value"));
         }
-        Ok(ProcGen { p, structs, classes, ifaces, burners, pools, slots, names, code: Vec::new(), loops: Vec::new(), param_slots })
+        Ok(ProcGen { p, structs, classes, burners, burn_ifaces, refs, pools, slots, names, code: Vec::new(), loops: Vec::new(), param_slots })
     }
 
     fn width(&self, ty: Type) -> usize {
@@ -153,7 +220,7 @@ impl<'a> ProcGen<'a> {
             HExprKind::Builtin(..) => self.width(e.ty),
             HExprKind::Print(_) => 0,
             HExprKind::Bind(_, _, body) => self.leftover(body),
-            HExprKind::Call(..) | HExprKind::DynCall { .. } | HExprKind::IfNull { .. } if e.ty == Type::Void => 1,
+            HExprKind::Call(..) | HExprKind::IfNull { .. } if e.ty == Type::Void => 1,
             _ => self.width(e.ty),
         }
     }
@@ -224,32 +291,13 @@ impl<'a> ProcGen<'a> {
                 }
             }
             Type::Iface(i) => {
-                // Which class it is decides what its fields own. Classes whose
-                // fields own nothing just need the purge at the end.
-                //   load v.class; push k; cmp3; test ==; br3 next, next, this
-                //   this: move v; call $burn.K; pop; jmp end
-                //   next: ...; purge v
-                let deep: Vec<(i64, u32)> = self.ifaces[i].iter().filter_map(|(tag, c)| self.burners.get(c).map(|f| (*tag, *f))).collect();
-                let mut exits = Vec::new();
-                for (tag, f) in deep {
-                    self.emit(Op::Load(slot + 1));
-                    self.push_word(Word::new(tag));
-                    self.emit(Op::Cmp3);
-                    self.emit(Op::Test(0b010));
-                    let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
-                    let this = self.here();
-                    self.call_burner(slot, f);
-                    exits.push(self.emit(Op::Jmp(0)));
-                    let next = self.here();
-                    self.patch(br, 0, next);
-                    self.patch(br, 1, next);
-                    self.patch(br, 2, this);
-                }
-                self.emit(Op::Purge(slot));
-                let end = self.here();
-                for at in exits {
-                    self.patch(at, 0, end);
-                }
+                // Which class it is decides what its fields own: `$burnI.I`
+                // (written by the linker) knows every class.
+                //   move v; load v.class; call $burnI.I; pop
+                self.emit(Op::Move(slot));
+                self.emit(Op::Load(slot + 1));
+                self.emit(Op::Call { f: self.burn_ifaces[i], argc: 2 });
+                self.emit(Op::Pop);
                 return;
             }
             Type::Own(b) if owns(b.ty()) => {
@@ -277,6 +325,59 @@ impl<'a> ProcGen<'a> {
             _ => {}
         }
         self.emit(Op::Purge(slot));
+    }
+
+    /// Returns the value on the stack (one dummy word for a proc without
+    /// `-> T`) and, above it, the final value of each `x: &int` parameter.
+    fn ret(&mut self) {
+        let mut n = match self.p.ret {
+            Type::Void => 1,
+            t => self.width(t),
+        };
+        for (k, by_ref) in self.p.refs.clone().into_iter().enumerate() {
+            if by_ref {
+                let w = self.width(self.p.locals[k].ty);
+                self.load(self.slot(k), w);
+                n += w;
+            }
+        }
+        if n == 1 {
+            self.emit(Op::Ret);
+        } else {
+            self.emit(Op::RetN(n as u16));
+        }
+    }
+
+    /// Stores the value on top of the stack into what `target` reads (a
+    /// local, a struct field, an object field or an array element).
+    fn store_back(&mut self, target: &HExpr) -> R<()> {
+        let w = self.width(target.ty);
+        match &target.kind {
+            HExprKind::Local(id) => self.store(self.slot(*id), w),
+            HExprKind::Field(id, off) => self.store(self.slot(*id) + *off as Slot, w),
+            HExprKind::ElemField(arr, idx, off) => {
+                let tmp = self.scratch("$back", w);
+                self.store(tmp, w);
+                self.expr(arr)?;
+                self.expr(idx)?;
+                self.load(tmp, w);
+                self.emit(Op::StElem { off: *off as u8, n: w as u8 });
+            }
+            HExprKind::Index(arr, idx) => {
+                let tmp = self.scratch("$back", w);
+                self.store(tmp, w);
+                self.expr(arr)?;
+                self.expr(idx)?;
+                self.load(tmp, w);
+                if w == 1 {
+                    self.emit(Op::StIdx);
+                } else {
+                    self.emit(Op::StElem { off: 0, n: w as u8 });
+                }
+            }
+            _ => unreachable!("the checker allows only these with `&`"),
+        }
+        Ok(())
     }
 
     /// `move slot; call f; pop`: the burn function frees the object (and
@@ -341,7 +442,7 @@ impl<'a> ProcGen<'a> {
         }
         self.push_word(Word::ZERO);
         self.emit(Op::Ret);
-        Function { name: self.p.name.clone(), params: 1, locals: self.names.len() as u16, code: self.code, local_names: self.names }
+        Function { name: self.p.name.clone(), params: 1, locals: self.names.len() as u16, code: self.code, local_names: self.names, kind: Kind::Code }
     }
 
 
@@ -364,7 +465,7 @@ impl<'a> ProcGen<'a> {
         if !self.p.body.diverges() {
             // A proc without `-> T` that falls off its end returns nothing.
             self.push_word(Word::ZERO);
-            self.emit(Op::Ret);
+            self.ret();
         }
         Ok(Function {
             name: self.p.name.clone(),
@@ -372,6 +473,7 @@ impl<'a> ProcGen<'a> {
             locals: self.names.len() as u16,
             code: self.code,
             local_names: self.names,
+            kind: Kind::Code,
         })
     }
 
@@ -532,10 +634,7 @@ impl<'a> ProcGen<'a> {
                     Some(e) => self.expr(e)?,
                     None => self.push_word(Word::ZERO),
                 }
-                match self.p.ret {
-                    Type::Struct(_) | Type::Iface(_) | Type::OptIface(_) => self.emit(Op::RetN(self.width(self.p.ret) as u16)),
-                    _ => self.emit(Op::Ret),
-                };
+                self.ret();
             }
             HStmtKind::Break => {
                 let at = self.emit(Op::Jmp(0));
@@ -696,49 +795,6 @@ impl<'a> ProcGen<'a> {
                 self.expr(obj)?;
                 self.push_word(Word::new(*tag));
             }
-            HExprKind::DynCall { impls, args } => {
-                // The receiver (pointer, class) and the arguments go to scratch
-                // slots; for each class: tag == k ? call K.m : next. A class's
-                // own method takes the pointer; a default method takes both.
-                self.expr(&args[0])?;
-                let s = self.scratch("$recv", 2);
-                self.store(s, 2);
-                let mut saved = Vec::new();
-                for a in &args[1..] {
-                    let w = self.width(a.ty);
-                    self.expr(a)?;
-                    let t = self.scratch("$arg", w);
-                    self.store(t, w);
-                    saved.push((t, w));
-                }
-                let argc = args[1..].iter().map(|a| self.width(a.ty)).sum::<usize>();
-                let mut exits = Vec::new();
-                for (tag, pid, whole) in impls {
-                    self.emit(Op::Load(s + 1));
-                    self.push_word(Word::new(*tag));
-                    self.emit(Op::Cmp3);
-                    self.emit(Op::Test(0b010));
-                    let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
-                    let call = self.here();
-                    self.patch(br, 2, call);
-                    self.load(s, if *whole { 2 } else { 1 });
-                    for &(t, w) in &saved {
-                        self.load(t, w);
-                    }
-                    let n = argc + if *whole { 2 } else { 1 };
-                    self.emit(Op::Call { f: *pid as u32, argc: n as u8 });
-                    exits.push(self.emit(Op::Jmp(0)));
-                    let next = self.here();
-                    self.patch(br, 0, next);
-                    self.patch(br, 1, next);
-                }
-                let k = self.pools.string("interface call on an object of an unknown class");
-                self.emit(Op::Trap(k));
-                let end = self.here();
-                for at in exits {
-                    self.patch(at, 0, end);
-                }
-            }
             HExprKind::Field(id, off) => self.load(self.slot(*id) + *off as Slot, self.width(e.ty)),
             HExprKind::StructLit(items) => {
                 for item in items {
@@ -860,6 +916,12 @@ impl<'a> ProcGen<'a> {
                 }
                 let argc: usize = args.iter().map(|a| self.width(a.ty)).sum();
                 self.emit(Op::Call { f: *pid as u32, argc: argc as u8 });
+                // `x: &int` arguments come back above the result, last on top:
+                // each is stored into what was passed (`&n`, `&p.x`, `&v[i]`).
+                let refs = self.refs.get(*pid).cloned().unwrap_or_default();
+                for (a, _) in args.iter().zip(&refs).rev().filter(|(_, r)| **r) {
+                    self.store_back(a)?;
+                }
             }
             HExprKind::Print(pieces) => {
                 for (fmt, p) in pieces {
@@ -956,6 +1018,9 @@ impl<'a> ProcGen<'a> {
                 self.emit(match b {
                     Builtin::Pop => Op::PopEl,
                     Builtin::IsNaT => Op::IsNaT,
+                    Builtin::Hash => Op::Hash,
+                    Builtin::TCmp => Op::TCmp,
+                    Builtin::HashMix => Op::HashMix,
                     Builtin::Remove => Op::Remove,
                     Builtin::Clear => Op::Clear,
                     Builtin::Replace => Op::Replace,

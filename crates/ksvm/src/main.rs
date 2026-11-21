@@ -1,4 +1,5 @@
-//! ksvm: runs a `.ksb` file on the BET virtual machine.
+//! ksvm: runs a `.ksb` file on the BET virtual machine. An executable made
+//! by `ksc` is a copy of ksvm with the program at its end ([`kestrel_core::ksb::bundle`]).
 //!
 //! Exit codes: the value `main` returns (mod 256), 101 on a Trap,
 //! 102 if `main` returns NaT, 2 if the file cannot be loaded.
@@ -11,15 +12,21 @@ use ksvm::{Value, Vm};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let Some(path) = args.get(1) else {
-        eprintln!("usage: ksvm <program.ksb> [arguments for the program...]");
-        return ExitCode::from(2);
+    // An executable made by `ksc` is this program with a `.ksb` at its end:
+    // then it runs that, and every argument is the program's.
+    let me = std::env::current_exe().and_then(std::fs::read).unwrap_or_default();
+    let (path, bytes, program_args) = match kestrel_core::ksb::bundled(&me) {
+        Some(program) => (args[0].clone(), Ok(program.to_vec()), args[1..].to_vec()),
+        None => {
+            let Some(path) = args.get(1) else {
+                eprintln!("usage: ksvm <program.ksb> [arguments for the program...]");
+                return ExitCode::from(2);
+            };
+            (path.clone(), std::fs::read(path).map_err(|e| e.to_string()), args[2..].to_vec())
+        }
     };
-    let program_args = args[2..].to_vec();
 
-    let module = match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| {
-        Module::from_bytes(&b).map_err(|e| e.to_string())
-    }) {
+    let module = match bytes.and_then(|b| Module::from_bytes(&b).map_err(|e| e.to_string())) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("ksvm: {path}: {e}");

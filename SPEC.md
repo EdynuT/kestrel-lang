@@ -226,8 +226,23 @@ Toda variável que guarda um array é dona dele. Não existe aritmética de pont
 ### 6.1 Regras do empréstimo (`&`)
 
 - Existe como parâmetro (`c: &Conta`) e como variável que só empresta (`atual: &No = &lista;`, veja §8.10). É criado com `&x` (ou `&a.campo`, `&v[i]`).
-- Não pode ser retornado (`-> &T` é erro).
 - Não aceita `burn` nem `give`.
+- **Devolver um empréstimo:** `public proc get(&self, i: int) -> &T { return &self.items[i]; }`. Um proc `-> &T` só pode devolver parte do seu primeiro parâmetro `&` (ou do `&self`), e o resultado empresta do que foi passado nele: com `c: &Conta = contas.get(0);`, enquanto `c` é usado, `contas` não pode levar `burn`, `give`, perder elementos nem ser emprestada a outra chamada. O resultado também serve direto: `contas.get(0).depositar(5.0)`, `ver(contas.get(1))`.
+
+**Valores por `&`:** um parâmetro `x: &int` (também `&text`, `&bool`, `&int?`, um enum ou um struct) deixa o proc mudar o valor de quem chamou:
+
+```
+proc dividir(a: int, b: int, resto: &int) -> int {
+    resto = a % b;
+    return a / b;
+}
+r: int = 0;
+q: int = dividir(17, 5, &r);   // q = 3, r = 2
+```
+
+- Quem chama passa `&n`, `&p.x`, `&obj.campo` ou `&v[i]` (com o índice sendo um número ou uma variável), do mesmo tipo do parâmetro. Uma variável `final` ou de `walk` não pode.
+- Por dentro, o valor entra copiado e o valor final é escrito de volta quando o proc termina. Como passar o mesmo valor duas vezes é erro, o efeito é o de um ponteiro.
+- Só em parâmetros (uma variável `x: &int = &n;` não existe) e ainda não em métodos de interface.
 - `f(&b, give b)` na mesma chamada é erro estático.
 - `f(&b, &b)` também: o `proc` veria o mesmo array com dois nomes, e uma escrita por um mudaria o outro.
 
@@ -569,7 +584,7 @@ class Conta {
     hist[]: real;                // um array que pertence ao objeto
 
     // Método sem `self`: "static". É o construtor: só dentro da classe se escreve `Conta { ... }`.
-    public proc nova(nome: text) -> Conta {
+    public proc Conta(nome: text) -> Conta {
         return Conta { nome: nome, saldo: 0.0, hist: {} };
     }
     public proc depositar(&self, v: real) {   // usa o objeto
@@ -583,7 +598,7 @@ class Conta {
     }
 }
 
-c: Conta = Conta.nova("Ana");
+c: Conta = Conta("Ana");
 c.depositar(10.0);
 printl(c);           // Conta { nome: "Ana", saldo: 10.0, hist: [10.0] }
 total: real = c.fechar(); // depois disto, `c` não existe mais
@@ -594,7 +609,8 @@ total: real = c.fechar(); // depois disto, `c` não existe mais
 - O objeto vive no heap e **tem dono**, como um array: não é copiado (`d: Conta = c;` é erro), passa com `give`/`&` (parâmetros `c: Conta` / `c: &Conta`) e precisa de `burn`, `give` ou `return`.
 - `burn c` libera também os arrays e objetos que os campos de `c` possuem.
 - Um método recebe o objeto como primeiro parâmetro: `&self` (empresta: pode ler e mudar os campos) ou `self` (consome: precisa terminar com `burn self`, `give` ou `return`). `c.metodo(...)` passa `c` sozinho. Um método `self` só pode ser chamado numa variável que é dona do objeto.
-- Método sem `self` é da classe ("static"): `Conta.nova(...)`. Não há construtor especial; o objeto é criado preenchendo todos os campos, e só dentro da classe.
+- Método sem `self` é da classe ("static"): `Conta.vazia()`.
+- **Construtor:** o método estático com o nome da classe, como no Java, mas chamado sem `new`: `public proc Conta(dono: text) -> Conta { ... }` e `c: Conta = Conta("Ana");` (genérico: `List<int>()`). Ele não recebe `self` e devolve a própria classe. Há no máximo um (o Kestrel não tem sobrecarga); outras formas de criar são métodos estáticos com nome. Por dentro, o objeto é criado preenchendo todos os campos (`Conta { dono: dono, saldo: 0.0 }`), o que só a própria classe pode fazer. Interfaces não têm construtor.
 - Campos podem ser de qualquer tipo, inclusive arrays e outros objetos. Um campo que possui algo (array ou objeto) não pode ser trocado, só alterado por dentro (`append(self.hist, x)`, `self.hist[i] = ...`). Lido de fora, ele vem emprestado.
 - Uma classe não pode ter um campo **obrigatório** dela mesma (nem por outra classe), porque o primeiro objeto nunca poderia ser criado. Para árvores e listas ligadas, use um array (`filhos[]: No`, que pode começar vazio) ou um campo opcional (`proximo: No?`, veja abaixo). Um struct não pode conter objetos.
 - Emprestar o mesmo objeto (ou um campo dele) duas vezes na mesma chamada é erro: `c.f(&c.hist)`.
@@ -603,8 +619,8 @@ total: real = c.fechar(); // depois disto, `c` não existe mais
 #### Arrays de objetos
 
 ```
-contas[]: Conta = {give a, Conta.nova("Bia")};
-append(contas, Conta.nova("Caio"));
+contas[]: Conta = {give a, Conta("Bia")};
+append(contas, Conta("Caio"));
 contas[0].depositar(2.5);      // o elemento é emprestado para o método
 ver(&contas[1]);           // empresta um elemento
 x: Conta = remove(contas, 1);  // tira o objeto do array: agora `x` é o dono
@@ -612,7 +628,7 @@ burn x;
 burn contas;                   // libera o array e todos os objetos dentro dele
 ```
 
-- O array **é dono** dos seus objetos. Eles entram com `give`, ou já novos (`Conta.nova(...)`): `{a}` e `append(v, a)` sem `give` são erro, porque copiariam o objeto.
+- O array **é dono** dos seus objetos. Eles entram com `give`, ou já novos (`Conta(...)`): `{a}` e `append(v, a)` sem `give` são erro, porque copiariam o objeto.
 - `contas[i]` **fica no array**: chama métodos `&self`, lê campos públicos e passa com `&contas[i]`. Para ser dono dele, tire-o com `pop(v)` ou `remove(v, i)`. `x: Conta = contas[0];` é erro.
 - Todo elemento é um objeto de verdade, nunca vazio. Por isso não existem para arrays de objetos: `claim n` (criaria elementos vazios), `resize` (crescer cria vazios, diminuir perderia objetos) e `clear` (perderia objetos). Trocar um elemento (`contas[0] = ...`) também é erro: tire o antigo com `remove`, dê `burn` nele, e ponha o novo com `insert`.
 - `pop`/`remove` devolvem o objeto, que precisa ser guardado: `pop(contas);` sozinho é erro.
@@ -625,7 +641,7 @@ burn contas;                   // libera o array e todos os objetos dentro dele
 class No {
     public valor: int;
     public proximo: No?;          // pode ser null
-    public proc novo(v: int) -> No { return No { valor: v, proximo: null }; }
+    public proc No(v: int) -> No { return No { valor: v, proximo: null }; }
 }
 
 proc soma(n: &No?) -> int {
@@ -693,7 +709,7 @@ proc mostrar(f: &Forma) {          // aceita qualquer classe que implemente Form
     printf("{f.nome()}: {f.area()}\n");
 }
 
-c: Circulo = Circulo.novo(1.0);
+c: Circulo = Circulo(1.0);
 mostrar(&c);
 ```
 
@@ -723,9 +739,9 @@ interface Forma {
 #### Interfaces com dono
 
 ```
-f: Forma = Circulo.novo(1.0);              // o objeto passa a ser visto como Forma
-formas[]: Forma = {give f, Poligono.novo(3.0, 4.0)};
-append(formas, Circulo.novo(2.0));
+f: Forma = Circulo(1.0);              // o objeto passa a ser visto como Forma
+formas[]: Forma = {give f, Poligono(3.0, 4.0)};
+append(formas, Circulo(2.0));
 for i: int = 0; i < len(formas); i++ {
     mostrar(&formas[i]);               // cada uma chama o seu `area`
 }
@@ -771,7 +787,7 @@ if f is Circulo {
 ```
 class List<T> {
     items[]: T;
-    public proc new() -> List<T> {
+    public proc List() -> List<T> {
         xs[]: T = {};
         return List<T> { items: give xs };
     }
@@ -784,22 +800,60 @@ proc maior<T extends Forma>(a: &T, b: &T) -> real {
     return b.area();
 }
 
-ns: List<int> = List<int>.new();      // o tipo sempre escrito
+ns: List<int> = List<int>();      // o tipo sempre escrito
 ns.add(3);
-qs: List<Quadrado> = List<Quadrado>.new();
+qs: List<Quadrado> = List<Quadrado>();
 m: real = maior<Quadrado>(&q, &p);
 ```
 
 - Classes e procs podem ter **parâmetros de tipo**: `class Box<T>`, `class Map<K, V>`, `proc maior<T extends Forma>`. Structs, enums e métodos não (um método usa os parâmetros da classe).
-- **O tipo é sempre escrito**, nunca deduzido: `List<int>.new()`, `maior<Quadrado>(...)`, `x: Box<text>`, `Box<T> { ... }` dentro da classe.
+- **O tipo é sempre escrito**, nunca deduzido: `List<int>()`, `maior<Quadrado>(...)`, `x: Box<text>`, `Box<T> { ... }` dentro da classe.
 - `T` pode ser **qualquer tipo**: números (`List<int>`, sem as caixas `Integer` do Java), `text`, enums, structs, classes, interfaces, `T?` e outros genéricos (`List<List<int>>`). Arrays não (`List<int[]>`): use uma classe que guarde o array.
 - **O código genérico é conferido uma vez para todo `T` possível.** Um `T` pode ser um objeto, então ele é tratado como um: move-se com `give`, empresta-se com `&`, precisa de `burn`, e não pode ser copiado (`return self.v` de um campo `T` é erro). Sem `extends`, um `T` não tem métodos nem campos.
 - `T extends Forma`: o `T` precisa implementar a interface `Forma`, e o código pode chamar os métodos dela. Usar com um tipo que não a implementa é erro (`int` não implementa `Forma`).
 - Quando `T` vira um valor (`List<int>`), `give`, `&` e `burn` dele apenas copiam (e o `burn` não faz nada).
 - **Por dentro, há uma cópia do código por tipo usado** (como C++ e Rust), não *type erasure* como no Java: os valores têm tamanhos diferentes, e assim cada cópia é tão rápida quanto código escrito à mão.
-- Ainda não: `Object` (`==`, `hashCode` e impressão em qualquer `T`), `Comparable` (`<` num `T`), coringas (`? extends T`, `? super T`), métodos devolvendo `&T`.
+- Coringas (`? extends T`, `? super T`) não existem: com uma cópia por tipo, `proc f<T extends Forma>(fs: &List<T>)` chamado como `f<Circulo>(&lista)` faz o mesmo.
+- Um proc `-> &T` devolve parte só do seu **primeiro** parâmetro `&`: `proc maior(a: &T, b: &T) -> &T` que devolve `a` ou `b` não é aceito (devolva um `bool`, ou receba os dois com dono).
 
-### 8.13 `assert`, `@test` e `@deprecated`
+### 8.13 `Object` e `Comparable`
+
+```
+c: Conta = Conta("Ana");
+printl(c);                      // Conta { dono: "Ana", saldo: 0.0 }  (toString)
+printl(c == outra);             // equals: campo a campo
+h: int = c.hashCode();
+printl(42.toString(), "abc".hashCode(), Cor.Azul.equals(Cor.Verde));
+
+@impl(Comparable)
+class Conta {
+    ...
+    @override public proc compareTo(&self, other: &Conta) -> int { ... }   // negativo, 0, positivo
+}
+printl(a < b, a <=> b);          // usam compareTo
+proc maior<T extends Comparable>(a: T, b: T) -> T { ... }
+```
+
+- **Todo tipo tem `toString()`, `hashCode()` e `equals(&outro)`**, como se cumprisse uma interface `Object` (não há herança: é automático). Números, `text`, `bool`, enums e structs já vêm com eles (um `T?` null mostra `null`, tem hash 0, e dois null são iguais).
+- **Uma classe ganha as três versões padrão, campo a campo**: `toString` mostra todos os campos (inclusive arrays e objetos dentro), `equals` é verdadeiro se todos os campos forem iguais, e `hashCode` mistura os hashes dos campos. Para trocar, escreva o método com `@override` e a assinatura certa: `proc toString(&self) -> text`, `proc hashCode(&self) -> int`, `proc equals(&self, other: &Conta) -> bool`.
+- **`a == b` entre objetos, valores de interface e structs chama `equals`** (como o `==` do Kotlin, não o do Java). `print(c)`, `{c}` e `%s` usam `toString`, também para um valor de interface.
+- Por uma interface, `f.equals(&g)` só é verdadeiro para objetos da mesma classe com campos iguais.
+- `hashMix(h, x)` combina hashes (`h * 31 + x`, sem estourar o `int`), para escrever um `hashCode` próprio.
+- **`Comparable`** é a interface das coisas que têm ordem: `compareTo(&self, other: &T) -> int` devolve negativo, 0 ou positivo. Números, `text` (ordem alfabética, caractere por caractere) e enums (pela ordem em que foram escritos) já a cumprem; uma classe cumpre com `@impl(Comparable)` e seu próprio `compareTo`, que compara com a mesma classe (como o `Comparable` do Swift e o `Ord` do Rust, em vez do `Comparable<T>` do Java).
+- Com `Comparable`, `<`, `>`, `<=`, `>=` e `<=>` funcionam em objetos e textos, e `<T extends Comparable>` aceita números, textos, enums e essas classes. Por uma interface, comparar objetos de classes diferentes dispara Trap.
+
+### 8.13.1 Valor padrão: `?:`
+
+```
+n: int = toInt(texto) ?: 0;          // 0 se não for um número
+nome: text = apelido ?: "anônimo";
+d: int = a ?: b ?: 0;                 // o primeiro que não é null
+```
+
+- `a ?: b` é `a` se não for null, senão `b` (o "Elvis" do Kotlin). Vale para números, `bool`, `text` e enums; para um objeto, confira com `if`.
+- Fica entre as comparações e o `+`: `1 + x ?: 0` é `(1 + x) ?: 0`; escreva `1 + (x ?: 0)`.
+
+### 8.14 `assert`, `@test` e `@deprecated`
 
 ```
 @test
@@ -819,7 +873,7 @@ proc soma(a: int, b: int) -> int { return a + b; }
 - `@deprecated` (ou `@deprecated("use outra")`) marca um proc, um método ou uma classe como **obsoleto**. Continua funcionando, mas cada uso fora dele mostra um aviso (`warning:`) com a mensagem, e a compilação segue. Dentro da própria classe (ou do próprio proc) não há aviso.
 - Onde cada anotação vale: proc (`@test`, `@deprecated`), método (`@override`, `@deprecated`), classe (`@impl(...)`, `@deprecated`). Uma anotação desconhecida, ou no lugar errado, é erro.
 
-### 8.14 Limites do compilador
+### 8.15 Limites do compilador
 
 | Limite | Valor | Ao passar |
 |---|---|---|
@@ -831,6 +885,85 @@ proc soma(a: int, b: int) -> int { return a + b; }
 | Chamadas aninhadas na execução | 6.561 = 3⁸ | Trap: "call stack overflow" |
 
 Todos os limites são potências de 3. Os de parâmetros e variáveis também cabem nos campos de 8 e 16 bits do `.ksb`.
+
+### 8.16 Arquivos: `use` e `public`
+
+Um programa pode ter vários arquivos. O arquivo principal tem o `main`; os outros entram com `use`, no topo do arquivo:
+
+```
+// src/Geometry.ks
+public const PI: real = 3.14;
+public struct Point { x: int; y: int; }
+public proc area(r: real) -> real { return PI * square(r); }
+proc square(x: real) -> real { return x * x; }   // só deste arquivo
+
+// src/shapes/Circle.ks
+use Geometry;
+@impl(Geometry.Shape) public class Circle { ... }
+
+// src/Main.ks
+use Geometry;
+use shapes.Circle;
+use std.collections.HashMap;
+
+proc main() {
+    printl(Geometry.area(2.0));
+    p: Geometry.Point = Geometry.Point { x: 1, y: 2 };
+    c: Circle = Circle(1.5);
+    burn c;
+}
+```
+
+- **Caminho:** como pacote e classe no Java, as pastas são minúsculas e o arquivo é PascalCase: `use shapes.Circle;` é o arquivo `shapes/Circle.ks`. Uma pasta pode ter o nome de uma palavra da linguagem (`std.text`).
+- **Onde se procura:**
+  1. `std.…`: a biblioteca padrão, embutida no `ksc` e organizada por assunto (`std.text`, `std.collections`). Nada dela entra sem `use`.
+  2. A pasta do código (`src/` num projeto): `shapes/Circle.ks`.
+  3. A pasta de bibliotecas (`lib/`): `shapes/Circle.ksb`, um arquivo já compilado (veja abaixo). Ter o mesmo arquivo em `src/` e em `lib/` é erro.
+- **Sempre com prefixo:** um item de outro arquivo é escrito com o nome do arquivo na frente: `Geometry.area(...)`, `Geometry.Point`, `Geometry.Color.Red`, `Geometry.PI`. Quem lê sabe sempre de onde cada nome vem. O prefixo é a última parte do caminho (`Circle` para `shapes.Circle`); dois `use` com a mesma última parte são erro.
+- **Item principal:** o item com o nome do arquivo (`class Circle` em `Circle.ks`, `class List<T>` em `List.ks`) é escrito só com o nome do arquivo: `Circle(1.5)`, `x: List<int>`, `List<int>()`. Os outros itens desse arquivo não podem ter o nome de um membro dele (`Circle.area` seria ambíguo).
+- **Visibilidade:** os itens do topo (`proc`, `const`, `struct`, `enum`, `class`, `interface`) são privados do arquivo, a menos que tenham `public`. As anotações vêm antes: `@impl(Forma) public class Circulo`. Usar um item privado de outro arquivo é erro ("`square` is private to `Geometry`"). Os membros de uma classe continuam com as regras de §8.10.
+- **Ciclos são permitidos:** `A` pode usar `B` e `B` usar `A`. Para compilar um arquivo, o compilador só precisa das *declarações* dos outros (veja abaixo).
+- **O arquivo principal não pode ser usado** por outro (como o `package main` do Go). O que dois arquivos precisam fica num terceiro.
+
+#### Projeto
+
+Não há arquivo de projeto: a estrutura das pastas diz tudo, como no Java e no C sem Gradle ou CMake.
+
+```
+Jogo/
+├── src/Main.ks          o principal; os `use` partem de src/
+├── src/mundo/Mapa.ks    use mundo.Mapa;
+├── lib/fisica/Corpo.ksb bibliotecas de terceiros (use fisica.Corpo;)
+└── build/               feito pelo ksc (vai no .gitignore)
+    ├── obj/             um .ksb por arquivo (cache)
+    └── Jogo             o executável
+```
+
+```
+ksc new Jogo        cria Jogo/ (src/Main.ks e .gitignore)
+ksc build           compila: build/obj/ e o executável build/Jogo (--ksb: build/Jogo.ksb)
+ksc run [args...]   compila e roda
+ksc test            roda os @test de todos os arquivos de src/
+```
+
+- **Biblioteca:** um projeto sem `src/Main.ks` é uma biblioteca. `ksc build` compila todos os arquivos de `src/`, e os `.ksb` de `build/obj/` são o que se entrega: copiados para o `lib/` de outro projeto (mantendo as pastas), funcionam sem o `.ks`, porque cada `.ksb` guarda as declarações do seu arquivo (§10).
+- **Um arquivo avulso**, como no `gcc`: `ksc Prog.ks` lê os `use` a partir da pasta do arquivo (e `lib/` ali), guarda os objetos em `build/obj/` e escreve o executável `Prog` ao lado. Opções: `-o saida`, `--ksb` (um `.ksb` para `ksvm`), `--test`, `--disasm`, `--tokens`, `--ast`.
+
+#### Compilação, como no `gcc`
+
+```
+src/Main.ks ─────┐                        ┌─ build/obj/Main.ksb ──────┐
+src/Geometry.ks ─┼─ ksc (um por arquivo) ─┼─ build/obj/Geometry.ksb ──┼─ ligador ─ build/Jogo
+lib/fisica/Corpo.ksb ─────────────────────┴─ (já compilado) ──────────┘
+```
+
+1. **Declarações (o `.h` gerado sozinho):** de cada arquivo o compilador tira o que os outros precisam: assinaturas, campos, constantes, enums e o código dos genéricos (cada arquivo que usa `List<int>` compila a sua cópia). Os corpos dos procs comuns ficam de fora.
+2. **Um objeto por arquivo:** cada `.ks` é checado e compilado sozinho, lendo só as declarações dos arquivos que alcança, e vira um `.ksb` em `build/obj/`.
+3. **Recompilação, como no `make`:** um objeto é refeito só se o seu `.ks` mudou, ou a parte pública de um arquivo que ele alcança, ou o `ksc`. Mudar só o corpo de um proc (ou um comentário) recompila só aquele arquivo. Apagar `build/` recompila tudo.
+4. **Ligação:** o ligador junta os objetos pelo nome das funções, mantém uma cópia de cada genérico e escreve as funções que dependem do programa inteiro: cada chamada por interface (`$dispatch.Forma.area`) e cada `burn` de um valor de interface (`$burnI.Forma`) testam as classes de todos os arquivos. Por isso um arquivo pode receber, por uma interface, um objeto de uma classe que ele não conhece. Um `match` por classe sem `else` dispara Trap para uma classe que não lista.
+5. **Executável:** uma cópia do `ksvm` com o programa no fim. Roda sem instalar nada (vai junto a VM, não o compilador, como no Go).
+
+Por dentro, cada item de outro arquivo ganha o nome completo (`Geometry.area`, `shapes.Circle`), que é o que aparece nas mensagens, nos testes e no `--disasm`. Cada classe recebe um número calculado do nome, igual em todos os arquivos; o ligador confere que duas classes nunca têm o mesmo.
 
 ## 9. BET-VM
 
@@ -874,12 +1007,25 @@ String pool    str_count × (u32 len + bytes UTF-8)
 Functions      fn_count ×
   name_len u16, name UTF-8
   param_count u8, local_count u16
+  kind u8                   0 código, 1 cópia de genérico, 2 importada,
+                            3 despacho de interface (+ u16 valores devolvidos),
+                            4 burn por interface
   code_len u32 (em bytes)
   code: opcode u8 + operandos fixos
   [se flags & 1] local_count × (u16 len + nome UTF-8)
+[se flags & 2] Ligação (objeto)
+  classes  u32 × (nome, número i64)
+  impls    u32 × (despacho, número da classe, função, u8 recebe a interface inteira)
+  burns    u32 × (burn por interface, número da classe, função $burn.C)
+  stamp    u32 × (nome, u64)     de que o objeto foi feito (cache do ksc)
+  decls    u32 len + UTF-8       as declarações do arquivo, em Kestrel (o "`.h`")
 ```
 
+(cada nome: `u16 len` + UTF-8)
+
 - **Bit 0 de `flags`** indica que o arquivo traz os nomes das variáveis, para o `dump` mostrar `R0 (acc)`.
+- **Bit 1 de `flags`** marca um **objeto**: um arquivo `.ks` compilado sozinho, ainda não ligado. Funções de outros arquivos aparecem como importadas (sem código), e as de despacho são escritas pelo ligador. O `ksvm` só roda programas ligados.
+- **Executável:** uma cópia do `ksvm` seguida do `.ksb` do programa, do tamanho dele (`u64`) e da marca `K3B-EXE1`. Ao iniciar, o `ksvm` procura a marca no fim de si mesmo.
 - **Verificação na leitura:** o arquivo é rejeitado se algum salto cair fora do início de uma instrução, se um índice de constante, string, função ou slot não existir, ou se o número de argumentos de uma chamada não bater com os parâmetros da função chamada.
 
 Os saltos usam um **offset absoluto em bytes** (`u32`) dentro do código da própria função.
@@ -889,7 +1035,8 @@ Os saltos usam um **offset absoluto em bytes** (`u32`) dentro do código da pró
 ## 11. Gramática (EBNF)
 
 ```ebnf
-program    = { const_decl | proc_decl | enum_decl | struct_decl | class_decl | iface_decl } ;
+program    = { use_decl } { { annotation } [ "public" ] ( const_decl | proc_decl | enum_decl | struct_decl | class_decl | iface_decl ) } ;
+use_decl   = "use" IDENT { "." IDENT } ";" ;
 iface_decl = "interface" IDENT "{" { "proc" IDENT "(" [ "&" ] "self" { "," param } ")" [ "->" ret_type ] ";" } "}" ;
 class_decl = { annotation } "class" IDENT "{" { member } "}" ;
 member     = [ "public" | "private" ] ( field | proc_decl ) ;

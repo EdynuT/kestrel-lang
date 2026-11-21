@@ -240,6 +240,20 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             Op::Pop => {
                 self.pop()?;
             }
+            Op::Hash => {
+                let h = match self.pop()? {
+                    Value::Word(w) => w.get().unwrap_or(0),
+                    Value::Real(r) => r.to_string().chars().fold(0, |h, c| hash_mix(h, c as i64)),
+                    Value::Text(t) => self.texts[t as usize].iter().fold(0, |h, c| hash_mix(h, *c as i64)),
+                    Value::Ptr(_) => return Err("hash of an array or object: use its hashCode()".into()),
+                };
+                self.push(Value::Word(Word::new(h)));
+            }
+            Op::HashMix => {
+                let x = self.pop_word()?.get().unwrap_or(0);
+                let h = self.pop_word()?.get().unwrap_or(0);
+                self.push(Value::Word(Word::new(hash_mix(h, x))));
+            }
             Op::IsNaT => {
                 let v = self.pop()?;
                 self.push(Value::Word(if v.is_nat() { Word::ONE } else { Word::NEG_ONE }));
@@ -622,6 +636,16 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 let s: Vec<char> = self.texts[a].iter().chain(&self.texts[b]).copied().collect();
                 self.make_text(s)?;
             }
+            Op::TCmp => {
+                let b = self.pop_text()?;
+                let a = self.pop_text()?;
+                let order = match self.texts[a].cmp(&self.texts[b]) {
+                    std::cmp::Ordering::Less => Word::NEG_ONE,
+                    std::cmp::Ordering::Equal => Word::ZERO,
+                    std::cmp::Ordering::Greater => Word::ONE,
+                };
+                self.push(Value::Word(order));
+            }
             Op::TEq => {
                 let b = self.pop_text()?;
                 let a = self.pop_text()?;
@@ -977,6 +1001,13 @@ fn word_text(w: Word, base: Option<bool>) -> String {
     }
 }
 
+/// `h * 31 + x`, wrapped into the balanced range of an `int` (27 trits).
+fn hash_mix(h: i64, x: i64) -> i64 {
+    const M: i128 = 7_625_597_484_987; // 3^27
+    let v = (i128::from(h) * 31 + i128::from(x)).rem_euclid(M);
+    (if v > M / 2 { v - M } else { v }) as i64
+}
+
 fn tryte_char(w: Word) -> char {
     w.get().and_then(tryte_to_char).unwrap_or('\u{FFFD}')
 }
@@ -1068,7 +1099,7 @@ mod tests {
     }
 
     fn func(name: &str, params: u8, locals: u16, ops: &[Op]) -> Function {
-        Function { name: name.into(), params, locals, code: code(ops), local_names: vec![] }
+        Function { name: name.into(), params, locals, code: code(ops), ..Default::default() }
     }
 
     /// Words used as constants: index i holds CONSTS[i].
@@ -1081,7 +1112,7 @@ mod tests {
         let mut consts: Vec<Word27> = CONSTS.iter().map(|&v| Word27::from(Word::new(v))).collect();
         consts.push(Word27::from(Real::from_decimal("0", "1").unwrap())); // #8 = 0.1
         consts.push(Word27::from(Real::from_decimal("0", "2").unwrap())); // #9 = 0.2
-        let m = Module { entry: 0, consts, strings: strings.iter().map(|s| s.to_string()).collect(), functions };
+        let m = Module { entry: 0, consts, strings: strings.iter().map(|s| s.to_string()).collect(), functions, link: None };
         m.verify().expect("test module is valid");
         m
     }

@@ -118,6 +118,13 @@ pub enum Op {
     Clear,
     /// `ptr a b c d` -> swap the ranges `a..b` and `c..d` (inclusive, not overlapping).
     Replace,
+    /// `v` -> an `int` hash of a number, bool, enum or text (`x.hashCode()`).
+    Hash,
+    /// `h x` -> `h * 31 + x`, wrapped into the `int` range (combines hashes).
+    HashMix,
+    /// `a b` (texts) -> `-1`, `0` or `1`: `a` comes before, is equal to, or
+    /// comes after `b` (character by character).
+    TCmp,
     /// Pop index and pointer, push the cell.
     LdIdx,
     /// Pop value, index and pointer, store the cell.
@@ -257,6 +264,9 @@ impl Op {
             Resize => 0x74,
             Clear => 0x75,
             Replace => 0x76,
+            Hash => 0x77,
+            HashMix => 0x78,
+            TCmp => 0x79,
             AllocT { .. } => 0x46,
             PackT { .. } => 0x47,
             LdElem { .. } => 0x48,
@@ -349,6 +359,9 @@ impl Op {
             Resize => "resize",
             Clear => "clear",
             Replace => "replace",
+            Hash => "hash",
+            HashMix => "hashmix",
+            TCmp => "tcmp",
             AllocT { .. } => "alloct",
             PackT { .. } => "packt",
             LdElem { .. } => "ldelem",
@@ -520,6 +533,9 @@ impl Op {
             0x74 => Resize,
             0x75 => Clear,
             0x76 => Replace,
+            0x77 => Hash,
+            0x78 => HashMix,
+            0x79 => TCmp,
             0x49 => StElem { off: r.u8()?, n: r.u8()? },
             0x41 => LdIdx,
             0x42 => StIdx,
@@ -636,7 +652,7 @@ mod tests {
             Add, Sub, Mul, Div, Mod, Pow, Neg, Shl3, Shr3, Cmp3, KAnd, KOr, Test(0b101), Soft, Hard, ToBool, Trap(4),
             FAdd, FSub, FMul, FDiv, FPow, FNeg, FCmp3,
             TLen, TIdx, Narrow6, Narrow1, IToF, FToI, TStr, TStrT, TStrV, TCat, TEq, TSub, TToI, TToF, CharIs(2),
-            Alloc, LdIdx, StIdx, Purge(8), AllocZ, Pack { n: 3, sym: true }, AllocT { w: 2, sym: false }, PackT { n: 3, w: 2, sym: true }, LdElem { off: 1, n: 2 }, StElem { off: 0, n: 1 }, Append, PopEl, Insert, Remove, Resize, Clear, Replace,
+            Alloc, LdIdx, StIdx, Purge(8), AllocZ, Pack { n: 3, sym: true }, AllocT { w: 2, sym: false }, PackT { n: 3, w: 2, sym: true }, LdElem { off: 1, n: 2 }, StElem { off: 0, n: 1 }, Append, PopEl, Insert, Remove, Resize, Clear, Replace, Hash, HashMix, TCmp,
             Jmp(12), JNat(u32::MAX), Br3 { neg: 1, zero: 2, pos: 3 }, Call { f: 2, argc: 3 }, Ret, RetN(3),
             Input, Emit, Print, Show, Dump(5), ShowT, ShowV,
             ReadFile, FileExists, WriteFile, WriteBytes, ReadLine, Eof, ArgCount, Arg, Exit,

@@ -85,6 +85,8 @@ pub enum Tok {
     Question,
     Sym,
     Match,
+    /// `f is Circulo`: tests the class of an interface value.
+    Is,
     Dot,
     Pipe,
     PlusEq,
@@ -140,6 +142,7 @@ const KEYWORDS: &[(&str, Tok)] = &[
     ("private", Tok::Private),
     ("sym", Tok::Sym),
     ("match", Tok::Match),
+    ("is", Tok::Is),
     ("walk", Tok::Walk),
     ("in", Tok::In),
     ("span", Tok::Span),

@@ -669,7 +669,32 @@ proc criar(quadrado: bool) -> Forma { ... } // pode devolver classes diferentes
 - Pela interface só aparecem os métodos dela: `f.raio` é erro, e o valor não pode ser impresso inteiro (imprima o que os métodos devolvem).
 - `burn f` olha a classe do objeto para liberar também o que os campos dele possuem.
 - Arrays de interfaces seguem as regras dos arrays de objetos: `formas[i]` fica no array (emprestado), sai com `pop`/`remove`, e não valem `claim`, `resize`, `clear` nem `formas[i] = ...`.
-- Ainda não dá para voltar de `Forma` para `Circulo` (descobrir a classe e usá-la como tal).
+
+#### Descobrir a classe: `is` e `match`
+
+```
+proc descrever(lent f: Forma) {
+    if f is Circulo {
+        printl("raio", f.raio);       // aqui `f` é um Circulo
+    } else {
+        printl(f.nome());             // aqui continua sendo Forma
+    }
+}
+
+match f {
+    Circulo => printl(f.raio);
+    Quadrado | Triangulo => printl(f.nome());
+}
+
+if f is Circulo {
+    c: Circulo = give f;              // volta a ser um Circulo com dono
+}
+```
+
+- `f is Circulo` devolve um `bool`: se o valor de interface guarda um objeto daquela classe (`false` se for um `T?` vazio). A classe precisa implementar a interface, senão é erro (nunca seria verdade). Como em Kotlin, usa-se `is` e não `==`: `==` compara valores, `is` pergunta o tipo.
+- Onde o `is` provou a classe, **o próprio `f` passa a ser daquela classe**: campos públicos, todos os métodos, `lend f` para um `lent c: Circulo` e, se `f` tem dono, `give f` para um `Circulo`. Vale nos mesmos lugares da conferência do `isNaT`: dentro do `if`, depois de `if !(f is C) { return; }`, depois de `&&`, e para variáveis e caminhos de campos (`d.principal`), não para elementos de arrays (`fs[i] is Circulo` funciona como teste, sem mudar o tipo).
+- `match f { Classe => ...; }` escolhe pela classe. Num ramo com uma só classe, `f` é daquela classe; num ramo com várias (`A | B`), continua sendo a interface. Sem `else`, o `match` precisa cobrir todas as classes que implementam a interface. Funciona em variáveis e campos (para um elemento, passe-o a um proc).
+- Não há um nome novo por ramo (`Circulo c =>`): seria um segundo nome para o mesmo objeto, e a posse evita isso. É como o `when` do Kotlin.
 
 ### 8.12 `assert`, `@test` e `@deprecated`
 

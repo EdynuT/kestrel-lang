@@ -212,13 +212,33 @@ impl FnCx {
 /// offsets of the two fields.
 type Path = (LocalId, Vec<usize>);
 
-/// A `T?` proved non-empty by `if !isNaT(x)`, `if isNaT(x) { return; }` & co.
+/// What a check proved: a `T?` is not empty (`if !isNaT(x)`, `if isNaT(x)
+/// { return; }` & co.), or an interface value holds a given class (`if f is C`).
 #[derive(Clone)]
 enum Narrow {
-    /// A `T?` local, retyped to `T` meanwhile; its declared type is kept here.
+    /// A local, retyped meanwhile (`No?` -> `No`, `Forma` -> `Circulo`); the
+    /// type it had before is kept here.
     Local(LocalId, Type),
-    /// A `T?` field of an object.
-    Field(Path),
+    /// A field of an object: not empty (`None`), or of that class.
+    Field(Path, Option<&'static str>),
+}
+
+/// `ty` once a check proved it: not empty (`class: None`), or of `class`.
+fn proved(ty: Type, class: Option<&'static str>) -> Type {
+    let lent = matches!(ty, Type::LentClass(_) | Type::LentIface(_) | Type::LentOptClass(_) | Type::LentOptIface(_));
+    match class {
+        None => ty.unopt(),
+        Some(c) if lent => Type::LentClass(c),
+        Some(c) => Type::Class(c),
+    }
+}
+
+/// The interface of an interface value (owned, lent, maybe empty).
+fn iface_of(ty: Type) -> Option<&'static str> {
+    match ty {
+        Type::Iface(i) | Type::LentIface(i) | Type::OptIface(i) | Type::LentOptIface(i) => Some(i),
+        _ => None,
+    }
 }
 
 /// The path `h` reads, if it is a local or fields of objects.
@@ -236,11 +256,13 @@ fn path_of(h: &HExpr) -> Option<Path> {
     }
 }
 
-/// The `T?` paths that are not empty when `h` is `when`:
-/// `!isNaT(x)` when true, `isNaT(x)` when false, joined by `&&` (true) or `||` (false).
-fn facts(h: &HExpr, when: bool, out: &mut Vec<Path>) {
+/// What `h` being `when` proves: `!isNaT(x)` (true) and `isNaT(x)` (false)
+/// that `x` is not empty, `f is C` (true) that `f` is a `C`; joined by `&&`
+/// (true) or `||` (false).
+fn facts(h: &HExpr, when: bool, out: &mut Vec<(Path, Option<&'static str>)>) {
     match &h.kind {
-        HExprKind::Builtin(Builtin::IsNaT, a) if !when && a[0].ty.is_opt() => out.extend(path_of(&a[0])),
+        HExprKind::Builtin(Builtin::IsNaT, a) if !when && a[0].ty.is_opt() => out.extend(path_of(&a[0]).map(|p| (p, None))),
+        HExprKind::IsClass(x, _, c) if when => out.extend(path_of(x).map(|p| (p, Some(*c)))),
         HExprKind::Neg(x) if h.ty == Type::Bool => facts(x, !when, out),
         HExprKind::Binary(BinOp::And, a, b) if when => {
             facts(a, true, out);
@@ -1069,15 +1091,16 @@ impl Checker {
 
     /// Marks `p` as not empty: a local is retyped (`No?` -> `No`) until
     /// [`Self::unnarrow_to`]; a field is looked up by [`Self::narrowed_ty`].
-    fn narrow(&mut self, p: &Path) {
+    fn narrow(&mut self, (p, class): &(Path, Option<&'static str>)) {
         if p.1.is_empty() {
-            let declared = self.f.locals[p.0].ty;
-            if declared.is_opt() {
-                self.f.locals[p.0].ty = declared.unopt();
-                self.f.narrowed.push(Some(Narrow::Local(p.0, declared)));
+            let now = self.f.locals[p.0].ty;
+            let then = proved(now, *class);
+            if then != now {
+                self.f.locals[p.0].ty = then;
+                self.f.narrowed.push(Some(Narrow::Local(p.0, now)));
             }
         } else {
-            self.f.narrowed.push(Some(Narrow::Field(p.clone())));
+            self.f.narrowed.push(Some(Narrow::Field(p.clone(), *class)));
         }
     }
 
@@ -1095,7 +1118,7 @@ impl Checker {
     /// forgets `p` itself (`give p`).
     fn invalidate(&mut self, p: &Path, inclusive: bool) {
         for n in self.f.narrowed.iter_mut() {
-            if let Some(Narrow::Field((id, fields))) = n
+            if let Some(Narrow::Field((id, fields), _)) = n
                 && *id == p.0
                 && fields.starts_with(&p.1)
                 && (inclusive || fields.len() > p.1.len())
@@ -1105,18 +1128,27 @@ impl Checker {
         }
     }
 
-    /// `ty` for the field read by `h`: `T` if a check proved it is not empty.
+    /// `ty` for the field read by `h`, after what checks proved about it.
     fn narrowed_ty(&self, h: &HExpr, ty: Type) -> Type {
-        if !ty.is_opt() {
+        if !ty.is_opt() && iface_of(ty).is_none() {
             return ty;
         }
-        let proved = path_of(h).is_some_and(|p| self.f.narrowed.iter().any(|n| matches!(n, Some(Narrow::Field(q)) if *q == p)));
-        if proved { ty.unopt() } else { ty }
+        let Some(p) = path_of(h) else { return ty };
+        let mut ty = ty;
+        for n in &self.f.narrowed {
+            if let Some(Narrow::Field(q, class)) = n
+                && *q == p
+            {
+                ty = proved(ty, *class);
+            }
+        }
+        ty
     }
 
     /// The type a local was declared with (a checked `No?` is `No` meanwhile).
     fn declared_ty(&self, id: LocalId) -> Type {
-        self.f.narrowed.iter().rev().find_map(|n| match n {
+        // The first retype of `id` kept the type it was declared with.
+        self.f.narrowed.iter().find_map(|n| match n {
             Some(Narrow::Local(l, t)) if *l == id => Some(*t),
             _ => None,
         }).unwrap_or(self.f.locals[id].ty)
@@ -1125,7 +1157,7 @@ impl Checker {
     /// Before a loop: whatever its body may empty is not proved inside it,
     /// not even before that point (the body runs again).
     fn invalidate_loop(&mut self, s: &ast::Stmt) {
-        if self.f.narrowed.iter().all(|n| !matches!(n, Some(Narrow::Field(_)))) {
+        if self.f.narrowed.iter().all(|n| !matches!(n, Some(Narrow::Field(..)))) {
             return;
         }
         let mut events: Vec<(Expr, bool)> = Vec::new();
@@ -1165,6 +1197,101 @@ impl Checker {
     fn maybe_empty(&self, ty: Type, span: Span) -> Diagnostic {
         err(format!("this is {ty}: it may be empty"), span)
             .with_note("check it first: `if !isNaT(x) { ... }`, or leave early with `if isNaT(x) { return; }`")
+    }
+
+    /// `e` read in place if it is an interface value (a variable, field or
+    /// element): `None` if it is something else.
+    fn iface_value(&mut self, e: &Expr) -> R<Option<HExpr>> {
+        let h = match &e.kind {
+            ExprKind::Var(n) => match self.lookup(n) {
+                Some(id) => hx(HExprKind::Local(id), self.f.locals[id].ty, e.span),
+                None => return Ok(None),
+            },
+            _ => self.expr(e, None)?,
+        };
+        Ok(iface_of(h.ty).map(|_| h))
+    }
+
+    /// The class `name` names, which must implement `iface`.
+    fn implementer(&self, iface: &'static str, name: &ast::Ident) -> R<&'static str> {
+        let Some(info) = self.classes.get(&name.name) else {
+            return Err(err(format!("`{}` is not a class", name.name), name.span));
+        };
+        let c = info.name;
+        if !self.ifaces[iface].impls.contains(&c) {
+            return Err(err(format!("`{c}` does not implement `{iface}`, so this can never match"), name.span));
+        }
+        Ok(c)
+    }
+
+    /// `match f { Circulo => ...; Quadrado => ...; else => ...; }` on an
+    /// interface value: in an arm with one class, `f` is of that class.
+    fn match_class(&mut self, scrut: &Expr, h: HExpr, arms: &[ast::MatchArm], span: Span) -> R<HStmtKind> {
+        let iface = iface_of(h.ty).expect("an interface value");
+        if h.ty.is_opt() {
+            return Err(self.maybe_empty(h.ty, scrut.span));
+        }
+        let Some(path) = path_of(&h) else {
+            return Err(err("`match` by class works on a variable or a field", scrut.span)
+                .with_note("for an array element, pass it to a proc (`lent f: Forma`) and match there"));
+        };
+        let mut seen: Vec<&'static str> = Vec::new();
+        let mut tests: Vec<(Vec<&'static str>, HBlock)> = Vec::new();
+        let mut otherwise = None;
+        for (i, arm) in arms.iter().enumerate() {
+            if arm.pats.is_empty() {
+                if i + 1 != arms.len() {
+                    return Err(err("the `else` arm must be the last one", arm.span));
+                }
+                otherwise = Some(self.block(&arm.body)?);
+                continue;
+            }
+            let mut classes = Vec::new();
+            for p in &arm.pats {
+                let ExprKind::Var(n) = &p.kind else {
+                    return Err(err("a pattern here is a class name, like `Circulo`", p.span));
+                };
+                let c = self.implementer(iface, &ast::Ident { name: n.clone(), span: p.span })?;
+                if seen.contains(&c) {
+                    return Err(err(format!("`{c}` already appears in an earlier arm"), p.span));
+                }
+                seen.push(c);
+                classes.push(c);
+            }
+            // With one class, the arm sees `f` as that class.
+            let mark = self.f.narrowed.len();
+            if let [c] = classes[..] {
+                self.narrow(&(path.clone(), Some(c)));
+            }
+            let body = self.block(&arm.body);
+            self.unnarrow_to(mark);
+            tests.push((classes, body?));
+        }
+        if otherwise.is_none() {
+            let missing: Vec<String> = self.ifaces[iface].impls.iter().filter(|c| !seen.contains(c)).map(|c| format!("`{c}`")).collect();
+            if !missing.is_empty() {
+                return Err(err(format!("`match` does not cover {}", missing.join(", ")), scrut.span)
+                    .with_note(format!("add an arm for each class that implements `{iface}`, or an `else` arm")));
+            }
+        }
+        let mut chain = otherwise;
+        for (classes, body) in tests.into_iter().rev() {
+            chain = Some(match chain {
+                None => body, // the last arm of a match that covers every class
+                Some(rest) => {
+                    let cond = classes
+                        .iter()
+                        .map(|c| hx(HExprKind::IsClass(Box::new(h.clone()), self.class_tags[c], c), Type::Bool, scrut.span))
+                        .reduce(|a, b| hx(HExprKind::Binary(BinOp::Or, Box::new(a), Box::new(b)), Type::Bool, scrut.span))
+                        .expect("an arm has at least one class");
+                    let trap = HStmt { kind: HStmtKind::Trap("match test is 0 (unknown)".into()), span: scrut.span };
+                    let unknown = HBlock { stmts: vec![trap], scope: vec![], span: scrut.span };
+                    let tri = HStmtKind::Tri { head: cond, arms: Box::new([rest, unknown, body]), origin: Branch::Match };
+                    HBlock { stmts: vec![HStmt { kind: tri, span }], scope: vec![], span }
+                }
+            });
+        }
+        Ok(HStmtKind::Block(chain.unwrap_or(HBlock { stmts: vec![], scope: vec![], span })))
     }
 
     fn warn(&self, message: String, span: Span, note: Option<String>) {
@@ -1915,10 +2042,18 @@ impl Checker {
                 HExpr { ty, ..h }
             }
             ExprKind::GiveField(path) => self.give_field(path, span)?,
+            ExprKind::Is(value, class) => {
+                let Some(h) = self.iface_value(value)? else {
+                    let ty = self.expr(value, None).map(|h| h.ty.to_string()).unwrap_or_else(|_| "this".into());
+                    return Err(err(format!("`is` tests an interface value (like `f: Forma`); this is {ty}"), value.span));
+                };
+                let c = self.implementer(iface_of(h.ty).expect("an interface value"), class)?;
+                hx(HExprKind::IsClass(Box::new(h), self.class_tags[c], c), Type::Bool, span)
+            }
             ExprKind::MethodCall { recv, name, args } => self.method_call(recv, name, args, span)?,
             ExprKind::Member(base, field) if self.iface_recv(base).is_ok_and(|h| h.is_some()) => {
                 return Err(err(format!("`{}` is hidden: an interface shows only its methods", field.name), field.span)
-                    .with_note("call one of them instead, like `x.nome()`"));
+                    .with_note("call one of them, or check the class first: `if x is Circulo { ... }`"));
             }
             ExprKind::Member(base, field) => {
                 let enum_name = match &base.kind {
@@ -2150,6 +2285,9 @@ impl Checker {
     /// `if tmp == a || tmp == b { arm } else { ... }`. An enum match without
     /// `else` must list every value; its last arm then needs no test.
     fn match_stmt(&mut self, scrut: &Expr, arms: &[ast::MatchArm], span: Span) -> R<HStmtKind> {
+        if let Some(h) = self.iface_value(scrut)? {
+            return self.match_class(scrut, h, arms, span);
+        }
         let h = self.expr(scrut, None)?;
         let ty = h.ty;
         if !(ty.is_int() || matches!(ty, Type::Enum(_))) {

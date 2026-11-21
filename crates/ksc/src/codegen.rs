@@ -964,6 +964,26 @@ impl<'a> ProcGen<'a> {
                     w => self.emit(Op::PackT { n: 1, w: w as u8, sym: false }),
                 };
             }
+            HExprKind::IsClass(value, tag, _) => {
+                // Keep the class number, drop the pointer; empty (NaT) is false:
+                // value; store $is; pop; load $is; jnat NO; push k; cmp3; test ==; jmp END
+                // NO: push false   END:
+                let s = self.scratch("$is", 1);
+                self.expr(value)?;
+                self.emit(Op::Store(s));
+                self.emit(Op::Pop);
+                self.emit(Op::Load(s));
+                let jnat = self.emit(Op::JNat(0));
+                self.push_word(Word::new(*tag));
+                self.emit(Op::Cmp3);
+                self.emit(Op::Test(0b010));
+                let jmp = self.emit(Op::Jmp(0));
+                let no = self.here();
+                self.patch(jnat, 0, no);
+                self.push_word(Word::NEG_ONE);
+                let end = self.here();
+                self.patch(jmp, 0, end);
+            }
             HExprKind::TakeField(obj, off) => {
                 // Read the field, then leave it empty:
                 // obj; 0; ldelem off; obj; 0; NaT..; stelem off

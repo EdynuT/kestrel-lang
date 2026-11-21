@@ -424,6 +424,8 @@ pub enum ExprKind {
     Give(Ident),
     /// `give a.b`: takes the object out of an optional field, leaving it empty.
     GiveField(Box<Expr>),
+    /// `f is Circulo`: whether an interface value holds an object of that class.
+    Is(Box<Expr>, Ident),
     /// `lend x`, or `lend self.items` (a path to an array or object).
     Lend(Box<Expr>),
     /// `obj.method(args)`, or `Class.method(args)` for a static method.

@@ -245,6 +245,9 @@ pub enum HExprKind {
     /// `give n.campo`: the value of a `T?` field of the object (a pointer),
     /// at that offset; the field is left empty (NaT).
     TakeField(Box<HExpr>, usize),
+    /// `f is Circulo`: an interface value (pointer and class number), the
+    /// class's number and its name. False when it is empty.
+    IsClass(Box<HExpr>, i64, &'static str),
 }
 
 impl HBlock {

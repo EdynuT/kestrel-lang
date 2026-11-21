@@ -70,7 +70,7 @@
     },
     "keywords": {
       "patterns": [
-        { "name": "keyword.control.kestrel", "match": "\\b(if|else|while|for|walk|in|match|tri|on|span|return|break|continue)\\b" },
+        { "name": "keyword.control.kestrel", "match": "\\b(if|else|while|for|walk|in|match|is|tri|on|span|return|break|continue)\\b" },
         { "name": "keyword.other.ownership.kestrel", "match": "\\b(claim|burn|give|lend|own|lent)\\b" },
         { "name": "storage.type.kestrel", "match": "\\b(proc|struct|class|interface|enum|sym|const|final)\\b" },
         { "name": "storage.modifier.kestrel", "match": "\\b(public|private)\\b" },

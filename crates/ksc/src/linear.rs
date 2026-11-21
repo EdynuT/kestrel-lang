@@ -390,6 +390,10 @@ impl Checker<'_> {
                     _ => self.expr(arr, st)?,
                 }
             }
+            HExprKind::IsClass(x, ..) => match x.kind {
+                HExprKind::Local(id) => self.require_alive(id, st, e.span)?,
+                _ => self.expr(x, st)?,
+            },
             HExprKind::TakeField(obj, _) => match obj.kind {
                 HExprKind::Local(id) => self.require_alive(id, st, e.span)?,
                 _ => self.expr(obj, st)?,
@@ -428,7 +432,7 @@ fn gives(e: &HExpr, id: LocalId) -> Option<crate::diag::Span> {
         HExprKind::DynCall { args, .. } => args.iter().find_map(sub),
         HExprKind::Binary(_, a, b) | HExprKind::Index(a, b) | HExprKind::Bind(_, a, b) => sub(a).or_else(|| sub(b)),
         HExprKind::ElemField(a, b, _) => sub(a).or_else(|| sub(b)),
-        HExprKind::TakeField(a, _) => sub(a),
+        HExprKind::TakeField(a, _) | HExprKind::IsClass(a, ..) => sub(a),
         HExprKind::Call(_, xs) | HExprKind::Builtin(_, xs) | HExprKind::Pack(xs) | HExprKind::StructLit(xs) => xs.iter().find_map(sub),
         HExprKind::Print(ps) => ps.iter().find_map(|(_, x)| sub(x)),
         _ => None,
@@ -444,7 +448,7 @@ fn takes_out(e: &HExpr, id: LocalId) -> Option<crate::diag::Span> {
         HExprKind::DynCall { args, .. } => args.iter().find_map(sub),
         HExprKind::Binary(_, a, b) | HExprKind::Index(a, b) | HExprKind::Bind(_, a, b) => sub(a).or_else(|| sub(b)),
         HExprKind::ElemField(a, b, _) => sub(a).or_else(|| sub(b)),
-        HExprKind::TakeField(a, _) => sub(a),
+        HExprKind::TakeField(a, _) | HExprKind::IsClass(a, ..) => sub(a),
         HExprKind::Call(_, xs) | HExprKind::Builtin(_, xs) | HExprKind::Pack(xs) | HExprKind::StructLit(xs) => xs.iter().find_map(sub),
         HExprKind::Print(ps) => ps.iter().find_map(|(_, x)| sub(x)),
         _ => None,

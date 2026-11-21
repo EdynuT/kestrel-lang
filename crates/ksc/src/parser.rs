@@ -848,6 +848,12 @@ impl Parser {
             return self.unary();
         };
         let mut lhs = self.binary(level + 1)?;
+        // `f is Circulo` sits with the comparisons (`a is B && ...`).
+        if level == 2 && self.eat(&Tok::Is) {
+            let class = self.ident()?;
+            let span = lhs.span.to(class.span);
+            return Ok(Expr { kind: ExprKind::Is(Box::new(lhs), class), span });
+        }
         // Each operator in a chain like `a + b + c` makes the tree one level deeper.
         let mut chain = 0;
         while let Some((_, op)) = ops.iter().find(|(t, _)| t == self.peek()) {
@@ -1147,6 +1153,7 @@ mod tests {
             ExprKind::Claim(n) => format!("(claim {})", sx(n)),
             ExprKind::Give(n) => format!("(give {})", n.name),
             ExprKind::GiveField(p) => format!("(give {})", sx(p)),
+            ExprKind::Is(a, c) => format!("(is {} {})", sx(a), c.name),
             ExprKind::Lend(n) => format!("(lend {})", sx(n)),
             ExprKind::MethodCall { recv, name, args } => {
                 format!("{}.{}({})", sx(recv), name.name, args.iter().map(sx).collect::<Vec<_>>().join(", "))

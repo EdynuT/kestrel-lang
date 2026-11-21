@@ -1228,3 +1228,94 @@ proc main() {
     ))
     .is_ok());
 }
+
+#[test]
+fn is_and_match_by_class() {
+    let decls = r#"interface Forma { proc nome(lent self) -> text; }
+@impl(Forma) class Circulo {
+    public raio: real;
+    public proc novo(r: real) -> Circulo { return Circulo { raio: r }; }
+    @override public proc nome(lent self) -> text { return "circulo"; }
+}
+@impl(Forma) class Quadrado {
+    public lado: real;
+    public proc novo(l: real) -> Quadrado { return Quadrado { lado: l }; }
+    @override public proc nome(lent self) -> text { return "quadrado"; }
+}
+@impl(Forma) class Triangulo {
+    b: real;
+    public proc novo(b: real) -> Triangulo { return Triangulo { b: b }; }
+    @override public proc nome(lent self) -> text { return "triangulo"; }
+}
+class Desenho {
+    public principal: Forma;
+    public proc novo(own f: Forma) -> Desenho { return Desenho { principal: give f }; }
+}
+class Conta { x: int; }
+"#;
+    let src = format!(
+        r#"{decls}
+proc descrever(lent f: Forma) {{
+    if f is Circulo {{
+        printl("raio", f.raio);
+    }} else if f is Quadrado && f.lado > 1.0 {{
+        printl("lado", f.lado);
+    }} else {{
+        printl(f.nome());
+    }}
+}}
+
+proc tipo(lent f: Forma) -> text {{
+    match f {{
+        Circulo => return "C";
+        Quadrado | Triangulo => return f.nome();
+    }}
+}}
+
+proc main() {{
+    fs[]: Forma = {{Circulo.novo(1.0), Quadrado.novo(2.0), Triangulo.novo(3.0)}};
+    n: int = 0;
+    for i: int = 0; i < len(fs); i++ {{
+        descrever(lend fs[i]);
+        printl(tipo(lend fs[i]));
+        if fs[i] is Circulo {{ n++; }}
+    }}
+    printl(n);
+    f: Forma = remove(fs, 0);
+    if !(f is Circulo) {{
+        burn f;
+        burn fs;
+        return;
+    }}
+    c: Circulo = give f;
+    printl(c.raio);
+    d: Desenho = Desenho.novo(Quadrado.novo(5.0));
+    if d.principal is Quadrado {{ printl(d.principal.lado); }}
+    o: Forma?;
+    printl(o is Circulo);
+    burn o;
+    burn d;
+    burn c;
+    burn fs;
+}}
+"#
+    );
+    assert_eq!(
+        out(&src),
+        "raio 1.0\nC\nlado 2.0\nquadrado\ntriangulo\ntriangulo\n1\n1.0\n5.0\nfalse\n"
+    );
+
+    for (body, why) in [
+        ("b: bool = f is Conta;", "`Conta` does not implement `Forma`"),
+        ("x: int = 1; b: bool = x is Circulo;", "`is` tests an interface value"),
+        ("match f { Circulo => printl(1); Quadrado => printl(2); }", "`match` does not cover `Triangulo`"),
+        ("match fs[0] { Circulo => printl(1); else => printl(2); }", "works on a variable or a field"),
+        ("printl(f.raio);", "`raio` is hidden"),
+        ("match f { Circulo | Quadrado => printl(f.raio); else => printl(0); }", "`raio` is hidden"),
+        ("match f { Circulo => printl(1); Circulo => printl(2); else => printl(3); }", "already appears"),
+        ("match f { 5 => printl(1); else => printl(3); }", "a pattern here is a class name"),
+    ] {
+        let e = ksc::compile(&format!("{decls} proc t(lent f: Forma, lent fs[]: Forma) {{ {body} }} proc main() {{ }}")).unwrap_err();
+        assert!(e.message.contains(why), "{body}: {}", e.message);
+    }
+}

@@ -50,12 +50,12 @@ proc main() {
     burn a; burn s;
 }"#,
     r#"proc fib(n: int) -> int { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
-proc fill(own v[]: int) -> int[] { for i: int = 0; i < len(v); i++ { v[i] = fib(i); } return v; }
-proc soma(lent v[]: int) -> int { s: int = 0; walk i in 0..len(v) - 1 { s += v[i]; } return s; }
+proc fill(v[]: int) -> int[] { for i: int = 0; i < len(v); i++ { v[i] = fib(i); } return v; }
+proc soma(&v[]: int) -> int { s: int = 0; walk i in 0..len(v) - 1 { s += v[i]; } return s; }
 proc main() -> int {
     b[]: int = claim 8;
     c[]: int = fill(give b);
-    tri soma(lend c) <=> 33 { - => print("<"); 0 => print("="); + => print(">"); }
+    tri soma(&c) <=> 33 { - => print("<"); 0 => print("="); + => print(">"); }
     final k: tryte = 'A';
     match k { 'A' | 'B' => printl(-k); else => printl(k); }
     burn c;
@@ -79,15 +79,15 @@ proc main() {
     itens[]: int;
     public topo: int;
     public proc nova() -> Pilha { return Pilha { itens: {}, topo: 0 }; }
-    public proc por(lent self, x: int) { append(self.itens, x); self.topo = x; }
-    public proc tirar(lent self) -> int { return pop(self.itens); }
-    public proc vazia(lent self) -> bool { return len(self.itens) == 0; }
-    public proc fim(own self) -> int { n: int = len(self.itens); burn self; return n; }
+    public proc por(&self, x: int) { append(self.itens, x); self.topo = x; }
+    public proc tirar(&self) -> int { return pop(self.itens); }
+    public proc vazia(&self) -> bool { return len(self.itens) == 0; }
+    public proc fim(self) -> int { n: int = len(self.itens); burn self; return n; }
 }
 class Dupla { a: Pilha; b: Pilha;
     public proc nova() -> Dupla { x: Pilha = Pilha.nova(); y: Pilha = Pilha.nova(); return Dupla { a: give x, b: give y }; }
-    public proc mover(lent self) { while !self.a.vazia() { self.b.por(self.a.tirar()); } }
-    public proc encher(lent self, n: int) { for i: int = 0; i < n; i++ { self.a.por(i * 3); } }
+    public proc mover(&self) { while !self.a.vazia() { self.b.por(self.a.tirar()); } }
+    public proc encher(&self, n: int) { for i: int = 0; i < n; i++ { self.a.por(i * 3); } }
 }
 proc main() {
     d: Dupla = Dupla.nova(); d.encher(4); d.mover(); printl(d);
@@ -103,7 +103,7 @@ const VOCAB: &[&str] = &[
     "{", "}", "(", ")", "[", "]", ";", ",", ".", "..", ":", "=", "==", "!=", "<", ">", "<=", ">=", "<=>", "+",
     "-", "*", "/", "%", "**", "<<", ">>", "&&", "||", "!", "|", "=>", "->", "++", "--", "+=", "0", "1", "-1", "364",
     "3812798742493", "0t+-0", "0vM", "1.5", "'a'", "\"s\"", "x", "a", "i", "main", "print", "printf", "len", "sub",
-    "toText", "toInt", "exit", "bool", "true", "false", "class", "public", "self", "lent self", "own self", "Pilha", ".", "struct", "Ponto", "x:", "append", "pop", "insert", "remove", "resize", "clear", "replace",
+    "toText", "toInt", "exit", "bool", "true", "false", "class", "public", "self", "&self", "self", "Pilha", ".", "struct", "Ponto", "x:", "append", "pop", "insert", "remove", "resize", "clear", "replace",
 ];
 
 /// The source text of each token, using the real lexer (comments are dropped).

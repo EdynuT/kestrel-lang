@@ -17,7 +17,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
 /// Like [`parse`], with the source text the tokens came from: a failed
 /// `assert` then shows its line and its condition as written.
 pub fn parse_source(tokens: Vec<Token>, src: &str) -> Result<Program, Diagnostic> {
-    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0, class: None, src: src.to_string() };
+    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0, class: None, src: src.to_string(), safe_vars: 0, splits: Vec::new() };
     let mut items = Vec::new();
     while p.peek() != &Tok::Eof {
         items.push(p.item()?);
@@ -27,7 +27,7 @@ pub fn parse_source(tokens: Vec<Token>, src: &str) -> Result<Program, Diagnostic
 
 /// One expression and nothing else (the `{...}` of a `printf` format).
 pub fn parse_expr(tokens: Vec<Token>) -> Result<Expr, Diagnostic> {
-    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0, class: None, src: String::new() };
+    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0, class: None, src: String::new(), safe_vars: 0, splits: Vec::new() };
     let e = p.expr()?;
     if p.peek() != &Tok::Eof {
         return Err(p.unexpected("the end of `{...}`"));
@@ -39,6 +39,11 @@ struct Parser {
     tokens: Vec<Token>,
     /// The source text (empty when unknown), for `assert` messages.
     src: String,
+    /// `?.` seen so far: each gets its own hidden variable.
+    safe_vars: u32,
+    /// `>>` tokens split in two by [`Parser::close_angle`], to undo when a
+    /// guess that `<` opened type arguments was wrong.
+    splits: Vec<(usize, Token)>,
     pos: usize,
     /// Inside the head of `if`/`while`/`match`/`tri`/`walk`: a `{` there
     /// opens the body, never an array literal (the same rule as Rust).
@@ -182,6 +187,7 @@ impl Parser {
     fn class_decl(&mut self, annotations: Vec<Annotation>) -> PResult<ClassDecl> {
         self.expect(Tok::Class)?;
         let name = self.ident()?;
+        let generics = self.type_params()?;
         self.expect(Tok::LBrace)?;
         let outer = self.class.replace(intern(&name.name));
         let (mut fields, mut methods) = (Vec::new(), Vec::new());
@@ -212,84 +218,161 @@ impl Parser {
         self.class = outer;
         result?;
         self.expect(Tok::RBrace)?;
-        Ok(ClassDecl { name, annotations, fields, methods })
+        Ok(ClassDecl { name, generics, instance: false, annotations, fields, methods })
+    }
+
+    /// `<T, K extends Hash>` after a class or proc name (nothing if absent).
+    fn type_params(&mut self) -> PResult<Vec<TypeParam>> {
+        let mut out: Vec<TypeParam> = Vec::new();
+        if !self.eat(&Tok::Lt) {
+            return Ok(out);
+        }
+        loop {
+            let name = self.ident()?;
+            if out.iter().any(|p| p.name.name == name.name) {
+                return Err(Diagnostic::new(format!("type parameter `{}` appears twice", name.name), name.span));
+            }
+            let bound = if self.eat(&Tok::Extends) { Some(self.ident()?) } else { None };
+            out.push(TypeParam { name, bound });
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.close_angle()?;
+        Ok(out)
+    }
+
+    /// The `>` that closes `<...>`; in `List<List<int>>` the lexer made `>>`
+    /// one token, so its first half is taken and a `>` is left.
+    fn close_angle(&mut self) -> PResult<Span> {
+        match self.peek() {
+            Tok::Gt => Ok(self.bump().span),
+            Tok::Shr => {
+                let at = self.pos;
+                self.splits.push((at, self.tokens[at].clone()));
+                let span = self.tokens[at].span;
+                self.tokens[at] = Token { tok: Tok::Gt, span: Span::new(span.start + 1, span.end) };
+                Ok(Span::new(span.start, span.start + 1))
+            }
+            _ => Err(self.unexpected("`>`")),
+        }
+    }
+
+    /// `<int, text>` after a generic's name: the type arguments.
+    fn type_args(&mut self) -> PResult<Vec<Type>> {
+        self.expect(Tok::Lt)?;
+        let mut args = Vec::new();
+        loop {
+            let t = self.type_expr()?;
+            if let Type::Own(_) = t.ty {
+                return Err(Diagnostic::new("a type argument cannot be an array", t.span)
+                    .with_note("use a class that holds the array, or `List<T>`"));
+            }
+            args.push(t.ty);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.close_angle()?;
+        Ok(args)
+    }
+
+    /// `Name<args>` in an expression (`Box<int>.new()`, `max<int>(a, b)`,
+    /// `Box<T> { ... }`), told apart from `a < b` by what follows the `>`.
+    fn generic_ref(&mut self, name: &str) -> Option<&'static str> {
+        if self.peek() != &Tok::Lt {
+            return None;
+        }
+        let (pos, splits) = (self.pos, self.splits.len());
+        if let Ok(args) = self.type_args() {
+            let next = self.peek();
+            if matches!(next, Tok::Dot | Tok::LParen) || (next == &Tok::LBrace && !self.in_head) {
+                return Some(generic_name(name, &args));
+            }
+        }
+        // Not a generic: undo, `<` is a comparison.
+        while self.splits.len() > splits {
+            let (at, tok) = self.splits.pop().expect("checked");
+            self.tokens[at] = tok;
+        }
+        self.pos = pos;
+        None
     }
 
     fn proc_decl(&mut self) -> PResult<ProcDecl> {
         self.expect(Tok::Proc)?;
         let name = self.ident()?;
+        let generics = self.type_params()?;
         self.expect(Tok::LParen)?;
         let mut params = Vec::new();
         let mut this = None;
         while self.peek() != &Tok::RParen {
-            // `lent v[]: int` borrows an array, `own v[]: int` takes it (`give`).
-            let mode_span = self.span();
-            let mode = match self.peek() {
-                Tok::Lent | Tok::Own => Some(self.bump().tok.clone()),
-                _ => None,
-            };
-            // A method's first parameter may be `lent self` or `own self`.
+            // `c: &Conta` and `&v[]: int` borrow; `c: Conta` and `v[]: int`
+            // take the object or array (the caller writes `give`).
+            if matches!(self.peek(), Tok::Lent | Tok::Own) {
+                return Err(Diagnostic::new(format!("`{}` is not used any more", self.peek()), self.span()).with_note(
+                    "a borrowed parameter is `c: &Conta` (array: `&v[]: int`, method: `&self`); one that takes it is `c: Conta` (method: `self`)",
+                ));
+            }
+            let sym_span = self.span();
+            let sym = self.eat(&Tok::Sym);
+            let amp_span = self.span();
+            let amp = self.eat(&Tok::Amp);
+            // A method's first parameter: `&self` uses the object, `self` consumes it.
             if self.peek() == &Tok::Ident("self".into()) {
                 let at = self.span();
-                if self.class.is_none() || !params.is_empty() || this.is_some() {
+                if self.class.is_none() || !params.is_empty() || this.is_some() || sym {
                     return Err(Diagnostic::new("`self` can only be the first parameter of a method", at));
                 }
-                this = Some(match mode {
-                    Some(Tok::Lent) => SelfMode::Lent,
-                    Some(_) => SelfMode::Own,
-                    None => {
-                        return Err(Diagnostic::new("say how the method takes the object", at)
-                            .with_note("`lent self` uses it, `own self` consumes it"));
-                    }
-                });
+                this = Some(if amp { SelfMode::Lent } else { SelfMode::Own });
                 self.bump();
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
                 continue;
             }
-            let sym_span = self.span();
-            let sym = self.eat(&Tok::Sym);
             let (pname, mut ty) = self.typed_name(sym, sym_span)?;
-            let pmode = match mode {
-                Some(Tok::Lent) => Some(SelfMode::Lent),
-                Some(_) => Some(SelfMode::Own),
-                None => None,
+            let mode = match ty.ty {
+                Type::Own(b) if amp => {
+                    ty.ty = Type::Lent(b);
+                    Some(SelfMode::Lent)
+                }
+                _ if amp => {
+                    return Err(Diagnostic::new("`&` before the name is for arrays", amp_span)
+                        .with_note(format!("an object is borrowed with `&` on its type: `{}: &T`", pname.name)));
+                }
+                Type::LentNamed(_) | Type::LentNamedOpt(_) => Some(SelfMode::Lent),
+                Type::Own(_) => Some(SelfMode::Own),
+                // An object without `&` is taken (checked later: the name must be a class).
+                _ => None,
             };
-            match (mode, ty.ty) {
-                (Some(Tok::Lent), Type::Own(b)) => ty.ty = Type::Lent(b),
-                (Some(Tok::Own), Type::Own(_)) => {}
-                // An object (checked later: the name must be a class).
-                (Some(Tok::Lent), Type::Named(n)) => ty.ty = Type::LentNamed(n),
-                (Some(Tok::Lent), Type::NamedOpt(n)) => ty.ty = Type::LentNamedOpt(n),
-                (Some(Tok::Own), Type::Named(_) | Type::NamedOpt(_)) => {}
-                (None, Type::Own(_)) => {
-                    return Err(Diagnostic::new("an array parameter needs `lent` or `own`", pname.span)
-                        .with_note(format!("`lent {0}[]: ...` borrows it, `own {0}[]: ...` takes it", pname.name)));
-                }
-                (Some(_), _) => {
-                    return Err(Diagnostic::new("`lent` and `own` only apply to arrays and objects", mode_span)
-                        .with_note(format!("write `{}[]: ...`", pname.name)));
-                }
-                (None, _) => {}
-            }
-            params.push(Param { name: pname, ty, mode: pmode });
+            params.push(Param { name: pname, ty, mode });
             if !self.eat(&Tok::Comma) {
                 break;
             }
         }
         self.expect(Tok::RParen)?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
-        // In an interface, a method ends with `;`: it has no body.
-        if self.class.is_some_and(|c| c.starts_with('@')) {
+        // In an interface, a method ends with `;` (no body), unless it is a
+        // default method with a `{ ... }` body.
+        if self.class.is_some_and(|c| c.starts_with('@')) && self.peek() != &Tok::LBrace {
             let at = self.expect(Tok::Semi)?;
-            return Ok(ProcDecl { name, this, params, ret, body: Block { stmts: Vec::new(), span: at }, annotations: Vec::new() });
+            return Ok(ProcDecl {
+                name,
+                this,
+                params,
+                ret,
+                body: Block { stmts: Vec::new(), span: at },
+                generics,
+                instance: false,
+                annotations: Vec::new(),
+            });
         }
         let body = self.block()?;
-        Ok(ProcDecl { name, this, params, ret, body, annotations: Vec::new() })
+        Ok(ProcDecl { name, this, params, ret, body, generics, instance: false, annotations: Vec::new() })
     }
 
-    /// `interface Name { proc m(lent self, ...) -> T; ... }`
+    /// `interface Name { proc m(&self, ...) -> T; ... }`
     fn interface_decl(&mut self) -> PResult<InterfaceDecl> {
         self.expect(Tok::Interface)?;
         let name = self.ident()?;
@@ -297,22 +380,30 @@ impl Parser {
         // `@` marks "inside an interface" for `proc_decl` (methods have no body).
         let outer = self.class.replace(intern(&format!("@{}", name.name)));
         let mut methods = Vec::new();
+        let mut bodies = Vec::new();
         let result = (|| {
             while self.peek() != &Tok::RBrace {
                 if matches!(self.peek(), Tok::Public | Tok::Private) {
                     return Err(Diagnostic::new("interface methods are always public", self.span()));
                 }
                 if self.peek() != &Tok::Proc {
-                    return Err(self.unexpected("`proc`").with_note("an interface only lists methods: `proc area(lent self) -> real;`"));
+                    return Err(self.unexpected("`proc`").with_note("an interface only lists methods: `proc area(&self) -> real;`"));
                 }
-                methods.push(self.proc_decl()?);
+                let has_body = {
+                    // Look past the signature for `{`: a default method.
+                    let m = self.proc_decl()?;
+                    let body = !m.body.stmts.is_empty() || self.tokens[self.pos - 1].tok == Tok::RBrace;
+                    methods.push(m);
+                    body
+                };
+                bodies.push(has_body);
             }
             Ok(())
         })();
         self.class = outer;
         result?;
         self.expect(Tok::RBrace)?;
-        Ok(InterfaceDecl { name, methods })
+        Ok(InterfaceDecl { name, methods, bodies })
     }
 
     /// `[sym] name[]: T` (array) or `name: T`, as in declarations and
@@ -408,6 +499,23 @@ impl Parser {
     /// (array types are written this way only after `->`).
     fn type_expr(&mut self) -> PResult<TypeExpr> {
         let start = self.span();
+        // `&Conta`, `&No?`: a borrowed object.
+        if self.eat(&Tok::Amp) {
+            let inner = self.type_expr()?;
+            let ty = match inner.ty {
+                Type::Named(n) => Type::LentNamed(n),
+                Type::NamedOpt(n) => Type::LentNamedOpt(n),
+                Type::Own(_) => {
+                    return Err(Diagnostic::new("a borrowed array puts `&` before its name", start)
+                        .with_note("write `&v[]: int`"));
+                }
+                t => {
+                    return Err(Diagnostic::new(format!("only arrays and objects are borrowed with `&`; {t} is copied"), start)
+                        .with_note("write the type without `&`"));
+                }
+            };
+            return Ok(TypeExpr { ty, span: start.to(inner.span) });
+        }
         let sym = self.eat(&Tok::Sym);
         let ty = if let Some(s) = self.scalar() {
             Type::Scalar(s)
@@ -417,6 +525,8 @@ impl Parser {
             match self.peek().clone() {
                 Tok::Ident(name) => {
                     self.bump();
+                    // `Box<int>`: a generic class with its type arguments.
+                    let name = if self.peek() == &Tok::Lt { generic_name(&name, &self.type_args()?).to_string() } else { name };
                     if self.eat(&Tok::Question) {
                         if self.peek() == &Tok::LBracket {
                             return Err(Diagnostic::new("an array cannot hold optional objects", start)
@@ -434,16 +544,23 @@ impl Parser {
                 Tok::Own | Tok::Lent => {
                     return Err(self
                         .unexpected("a type")
-                        .with_note("arrays are declared on the name: `x[]: int`, or `lent v[]: int` for a parameter"));
+                        .with_note("a borrowed object is `&Conta`; arrays are declared on the name: `x[]: int`, `&v[]: int`"));
                 }
                 Tok::Eq => return Err(self.unexpected("a type").with_note("every variable has its type written: `x: int = 5;`")),
                 _ => return Err(self.unexpected("a type")),
             }
         };
-        if self.peek() == &Tok::Question {
-            return Err(Diagnostic::new(format!("`?` is for classes and interfaces, not {ty}"), self.span())
-                .with_note("numbers, bools and texts can already hold NaT: `x: int;` starts as NaT"));
-        }
+        // `int?`, `text?`: may be null (class and enum names were handled above).
+        let ty = if self.peek() == &Tok::Question {
+            if self.peek_at(1) == &Tok::LBracket {
+                return Err(Diagnostic::new("array elements cannot be null", self.span())
+                    .with_note(format!("write `{ty}[]`")));
+            }
+            self.bump();
+            ty.opt().expect("a scalar, bool or text")
+        } else {
+            ty
+        };
         // `T[]` (after `->`): an array type.
         if self.peek() == &Tok::LBracket && self.peek_at(1) == &Tok::RBracket {
             self.bump();
@@ -555,6 +672,23 @@ impl Parser {
                 let mut kind = self.let_stmt()?;
                 if let StmtKind::Let { is_final, .. } = &mut kind {
                     *is_final = true;
+                }
+                end(self)?;
+                kind
+            }
+            Tok::Lent => {
+                return Err(Diagnostic::new("`lent` is not used any more", self.span())
+                    .with_note("a variable that borrows is `atual: &No = &lista;` (an array: `&v[]: int = &obj.items;`)"));
+            }
+            // `&v[]: int = &obj.items;`: an array variable that only borrows.
+            Tok::Amp if matches!(self.peek_at(1), Tok::Ident(_)) && self.peek_at(2) == &Tok::LBracket => {
+                let at = self.bump().span;
+                let mut kind = self.let_stmt()?;
+                if let StmtKind::Let { ty: Some(t), .. } = &mut kind {
+                    let Type::Own(b) = t.ty else { unreachable!("`x[]` is an array") };
+                    t.ty = Type::Lent(b);
+                } else {
+                    return Err(Diagnostic::new("a borrowed array needs its type: `&v[]: int = &obj.items;`", at));
                 }
                 end(self)?;
                 kind
@@ -946,16 +1080,30 @@ impl Parser {
                 let close = self.expect(Tok::RBracket)?;
                 let span = e.span.to(close);
                 e = Expr { kind: ExprKind::Index(Box::new(e), Box::new(idx)), span };
-            } else if self.eat(&Tok::Dot) {
+            } else if self.peek() == &Tok::Dot || self.peek() == &Tok::QuestionDot {
+                // `a?.b`: the member is read from a hidden variable that holds `a`.
+                let safe = self.bump().tok == Tok::QuestionDot;
                 let field = self.ident()?;
-                if self.eat(&Tok::LParen) {
+                let (recv, var) = if safe {
+                    self.safe_vars += 1;
+                    let var = format!("$safe{}", self.safe_vars);
+                    (Expr { kind: ExprKind::Var(var.clone()), span: e.span }, Some(var))
+                } else {
+                    (e.clone(), None)
+                };
+                let (kind, end) = if self.eat(&Tok::LParen) {
                     let (args, close) = self.call_args()?;
-                    let span = e.span.to(close);
-                    e = Expr { kind: ExprKind::MethodCall { recv: Box::new(e), name: field, args }, span };
-                    continue;
-                }
-                let span = e.span.to(field.span);
-                e = Expr { kind: ExprKind::Member(Box::new(e), field), span };
+                    (ExprKind::MethodCall { recv: Box::new(recv), name: field, args }, close)
+                } else {
+                    let end = field.span;
+                    (ExprKind::Member(Box::new(recv), field), end)
+                };
+                let span = e.span.to(end);
+                let rest = Expr { kind, span };
+                e = match var {
+                    Some(var) => Expr { kind: ExprKind::Safe { recv: Box::new(e), var, rest: Box::new(rest) }, span },
+                    None => rest,
+                };
             } else {
                 return Ok(e);
             }
@@ -1018,9 +1166,13 @@ impl Parser {
                 self.bump();
                 ExprKind::Str(s)
             }
-            Tok::NaT => {
+            Tok::Null => {
                 self.bump();
                 ExprKind::NaT
+            }
+            Tok::NaT => {
+                return Err(Diagnostic::new("`NaT` is written `null`", self.span())
+                    .with_note("`x: int? = null;`, `if x == null { ... }`; `NaT` is only used in `on NaT`"));
             }
             Tok::True | Tok::False => ExprKind::Bool(self.bump().tok == Tok::True),
             Tok::LParen => {
@@ -1066,8 +1218,12 @@ impl Parser {
                 return Ok(Expr { kind: ExprKind::GiveField(Box::new(path)), span });
             }
             Tok::Lend => {
-                // `lend x`, `lend a.b.c` (an array or object held in a field)
-                // or `lend v[i]` (an object held in an array).
+                return Err(Diagnostic::new("`&x` is now written `&x`", self.span())
+                    .with_note("e.g. `ver(&c)`, `soma(&lista.proximo)`, `mostrar(&formas[i])`"));
+            }
+            Tok::Amp => {
+                // `&x`, `&a.b.c` (an array or object held in a field)
+                // or `&v[i]` (an object held in an array).
                 self.bump();
                 let mut path = Expr { kind: ExprKind::Var(self.ident()?.name), span: self.tokens[self.pos - 1].span };
                 loop {
@@ -1089,7 +1245,10 @@ impl Parser {
                 return Ok(Expr { kind: ExprKind::Lend(Box::new(path)), span });
             }
             Tok::Ident(name) => {
-                let name = Ident { name, span: self.bump().span };
+                let mut name = Ident { name, span: self.bump().span };
+                if let Some(g) = self.generic_ref(&name.name) {
+                    name = Ident { name: g.to_string(), span: start.to(self.tokens[self.pos - 1].span) };
+                }
                 if self.eat(&Tok::LParen) {
                     let (args, close) = self.call_args()?;
                     return Ok(Expr { kind: ExprKind::Call { name, args }, span: start.to(close) });
@@ -1154,7 +1313,8 @@ mod tests {
             ExprKind::Give(n) => format!("(give {})", n.name),
             ExprKind::GiveField(p) => format!("(give {})", sx(p)),
             ExprKind::Is(a, c) => format!("(is {} {})", sx(a), c.name),
-            ExprKind::Lend(n) => format!("(lend {})", sx(n)),
+            ExprKind::Safe { recv, rest, .. } => format!("(?. {} {})", sx(recv), sx(rest)),
+            ExprKind::Lend(n) => format!("(&{})", sx(n)),
             ExprKind::MethodCall { recv, name, args } => {
                 format!("{}.{}({})", sx(recv), name.name, args.iter().map(sx).collect::<Vec<_>>().join(", "))
             }
@@ -1186,7 +1346,7 @@ mod tests {
         assert_eq!(ex("(int)(a + b) * 2"), "(* (cast int (+ a b)) 2)");
         assert_eq!(ex("!v[i - 1] % 3"), "(% (! v[(- i 1)]) 3)");
         assert_eq!(ex("a + 1 < b && !c || d == e"), "(|| (&& (< (+ a 1) b) (! c)) (== d e))");
-        assert_eq!(ex("f(lend b, give c, 'A', \"hi\")"), "f((lend b), (give c), '1, \"hi\")");
+        assert_eq!(ex("f(&b, give c, 'A', \"hi\")"), "f((&b), (give c), '1, \"hi\")");
         assert_eq!(ex("(1 + 2) * 3"), "(* (+ 1 2) 3)");
     }
 
@@ -1243,7 +1403,7 @@ mod tests {
 
     #[test]
     fn items() {
-        let p = program("const LIMIT: int = 0vMM;\nproc sum(lent sym v[]: int, k: int) -> int { return k; }");
+        let p = program("const LIMIT: int = 0vMM;\nproc sum(sym &v[]: int, k: int) -> int { return k; }");
         assert!(matches!(&p.items[0], Item::Const(c) if c.name.name == "LIMIT"));
         let Item::Proc(f) = &p.items[1] else { panic!() };
         assert_eq!(f.params[0].ty.ty, Type::Lent(Buf { elem: Elem::Scalar(Scalar::Int), sym: true }));
@@ -1265,7 +1425,7 @@ mod tests {
         let e = parse_err("proc main() { walk i in 3.. { print(i); } }");
         assert!(e.message.contains("the end of the range"), "{}", e.message);
         assert!(parse_err("proc main() { if {1} { } }").message.contains("expected an expression, found `{`"));
-        assert!(parse_err("proc f() -> lent int[] { } proc main() {}").note.unwrap().contains("declared on the name"));
+        assert!(parse_err("proc f() -> &int[] { } proc main() {}").message.contains("before its name"));
         assert!(parse_err("proc main() { x: trit = a <=> b <=> c; }").message.contains("cannot be chained"));
         assert!(parse_err("x: int = 1;").message.contains("expected `proc`, `const`, `enum`, `struct`, `class` or `interface`"));
         assert!(parse_err("proc main() { x: int = ; }").message.contains("expected an expression, found `;`"));
@@ -1274,7 +1434,7 @@ mod tests {
     #[test]
     fn spec_example_parses() {
         let src = r#"
-proc sum(lent sym v[]: int, k: int) -> int {
+proc sum(sym &v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k {
         acc += v[i];
@@ -1287,7 +1447,7 @@ proc main() -> int {
     walk i in span 2 {
         b[i] = i * i;
     }
-    s: int = sum(lend b, 2) on NaT { burn b; return -1; };
+    s: int = sum(&b, 2) on NaT { burn b; return -1; };
     s = s << 1;
     tri s <=> 10 {
         - => print("less");

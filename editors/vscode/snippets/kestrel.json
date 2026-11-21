@@ -40,7 +40,7 @@
   },
   "interface": {
     "prefix": "interface",
-    "body": ["interface ${1:Nome} {", "\tproc ${2:metodo}(lent self) -> ${3:int};", "}"],
+    "body": ["interface ${1:Nome} {", "\tproc ${2:metodo}(&self) -> ${3:int};", "}"],
     "description": "Interface"
   },
   "impl": {
@@ -55,12 +55,12 @@
   },
   "override": {
     "prefix": "override",
-    "body": ["@override", "public proc ${1:metodo}(lent self) -> ${2:int} {", "\t$0", "}"],
+    "body": ["@override", "public proc ${1:metodo}(&self) -> ${2:int} {", "\t$0", "}"],
     "description": "Método que cumpre uma interface"
   },
   "metodo": {
     "prefix": "method",
-    "body": ["public proc ${1:metodo}(lent self${2}) -> ${3:int} {", "\t$0", "}"],
+    "body": ["public proc ${1:metodo}(&self${2}) -> ${3:int} {", "\t$0", "}"],
     "description": "Método que usa o objeto"
   },
   "if": {

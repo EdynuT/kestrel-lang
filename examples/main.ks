@@ -1,6 +1,6 @@
 interface Forma {
-    proc area(lent self) -> real;
-    proc nome(lent self) -> text;
+    proc area(&self) -> real;
+    proc nome(&self) -> text;
 }
 
 @impl(Forma)
@@ -12,12 +12,12 @@ class Circulo {
     }
 
     @override
-    public proc area(lent self) -> real {
+    public proc area(&self) -> real {
         return 3.14 * self.raio ** 2;
     }
 
     @override
-    public proc nome(lent self) -> text {
+    public proc nome(&self) -> text {
         return "círculo";
     }
 }
@@ -32,17 +32,17 @@ class Circulo {
      }
 
      @override
-     public proc area(lent self) -> real {
+     public proc area(&self) -> real {
          return self.largura * self.altura;
      }
 
      @override
-     public proc nome(lent self) -> text {
+     public proc nome(&self) -> text {
          return "polígono";
      }
  }
 
- proc mostrar(lent f: Forma) {
+ proc mostrar(f: &Forma) {
     printf("{f.nome()}: {f.area()}\n");
 }
 
@@ -51,7 +51,7 @@ proc main() {
     formas[]: Forma = {give f, Poligono.novo(3.0, 4.0)};
     append(formas, Circulo.novo(2.0));
     for i: int = 0; i < len(formas); i++ {
-        mostrar(lend formas[i]);   // cada uma chama o seu próprio `area`
+        mostrar(&formas[i]);   // cada uma chama o seu próprio `area`
     }
     burn formas;
 }

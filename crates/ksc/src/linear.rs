@@ -7,6 +7,8 @@
 //! that fall through must agree; a loop body (`walk`, `while`) must leave outer buffers as it
 //! found them.
 
+use std::collections::HashMap;
+
 use crate::diag::{Diagnostic, Span};
 use crate::hir::*;
 
@@ -63,7 +65,7 @@ fn check_proc(p: &HProc) -> R<()> {
             *s = St::Alive;
         }
     }
-    let mut ck = Checker { p, loops: Vec::new() };
+    let mut ck = Checker { p, loops: Vec::new(), alias: HashMap::new(), borrowers: Vec::new() };
     if let Some(end) = ck.block(&p.body, st)? {
         // A proc without `-> T` may fall off its end: that is an implicit `return;`.
         let end_span = Span::new(p.body.span.end - 1, p.body.span.end);
@@ -79,6 +81,68 @@ fn is_own(t: Type) -> bool {
 struct Checker<'h> {
     p: &'h HProc,
     loops: Vec<LoopCx>,
+    /// What each `lent` variable (and hidden `?.` variable) borrows from.
+    alias: HashMap<LocalId, LocalId>,
+    /// The `lent` variables in scope: while one borrows from `x`, `x` cannot
+    /// be burned, given away, emptied of an element or lent to a call.
+    borrowers: Vec<LocalId>,
+}
+
+/// Whether `s` mentions local `id` anywhere inside.
+fn stmt_uses(s: &HStmt, id: LocalId) -> bool {
+    let e = |x: &HExpr| expr_uses(x, id);
+    let b = |x: &HBlock| x.stmts.iter().any(|s| stmt_uses(s, id));
+    match &s.kind {
+        HStmtKind::Let { local, value, on_nat } => *local == id || e(value) || on_nat.as_ref().is_some_and(b),
+        HStmtKind::Declare(l) | HStmtKind::Burn(l) => *l == id,
+        HStmtKind::Assign { local, index, value, .. } => *local == id || index.as_ref().is_some_and(e) || e(value),
+        HStmtKind::SetElem { arr, index, value, .. } => e(arr) || e(index) || e(value),
+        HStmtKind::Return(v) => v.as_ref().is_some_and(e),
+        HStmtKind::Break | HStmtKind::Continue | HStmtKind::Trap(_) | HStmtKind::Dump(_) => false,
+        HStmtKind::Tri { head, arms, .. } => e(head) || arms.iter().any(b),
+        HStmtKind::Block(x) => b(x),
+        HStmtKind::While { cond, body, step } => e(cond) || b(body) || step.as_ref().is_some_and(b),
+        HStmtKind::Exit(x) | HStmtKind::Expr(x) => e(x),
+        HStmtKind::Walk { var, span_tmp, start, end, body, .. } => {
+            *var == id || span_tmp.as_ref().is_some_and(|(_, k)| e(k)) || e(start) || e(end) || b(body)
+        }
+    }
+}
+
+fn expr_uses(x: &HExpr, id: LocalId) -> bool {
+    let e = |y: &HExpr| expr_uses(y, id);
+    match &x.kind {
+        HExprKind::Word(_) | HExprKind::Real(_) | HExprKind::Text(_) => false,
+        HExprKind::Local(l) | HExprKind::Give(l) | HExprKind::Lend(l) | HExprKind::Field(l, _) => *l == id,
+        HExprKind::Neg(a) | HExprKind::Convert(a) | HExprKind::Claim(a) | HExprKind::ToIface(a, _) | HExprKind::TakeField(a, _) => e(a),
+        HExprKind::IsClass(a, ..) => e(a),
+        HExprKind::Binary(_, a, c) | HExprKind::Index(a, c) | HExprKind::ElemField(a, c, _) => e(a) || e(c),
+        HExprKind::Bind(l, a, c) => *l == id || e(a) || e(c),
+        HExprKind::Call(_, xs) | HExprKind::Builtin(_, xs) | HExprKind::Pack(xs) | HExprKind::StructLit(xs) | HExprKind::NewObj(xs) => {
+            xs.iter().any(e)
+        }
+        HExprKind::DynCall { args, .. } => args.iter().any(e),
+        HExprKind::Print(ps) => ps.iter().any(|(_, y)| e(y)),
+        HExprKind::IfNull { value, then, null, .. } => e(value) || e(then) || null.as_deref().is_some_and(e),
+    }
+}
+
+/// A `lent` variable (not a parameter).
+fn is_lent_var(l: &Local) -> bool {
+    l.kind == LocalKind::Let
+        && matches!(l.ty.unopt(), Type::Lent(_) | Type::LentClass(_) | Type::LentIface(_))
+}
+
+/// The local an array or object expression reaches (`a`, `a.b[i].c`), lent or not.
+fn base_local(e: &HExpr) -> Option<LocalId> {
+    let mut e = e;
+    loop {
+        match &e.kind {
+            HExprKind::Lend(id) | HExprKind::Local(id) | HExprKind::Give(id) => return Some(*id),
+            HExprKind::ElemField(arr, _, _) | HExprKind::ToIface(arr, _) | HExprKind::TakeField(arr, _) => e = arr,
+            _ => return None,
+        }
+    }
 }
 
 impl Checker<'_> {
@@ -86,12 +150,69 @@ impl Checker<'_> {
         &self.p.locals[id].name
     }
 
-    fn block(&mut self, b: &HBlock, mut st: State) -> R<Option<State>> {
-        for s in &b.stmts {
+    /// The owner `id` borrows from in the end (itself if it borrows nothing).
+    fn root(&self, id: LocalId) -> LocalId {
+        let mut r = id;
+        for _ in 0..self.p.locals.len() {
+            match self.alias.get(&r) {
+                Some(&n) if n != r => r = n,
+                _ => break,
+            }
+        }
+        r
+    }
+
+    /// `what` would happen to something reached through `direct`: an error if
+    /// a `lent` variable (other than `direct` itself) borrows from the same owner.
+    fn guard(&self, direct: LocalId, what: &str, span: Span) -> R<()> {
+        let via = self.borrowers.contains(&direct).then_some(direct);
+        let r = self.root(direct);
+        if let Some(&b) = self.borrowers.iter().find(|&&b| Some(b) != via && b != r && self.root(b) == r) {
+            let (owner, by) = (self.name(r), self.name(b));
+            return Err(Diagnostic::new(format!("`{owner}` cannot be {what} while `{by}` borrows from it"), span)
+                .with_note(format!("`{by}` could be left pointing at nothing; do this after the last use of `{by}`")));
+        }
+        Ok(())
+    }
+
+    /// `local` (a `lent` variable) now borrows from what `value` reaches.
+    fn borrow(&mut self, local: LocalId, value: &HExpr) {
+        match base_local(value) {
+            Some(from) => {
+                let r = self.root(from);
+                self.alias.insert(local, r);
+            }
+            None => {
+                self.alias.remove(&local);
+            }
+        }
+        if !self.borrowers.contains(&local) {
+            self.borrowers.push(local);
+        }
+    }
+
+    fn block(&mut self, b: &HBlock, st: State) -> R<Option<State>> {
+        let r = self.block_here(b, st);
+        // `lent` variables end with their block.
+        self.borrowers.retain(|id| !b.scope.contains(id));
+        r
+    }
+
+    fn block_here(&mut self, b: &HBlock, mut st: State) -> R<Option<State>> {
+        // A `lent` variable of this block borrows until the last statement
+        // that uses it, not until the `}` (so the owner can be burned after).
+        let last_use: Vec<(LocalId, usize)> = b
+            .scope
+            .iter()
+            .filter(|id| is_lent_var(&self.p.locals[**id]))
+            .map(|&id| (id, b.stmts.iter().rposition(|s| stmt_uses(s, id)).unwrap_or(0)))
+            .collect();
+        for (k, s) in b.stmts.iter().enumerate() {
             match self.stmt(s, st)? {
                 Some(next) => st = next,
                 None => return Ok(None),
             }
+            self.borrowers.retain(|id| !last_use.contains(&(*id, k)));
         }
         for &id in &b.scope {
             if st[id] == St::Alive {
@@ -128,6 +249,9 @@ impl Checker<'_> {
         match &s.kind {
             HStmtKind::Let { local, value, on_nat } => {
                 self.expr(value, &mut st)?;
+                if is_lent_var(&self.p.locals[*local]) {
+                    self.borrow(*local, value);
+                }
                 if let Some(b) = on_nat {
                     self.block(b, st.clone())?; // always diverges (checked by sema)
                 }
@@ -143,10 +267,13 @@ impl Checker<'_> {
                     self.expr(i, &mut st)?;
                 }
                 self.expr(value, &mut st)?;
+                if index.is_none() && is_lent_var(&self.p.locals[*local]) {
+                    self.borrow(*local, value);
+                }
                 if index.is_some() {
                     // Checked after the operands so `b[0] = f(give b)` is caught.
                     self.require_alive(*local, &st, s.span)?;
-                } else if self.p.locals[*local].ty.is_opt() {
+                } else if is_own(self.p.locals[*local].ty) && self.p.locals[*local].ty.is_opt() {
                     // A `T?` may be assigned in any state: sema checks it is empty when it runs.
                     st[*local] = St::Alive;
                 } else if is_own(self.p.locals[*local].ty) {
@@ -162,6 +289,9 @@ impl Checker<'_> {
                         St::Burned | St::Untracked | St::Empty => st[*local] = St::Alive,
                     }
                 }
+            }
+            HStmtKind::Declare(local) if is_lent_var(&self.p.locals[*local]) => {
+                self.borrowers.push(*local);
             }
             HStmtKind::Declare(local) => {
                 if is_own(self.p.locals[*local].ty) {
@@ -181,6 +311,7 @@ impl Checker<'_> {
                 }
             }
             HStmtKind::Burn(id) => {
+                self.guard(*id, "burned", s.span)?;
                 let name = self.name(*id);
                 match st[*id] {
                     St::Alive => st[*id] = St::Burned,
@@ -315,10 +446,11 @@ impl Checker<'_> {
         Ok(())
     }
 
-    fn expr(&self, e: &HExpr, st: &mut State) -> R<()> {
+    fn expr(&mut self, e: &HExpr, st: &mut State) -> R<()> {
         match &e.kind {
             HExprKind::Word(_) | HExprKind::Real(_) | HExprKind::Text(_) | HExprKind::Local(_) => {}
             HExprKind::Give(id) => {
+                self.guard(*id, "given away", e.span)?;
                 self.require_alive(*id, st, e.span)?;
                 st[*id] = St::Given;
             }
@@ -346,27 +478,35 @@ impl Checker<'_> {
             HExprKind::ToIface(inner, _) => self.expr(inner, st)?,
             HExprKind::DynCall { args, .. } | HExprKind::Call(_, args) => {
                 // What each lent argument borrows from: a local, maybe through
-                // fields (`lend c` and `lend c.items` both borrow from `c`).
+                // fields (`&c` and `&c.items` both borrow from `c`).
                 let lent: Vec<Option<LocalId>> = args.iter().map(lent_root).collect();
+                for (a, l) in args.iter().zip(&lent) {
+                    if let Some(d) = l {
+                        self.guard(*d, "borrowed by a call", a.span)?;
+                    }
+                }
                 for (i, a) in args.iter().enumerate() {
-                    // Also nested: `f(lend v, g(give v))`.
+                    // Also nested: `f(&v, g(give v))`.
                     if let Some((id, at)) = lent.iter().flatten().find_map(|&id| gives(a, id).map(|s| (id, s))) {
-                        return Err(Diagnostic::new(format!("`{}` is lent and given away in the same call", self.name(id)), at)
+                        return Err(Diagnostic::new(format!("`{}` is borrowed and given away in the same call", self.name(id)), at)
                             .with_note("the callee would borrow something it also owns"));
                     }
-                    // `f(lend cs[0], remove(cs, 0))`: the same object lent and owned.
+                    // `f(&cs[0], remove(cs, 0))`: the same object lent and owned.
                     if let Some((id, at)) = lent.iter().flatten().find_map(|&id| takes_out(a, id).map(|s| (id, s))) {
-                        return Err(Diagnostic::new(format!("`{}` is lent and has an element taken out in the same call", self.name(id)), at)
+                        return Err(Diagnostic::new(format!("`{}` is borrowed and has an element taken out in the same call", self.name(id)), at)
                             .with_note("the callee could borrow the very element it gets: take it out before the call"));
                     }
                     if let Some(id) = lent[i]
                         && lent[..i].contains(&Some(id))
                     {
-                        return Err(Diagnostic::new(format!("`{}` is lent twice in the same call", self.name(id)), a.span)
+                        return Err(Diagnostic::new(format!("`{}` is borrowed twice in the same call", self.name(id)), a.span)
                             .with_note("the proc would see the same data under two names: a write through one would change the other"));
                     }
                     self.expr(a, st)?;
                 }
+            }
+            HExprKind::Builtin(Builtin::Pop | Builtin::Remove, args) if base_local(&args[0]).is_some_and(|d| self.guard(d, "x", e.span).is_err()) => {
+                return self.guard(base_local(&args[0]).expect("checked"), "emptied of an element", e.span);
             }
             HExprKind::Builtin(_, args) => {
                 // `append(v, f(give v))`: the array would be gone before the append.
@@ -390,10 +530,24 @@ impl Checker<'_> {
                     _ => self.expr(arr, st)?,
                 }
             }
+            HExprKind::IfNull { value, tmp, then, null } => {
+                self.expr(value, st)?;
+                if let Some(from) = base_local(value) {
+                    let r = self.root(from);
+                    self.alias.insert(*tmp, r);
+                }
+                self.expr(then, st)?;
+                if let Some(n) = null {
+                    self.expr(n, st)?;
+                }
+            }
             HExprKind::IsClass(x, ..) => match x.kind {
                 HExprKind::Local(id) => self.require_alive(id, st, e.span)?,
                 _ => self.expr(x, st)?,
             },
+            HExprKind::TakeField(obj, _) if base_local(obj).is_some_and(|d| self.guard(d, "emptied", e.span).is_err()) => {
+                return self.guard(base_local(obj).expect("checked"), "emptied", e.span);
+            }
             HExprKind::TakeField(obj, _) => match obj.kind {
                 HExprKind::Local(id) => self.require_alive(id, st, e.span)?,
                 _ => self.expr(obj, st)?,
@@ -407,7 +561,7 @@ impl Checker<'_> {
     }
 }
 
-/// The local a lent argument borrows from (`lend c`, or `c.items` read
+/// The local a lent argument borrows from (`&c`, or `c.items` read
 /// through an object), if it is one.
 fn lent_root(e: &HExpr) -> Option<LocalId> {
     if !matches!(e.ty, Type::Lent(_) | Type::LentClass(_) | Type::LentIface(_) | Type::LentOptClass(_) | Type::LentOptIface(_)) {
@@ -433,6 +587,7 @@ fn gives(e: &HExpr, id: LocalId) -> Option<crate::diag::Span> {
         HExprKind::Binary(_, a, b) | HExprKind::Index(a, b) | HExprKind::Bind(_, a, b) => sub(a).or_else(|| sub(b)),
         HExprKind::ElemField(a, b, _) => sub(a).or_else(|| sub(b)),
         HExprKind::TakeField(a, _) | HExprKind::IsClass(a, ..) => sub(a),
+        HExprKind::IfNull { value, then, .. } => sub(value).or_else(|| sub(then)),
         HExprKind::Call(_, xs) | HExprKind::Builtin(_, xs) | HExprKind::Pack(xs) | HExprKind::StructLit(xs) => xs.iter().find_map(sub),
         HExprKind::Print(ps) => ps.iter().find_map(|(_, x)| sub(x)),
         _ => None,
@@ -449,6 +604,7 @@ fn takes_out(e: &HExpr, id: LocalId) -> Option<crate::diag::Span> {
         HExprKind::Binary(_, a, b) | HExprKind::Index(a, b) | HExprKind::Bind(_, a, b) => sub(a).or_else(|| sub(b)),
         HExprKind::ElemField(a, b, _) => sub(a).or_else(|| sub(b)),
         HExprKind::TakeField(a, _) | HExprKind::IsClass(a, ..) => sub(a),
+        HExprKind::IfNull { value, then, .. } => sub(value).or_else(|| sub(then)),
         HExprKind::Call(_, xs) | HExprKind::Builtin(_, xs) | HExprKind::Pack(xs) | HExprKind::StructLit(xs) => xs.iter().find_map(sub),
         HExprKind::Print(ps) => ps.iter().find_map(|(_, x)| sub(x)),
         _ => None,
@@ -466,9 +622,9 @@ mod tests {
     }
 
     const DEFS: &str = "
-        proc take(own sym b[]: int) { burn b; }
-        proc peek(lent sym v[]: int) -> int { return v[0]; }
-        proc both(lent sym v[]: int, own sym b[]: int) { burn b; }
+        proc take(sym b[]: int) { burn b; }
+        proc peek(sym &v[]: int) -> int { return v[0]; }
+        proc both(sym &v[]: int, sym b[]: int) { burn b; }
         proc mk() -> sym int[] { sym b[]: int = claim 1; return b; }
     ";
 
@@ -490,7 +646,7 @@ mod tests {
     #[test]
     fn spec_example_is_sound() {
         let src = r#"
-proc sum(lent sym v[]: int, k: int) -> int {
+proc sum(sym &v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k { acc += v[i]; }
     return acc;
@@ -498,7 +654,7 @@ proc sum(lent sym v[]: int, k: int) -> int {
 proc main() -> int {
     sym b[]: int = claim 5;
     walk i in span 2 { b[i] = i * i; }
-    s: int = sum(lend b, 2) on NaT { burn b; return -1; };
+    s: int = sum(&b, 2) on NaT { burn b; return -1; };
     s = s << 1;
     tri s <=> 10 { - => print("less"); 0 => print("equal"); + => print("greater"); }
     burn b;
@@ -509,7 +665,7 @@ proc main() -> int {
 
     #[test]
     fn basic_lifecycle() {
-        ok("sym b[]: int = claim 3; b[0] = 1; x: int = peek(lend b); burn b;");
+        ok("sym b[]: int = claim 3; b[0] = 1; x: int = peek(&b); burn b;");
         ok("sym b[]: int = claim 3; take(give b);");
         ok("sym b[]: int = mk(); sym c[]: int = give b; burn c;");
         assert!(err("sym b[]: int = claim 3;").contains("`b` is never burned or given away"));
@@ -529,17 +685,17 @@ proc main() -> int {
 
     #[test]
     fn calls_and_yield() {
-        assert!(err("sym b[]: int = claim 3; both(lend b, give b);").contains("lent and given away in the same call"));
-        assert!(err("sym b[]: int = claim 3; b[0] = peek(lend b) + 0; take(give b); b[1] = 2;").contains("given away"));
+        assert!(err("sym b[]: int = claim 3; both(&b, give b);").contains("borrowed and given away in the same call"));
+        assert!(err("sym b[]: int = claim 3; b[0] = peek(&b) + 0; take(give b); b[1] = 2;").contains("given away"));
         assert!(err("sym b[]: int = claim 3; return;").contains("still owns a buffer when the proc returns"));
-        assert!(run(&format!("{DEFS} proc keep(own sym b[]: int) {{ }} proc main() {{}}")).unwrap_err().message.contains("when the proc ends"));
-        run(&format!("{DEFS} proc pass(own sym b[]: int) -> sym int[] {{ return b; }} proc main() {{}}")).unwrap();
+        assert!(run(&format!("{DEFS} proc keep(sym b[]: int) {{ }} proc main() {{}}")).unwrap_err().message.contains("when the proc ends"));
+        run(&format!("{DEFS} proc pass(sym b[]: int) -> sym int[] {{ return b; }} proc main() {{}}")).unwrap();
     }
 
     #[test]
     fn on_nat_must_clean_up() {
-        ok("sym b[]: int = claim 3; s: int = peek(lend b) on NaT { burn b; return; }; burn b;");
-        assert!(err("sym b[]: int = claim 3; s: int = peek(lend b) on NaT { return; }; burn b;").contains("when the proc returns"));
+        ok("sym b[]: int = claim 3; s: int = peek(&b) on NaT { burn b; return; }; burn b;");
+        assert!(err("sym b[]: int = claim 3; s: int = peek(&b) on NaT { return; }; burn b;").contains("when the proc returns"));
     }
 
     #[test]

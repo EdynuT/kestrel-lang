@@ -15,7 +15,7 @@ fn compile_error(src: &str) -> String {
     }
 }
 
-const TAKE: &str = "proc take(own sym b[]: int) { burn b; }\n";
+const TAKE: &str = "proc take(sym b[]: int) { burn b; }\n";
 
 #[test]
 fn bug1_copy_creates_two_owners() {

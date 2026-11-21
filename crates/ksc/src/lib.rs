@@ -1,11 +1,12 @@
 //! ksc: the Kestrel compiler (`.ks` -> `.ksb`).
 //!
-//! Phases: [`lexer`] -> [`parser`] -> [`sema`] (types, HIR) ->
+//! Phases: [`lexer`] -> [`parser`] -> [`generics`] (one copy per use) -> [`sema`] (types, HIR) ->
 //! [`linear`] (ownership) -> [`codegen`] (bytecode).
 
 pub mod ast;
 pub mod codegen;
 pub mod diag;
+pub mod generics;
 pub mod hir;
 pub mod lexer;
 pub mod linear;
@@ -46,6 +47,7 @@ pub fn compile_full(src: &str, need_main: bool) -> Result<Output, diag::Diagnost
 
 fn compile_here(src: &str, need_main: bool) -> Result<Output, diag::Diagnostic> {
     let program = parser::parse_source(lexer::lex(src)?, src)?;
+    let program = generics::expand(program)?;
     let hir = sema::check_with(&program, need_main)?;
     if hir.procs.is_empty() {
         return Err(diag::Diagnostic::new("the file has no procs", diag::Span::default()));

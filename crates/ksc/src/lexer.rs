@@ -62,6 +62,8 @@ pub enum Tok {
     Shr,
     Spaceship,
     AndAnd,
+    /// `&x` borrows `x`; `c: &Conta` is a borrowed object.
+    Amp,
     OrOr,
     Bang,
     EqEq,
@@ -81,12 +83,17 @@ pub enum Tok {
     Public,
     Private,
     At,
-    /// `?` after a type: `No?` may be empty.
+    /// `?` after a type: `No?` may be null.
     Question,
+    /// `a?.b`: reads `b` only if `a` is not null.
+    QuestionDot,
+    Null,
     Sym,
     Match,
     /// `f is Circulo`: tests the class of an interface value.
     Is,
+    /// `<T extends Forma>`: the interface a type parameter must implement.
+    Extends,
     Dot,
     Pipe,
     PlusEq,
@@ -143,11 +150,13 @@ const KEYWORDS: &[(&str, Tok)] = &[
     ("sym", Tok::Sym),
     ("match", Tok::Match),
     ("is", Tok::Is),
+    ("extends", Tok::Extends),
     ("walk", Tok::Walk),
     ("in", Tok::In),
     ("span", Tok::Span),
     ("on", Tok::On),
     ("NaT", Tok::NaT),
+    ("null", Tok::Null),
     ("break", Tok::Break),
     ("continue", Tok::Continue),
     ("trit", Tok::Trit),
@@ -178,7 +187,9 @@ const OPERATORS: &[(&str, Tok)] = &[
     ("==", Tok::EqEq),
     ("!=", Tok::NotEq),
     ("&&", Tok::AndAnd),
+    ("&", Tok::Amp),
     ("||", Tok::OrOr),
+    ("?.", Tok::QuestionDot),
     ("..", Tok::DotDot),
     (".", Tok::Dot),
     ("=>", Tok::FatArrow),

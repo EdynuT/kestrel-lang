@@ -20,8 +20,8 @@ struct Pessoa {
 }
 
 interface Forma {
-    proc area(lent self) -> real;
-    proc nome(lent self) -> text;
+    proc area(&self) -> real;
+    proc nome(&self) -> text;
 }
 
 @impl(Forma)
@@ -33,12 +33,12 @@ class Circulo {
     }
 
     @override
-    public proc area(lent self) -> real {
+    public proc area(&self) -> real {
         return 3.14 * self.raio ** 2;
     }
 
     @override
-    public proc nome(lent self) -> text {
+    public proc nome(&self) -> text {
         return "círculo";
     }
 }
@@ -52,12 +52,12 @@ class Quadrado {
     }
 
     @override
-    public proc area(lent self) -> real {
+    public proc area(&self) -> real {
         return self.lado * self.lado;
     }
 
     @override
-    public proc nome(lent self) -> text {
+    public proc nome(&self) -> text {
         return "quadrado";
     }
 }
@@ -71,12 +71,12 @@ class Conta {
         return Conta { nome: nome, saldo: 0.0, hist: {} };
     }
 
-    public proc depositar(lent self, v: real) {
+    public proc depositar(&self, v: real) {
         self.saldo += v;
         append(self.hist, v);
     }
 
-    public proc fechar(own self) -> real {
+    public proc fechar(self) -> real {
         s: real = self.saldo;
         burn self;
         return s;
@@ -86,7 +86,7 @@ class Conta {
 // ---------- Procs auxiliares ----------
 
 // Aceita qualquer classe que implemente Forma (emprestada).
-proc mostrar(lent f: Forma) {
+proc mostrar(f: &Forma) {
     printf("  {f.nome()}: área {f.area()}\n");
 }
 
@@ -100,7 +100,7 @@ proc quadrados(n: int) -> int[] {
 }
 
 // Recebe a posse (own): precisa consumir o array.
-proc somarEQueimar(own v[]: int) -> int {
+proc somarEQueimar(v[]: int) -> int {
     total: int = 0;
     walk i in 0..len(v) - 1 {
         total += v[i];
@@ -110,7 +110,7 @@ proc somarEQueimar(own v[]: int) -> int {
 }
 
 // Soma um array simétrico emprestado (índices -k..+k).
-proc somaSym(lent sym v[]: int, k: int) -> int {
+proc somaSym(sym &v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k {
         acc += v[i];
@@ -118,17 +118,17 @@ proc somaSym(lent sym v[]: int, k: int) -> int {
     return acc;
 }
 
-// Avisa a falha de propósito com NaT (o "null" do Kestrel).
-proc dividir(a: int, b: int) -> int {
+// Avisa a falha de propósito com null: o `?` no retorno diz que pode não ter valor.
+proc dividir(a: int, b: int) -> int? {
     if b == 0 {
-        return NaT;
+        return null;
     }
     return a / b;
 }
 
 // tri: desvio em três caminhos.
 proc sinal(x: int) -> text {
-    r: text;
+    r: text = "";
     tri x <=> 0 {
         - => r = "negativo";
         0 => r = "zero";
@@ -188,8 +188,8 @@ proc main() -> int {
     talvez: trit = 0;
     printf("ok = {ok}, ok && talvez = {ok && talvez}, ok || talvez = {ok || talvez}\n");
     printf("!talvez = {!talvez}, 3 <=> 5 = {3 <=> 5}\n");
-    vazio: int;                       // sem valor: NaT
-    printf("vazio é NaT? {isNaT(vazio)}\n");
+    vazio: int?;                      // sem valor: null (só tipos com `?`)
+    printf("vazio é null? {vazio == null}\n");
 
     // 3. Texto e caracteres
     printl("\n-- 3. Texto --");
@@ -197,7 +197,11 @@ proc main() -> int {
     saudacao: text = "Olá, " + nome + "!";
     printl(saudacao);
     printf("len = {len(nome)}, sub = {sub(nome, 0, 3)}, primeira letra: {nome[0]:c}\n");
-    n: int = toInt("123") + 1;
+    lido: int? = toInt("123");        // null se o texto não for um número
+    if lido == null {
+        return 1;
+    }
+    n: int = lido + 1;
     printl("toInt(\"123\") + 1 = " + toText(n));
     c: tryte = 'K';
     printf("'K' vale {c}, maiúscula? {isUpper(c)}, dígito? {isDigit('7')}\n");
@@ -266,7 +270,7 @@ proc main() -> int {
     burn nomes;
 
     sym s[]: int = {-8, -1, 0, 1, 8}; // índices -2..+2
-    soma: int = somaSym(lend s, 2);   // empresta
+    soma: int = somaSym(&s, 2);   // empresta
     printf("s[-2] = {s[-2]}, s[0] = {s[0]}, soma = {soma}\n");
     burn s;
 
@@ -310,8 +314,8 @@ proc main() -> int {
 
     circ: Circulo = Circulo.novo(2.0);
     quad: Quadrado = Quadrado.novo(3.0);
-    mostrar(lend circ);
-    mostrar(lend quad);
+    mostrar(&circ);
+    mostrar(&quad);
     burn circ;
     burn quad;
 

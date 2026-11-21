@@ -153,7 +153,7 @@ impl<'a> ProcGen<'a> {
             HExprKind::Builtin(..) => self.width(e.ty),
             HExprKind::Print(_) => 0,
             HExprKind::Bind(_, _, body) => self.leftover(body),
-            HExprKind::Call(..) | HExprKind::DynCall { .. } if e.ty == Type::Void => 1,
+            HExprKind::Call(..) | HExprKind::DynCall { .. } | HExprKind::IfNull { .. } if e.ty == Type::Void => 1,
             _ => self.width(e.ty),
         }
     }
@@ -161,8 +161,8 @@ impl<'a> ProcGen<'a> {
     /// "No value" for a type: NaT in every slot (a real NaT for reals).
     fn push_nat(&mut self, ty: Type) {
         match ty {
-            Type::Scalar(Scalar::Real) => self.push_real(Real::NAT),
-            Type::Iface(_) | Type::OptIface(_) => {
+            Type::Scalar(Scalar::Real) | Type::OptScalar(Scalar::Real) => self.push_real(Real::NAT),
+            Type::Iface(_) | Type::OptIface(_) | Type::LentOptIface(_) => {
                 self.push_word(Word::NAT);
                 self.push_word(Word::NAT);
             }
@@ -287,27 +287,63 @@ impl<'a> ProcGen<'a> {
         self.emit(Op::Pop);
     }
 
-    /// The body of `$burn.C`: frees what each field of the object (slot 0)
-    /// owns, each read into a scratch slot, then the object itself.
+    /// The body of `$burn.C`: reads what each field of the object (slot 0)
+    /// owns into scratch slots, frees the object, then frees those. A last
+    /// field of the same class (`proximo: No?`) is freed by looping instead
+    /// of calling itself, so a long list does not overflow the call stack:
+    ///   top: <read fields>; purge 0; <burn the others>;
+    ///        load next; jnat END; pop; load next; store 0; jmp top
+    ///   END: push 0; ret
     fn burn_fn(mut self, c: &'static str) -> Function {
+        let mut owned = Vec::new();
         let mut off = 0;
         for (_, t) in self.classes[c].clone() {
             let w = self.width(t);
             if owns(t) {
-                let tmp = self.scratch("$burn", w);
-                self.emit(Op::Load(0));
-                self.push_word(Word::ZERO);
-                self.emit(Op::LdElem { off: off as u8, n: w as u8 });
-                self.store(tmp, w);
-                self.burn(tmp, t);
+                owned.push((off, t, w));
             }
             off += w;
         }
+        let tail = match owned.last() {
+            Some(&(_, t @ (Type::Class(d) | Type::OptClass(d)), _)) if d == c => Some(t),
+            _ => None,
+        };
+        let top = self.here();
+        let mut tmps = Vec::new();
+        for &(off, t, w) in &owned {
+            let tmp = self.scratch("$burn", w);
+            self.emit(Op::Load(0));
+            self.push_word(Word::ZERO);
+            self.emit(Op::LdElem { off: off as u8, n: w as u8 });
+            self.store(tmp, w);
+            tmps.push((tmp, t));
+        }
         self.emit(Op::Purge(0));
+        let keep = tmps.len() - usize::from(tail.is_some());
+        for &(tmp, t) in &tmps[..keep] {
+            self.burn(tmp, t);
+        }
+        let mut done = None;
+        if let Some(t) = tail {
+            let (next, _) = tmps[keep];
+            if t.is_opt() {
+                self.emit(Op::Load(next));
+                done = Some(self.emit(Op::JNat(0)));
+                self.emit(Op::Pop);
+            }
+            self.emit(Op::Load(next));
+            self.emit(Op::Store(0));
+            self.emit(Op::Jmp(top));
+        }
+        if let Some(at) = done {
+            let end = self.here();
+            self.patch(at, 0, end);
+        }
         self.push_word(Word::ZERO);
         self.emit(Op::Ret);
         Function { name: self.p.name.clone(), params: 1, locals: self.names.len() as u16, code: self.code, local_names: self.names }
     }
+
 
     /// Loads `n` slots starting at `first`.
     fn load(&mut self, first: Slot, n: usize) {
@@ -661,18 +697,23 @@ impl<'a> ProcGen<'a> {
                 self.push_word(Word::new(*tag));
             }
             HExprKind::DynCall { impls, args } => {
-                // The receiver goes to scratch slots (pointer, class); then
-                // self, args; for each class: tag == k ? call K.m : next
+                // The receiver (pointer, class) and the arguments go to scratch
+                // slots; for each class: tag == k ? call K.m : next. A class's
+                // own method takes the pointer; a default method takes both.
                 self.expr(&args[0])?;
                 let s = self.scratch("$recv", 2);
                 self.store(s, 2);
-                self.emit(Op::Load(s));
+                let mut saved = Vec::new();
                 for a in &args[1..] {
+                    let w = self.width(a.ty);
                     self.expr(a)?;
+                    let t = self.scratch("$arg", w);
+                    self.store(t, w);
+                    saved.push((t, w));
                 }
-                let argc = 1 + args[1..].iter().map(|a| self.width(a.ty)).sum::<usize>();
+                let argc = args[1..].iter().map(|a| self.width(a.ty)).sum::<usize>();
                 let mut exits = Vec::new();
-                for (tag, pid) in impls {
+                for (tag, pid, whole) in impls {
                     self.emit(Op::Load(s + 1));
                     self.push_word(Word::new(*tag));
                     self.emit(Op::Cmp3);
@@ -680,7 +721,12 @@ impl<'a> ProcGen<'a> {
                     let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
                     let call = self.here();
                     self.patch(br, 2, call);
-                    self.emit(Op::Call { f: *pid as u32, argc: argc as u8 });
+                    self.load(s, if *whole { 2 } else { 1 });
+                    for &(t, w) in &saved {
+                        self.load(t, w);
+                    }
+                    let n = argc + if *whole { 2 } else { 1 };
+                    self.emit(Op::Call { f: *pid as u32, argc: n as u8 });
                     exits.push(self.emit(Op::Jmp(0)));
                     let next = self.here();
                     self.patch(br, 0, next);
@@ -963,6 +1009,27 @@ impl<'a> ProcGen<'a> {
                     1 => self.emit(Op::Pack { n: 1, sym: false }),
                     w => self.emit(Op::PackT { n: 1, w: w as u8, sym: false }),
                 };
+            }
+            HExprKind::IfNull { value, tmp, then, null } => {
+                //   value; store tmp; load tmp; jnat NULL; pop; then; jmp END
+                //   NULL: null (or NaT; a dummy 0 for a call without result)   END:
+                let s = self.slot(*tmp);
+                self.expr(value)?;
+                self.store(s, self.width(value.ty));
+                self.emit(Op::Load(s));
+                let jnat = self.emit(Op::JNat(0));
+                self.emit(Op::Pop);
+                self.expr(then)?;
+                let jmp = self.emit(Op::Jmp(0));
+                let at_null = self.here();
+                self.patch(jnat, 0, at_null);
+                match null {
+                    Some(n) => self.expr(n)?,
+                    None if e.ty == Type::Void => self.push_word(Word::ZERO),
+                    None => self.push_nat(e.ty),
+                }
+                let end = self.here();
+                self.patch(jmp, 0, end);
             }
             HExprKind::IsClass(value, tag, _) => {
                 // Keep the class number, drop the pointer; empty (NaT) is false:

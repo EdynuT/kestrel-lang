@@ -585,7 +585,8 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 let mut line = String::new();
                 self.input.read_line(&mut line).map_err(io_err)?;
                 let line = line.trim();
-                self.check(parse_input(line), false, || format!("input: \"{line}\" is not an integer"))?;
+                // null (NaT) when the line is not an integer: `input()` is `int?`.
+                self.push(parse_input(line).into());
             }
             Op::Emit => {
                 // A tryte buffer prints as the characters of its cells.
@@ -641,12 +642,12 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             Op::TToI => {
                 let t = self.pop_text()?;
                 let s: String = self.texts[t].iter().collect();
-                self.check(parse_input(&s), false, || format!("toInt(\"{s}\"): not an integer"))?;
+                self.push(parse_input(&s).into());
             }
             Op::TToF => {
                 let t = self.pop_text()?;
                 let s: String = self.texts[t].iter().collect();
-                self.check(parse_real(&s), false, || format!("toReal(\"{s}\"): not a number"))?;
+                self.push(parse_real(&s).into());
             }
             Op::CharIs(k) => {
                 let w = self.pop_word()?;
@@ -1226,8 +1227,9 @@ mod tests {
             &["bad"],
         );
         let hard = module(vec![func("main", 0, 0, &[Op::Input, Op::Show, c(0), Op::Ret])], &[]);
-        assert!(run(&hard, "banana
-").0.unwrap_err().reason.contains("\"banana\" is not an integer"));
+        // Not an integer: `input()` gives null (NaT) instead of trapping.
+        let (r, shown) = run(&hard, "banana\n");
+        assert!(r.is_ok() && shown == "NaT", "{shown}");
         assert_eq!(run(&m, "42\n").1, "42");
         assert_eq!(run(&m, "0t+0-\n").1, "8");
         assert_eq!(run(&m, "0vAm\n").1, "14");

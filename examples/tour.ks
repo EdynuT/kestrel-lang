@@ -3,7 +3,7 @@
 const GREETING: text = "Hello from the BET-VM!\n";
 
 // Sum of a symmetric buffer with indices -k..+k.
-proc sum(lent sym v[]: int, k: int) -> int {
+proc sum(sym &v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k {
         acc += v[i];
@@ -30,7 +30,7 @@ proc main() -> int {
     print("cubes: ");
     walk i in span 2 { print(b[i]); print(" "); }
     print("\nsum = ");
-    s: int = sum(lend b, 2) on NaT { burn b; return 1; };
+    s: int = sum(&b, 2) on NaT { burn b; return 1; };
     print(s);
     print(" (");
     describe(s);

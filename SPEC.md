@@ -201,16 +201,16 @@ Há dois tipos de array, e o tipo decide como os índices funcionam:
 | `clear(v)` | Deixa o array vazio |
 | `replace(v, a..b, c..d)` | Troca os trechos `a..b` e `c..d` de lugar (inclusivos, sem sobreposição; os tamanhos podem ser diferentes). Funciona também em `sym` |
 
-  Como o Kestrel não tem genéricos, essas operações valem para arrays de qualquer tipo: elas fazem o papel do `ArrayList` do Java. Por dentro, a VM guarda uma folga, então `append` não copia o array a cada vez. Um array emprestado (`lent`) também pode mudar de tamanho. O compilador só confere índices literais de arrays que nunca mudam de tamanho no proc.
+  Essas operações valem para arrays de qualquer tipo, fazendo o papel do `ArrayList` do Java (para uma lista com métodos, veja os genéricos, §8.12). Por dentro, a VM guarda uma folga, então `append` não copia o array a cada vez. Um array emprestado (`&v[]`) também pode mudar de tamanho. O compilador só confere índices literais de arrays que nunca mudam de tamanho no proc.
 - Um array `sym` e um array a partir de 0 **não se misturam**: o mesmo índice aponta para células diferentes.
-- Parâmetros dizem como recebem o array: `lent v[]: int` (emprestado) ou `own v[]: int` (recebe a posse, com `give`). No retorno, os colchetes vão no tipo, como em Java: `proc cria(n: int) -> int[]`.
+- Parâmetros dizem como recebem o array: `&v[]: int` (emprestado) ou `v[]: int` (recebe a posse, com `give`). No retorno, os colchetes vão no tipo, como em Java: `proc cria(n: int) -> int[]`.
 
 ## 6. Arrays e posse linear
 
 | Tipo | Natureza | Pode |
 |---|---|---|
-| `x[]: T` (variável) / `own x[]: T` (parâmetro) | Linear, dono único, não copiável | Ler, escrever, `give`, `burn`, `return` |
-| `lent x[]: T` (só parâmetro) | Empréstimo, **segunda classe** | Ler e escrever |
+| `x[]: T` (variável) / `x[]: T` (parâmetro) | Linear, dono único, não copiável | Ler, escrever, `give`, `burn`, `return` |
+| `&x[]: T` (parâmetro ou variável) | Empréstimo | Ler e escrever |
 
 Toda variável que guarda um array é dona dele. Não existe aritmética de ponteiros.
 
@@ -219,35 +219,37 @@ Toda variável que guarda um array é dona dele. Não existe aritmética de pont
 | `claim N` | `malloc` / `new int[N]` | Aloca `N` células zeradas |
 | `burn x` | `memset 0` + `free` | Zera o bloco, e o slot do dono vira NaT |
 | `give x` | `move` | Transfere a posse, e o slot do dono vira NaT |
-| `lend x` | `&mut x` | Empresta durante uma chamada |
+| `&x` | `&mut x` | Empresta durante uma chamada |
 
-### 6.1 Regras do `lent`
+**Emprestar se escreve com `&`, como em Rust**, no tipo e na chamada: o parâmetro `c: &Conta` (um array: `&v[]: int`; um método: `&self`) recebe `&c`. Sem `&`, o parâmetro **recebe a posse** (`c: Conta`, `v[]: int`, `self`), e quem chama escreve `give c`.
 
-- Existe **somente como parâmetro** de `proc`, e é criado com `lend x` no argumento.
-- Não pode ser retornado nem guardado em variável local.
+### 6.1 Regras do empréstimo (`&`)
+
+- Existe como parâmetro (`c: &Conta`) e como variável que só empresta (`atual: &No = &lista;`, veja §8.10). É criado com `&x` (ou `&a.campo`, `&v[i]`).
+- Não pode ser retornado (`-> &T` é erro).
 - Não aceita `burn` nem `give`.
-- `f(lend b, give b)` na mesma chamada é erro estático.
-- `f(lend b, lend b)` também: o `proc` veria o mesmo array com dois nomes, e uma escrita por um mudaria o outro.
+- `f(&b, give b)` na mesma chamada é erro estático.
+- `f(&b, &b)` também: o `proc` veria o mesmo array com dois nomes, e uma escrita por um mudaria o outro.
 
-### 6.2 Regras do `own`
+### 6.2 Regras da posse
 
-Cada `own` deve ser consumido **exatamente uma vez** em todo caminho de execução, por `burn x`, `give x` ou `return x`.
+Cada array ou objeto com dono deve ser consumido **exatamente uma vez** em todo caminho de execução, por `burn x`, `give x` ou `return x`.
 
 Erros de compilação:
 
 - Usar a variável depois de `give` ou `burn`.
-- Chegar a `}` ou `return` com um `own` vivo (vazamento).
+- Chegar a `}` ou `return` com um dono vivo (vazamento).
 - Copiar sem `give` (`sym c[]: int = b;`).
 - Guardar `claim` ou `{...}` em uma variável que não seja array.
-- Atribuir a um `own` que ainda está vivo.
-- Atribuir a um `own` consumido por `give`. O nome só pode receber um novo `claim` **depois de `burn`**.
-- Passar a um parâmetro `own` um argumento sem `give`.
-- Usar como comando (`f();`) uma expressão de tipo `own`, o que descartaria o ponteiro.
+- Atribuir a um dono que ainda está vivo.
+- Atribuir a um dono consumido por `give`. O nome só pode receber um novo `claim` **depois de `burn`**.
+- Passar a um parâmetro que recebe a posse um argumento sem `give`.
+- Usar como comando (`f();`) uma expressão que devolve um array ou objeto, o que o perderia.
 
 ### 6.3 Fluxo e linearidade
 
 - **`tri`**: todos os ramos que não divergem devem terminar com o **mesmo** estado linear. Um ramo que diverge (`return`, `break`, `continue`) precisa ter consumido o que for exigido naquele ponto de saída.
-- **`walk`/`while`/`for`**: o corpo não pode consumir um `own` declarado fora do laço. Antes de `break` ou `continue`, todo `own` declarado dentro do corpo deve estar consumido. A condição de um `while`/`for` roda a cada volta, então também não pode consumir nada (`while f(give v) > 0` é erro).
+- **`walk`/`while`/`for`**: o corpo não pode consumir um dono declarado fora do laço. Antes de `break` ou `continue`, todo dono declarado dentro do corpo deve estar consumido. A condição de um `while`/`for` roda a cada volta, então também não pode consumir nada (`while f(give v) > 0` é erro).
 - **`&&` e `||`**: o lado direito pode não rodar (curto-circuito), então não pode ter `give`.
 - **`on NaT`**: o bloco é obrigado a divergir (§8.5).
 
@@ -260,14 +262,14 @@ Erros de compilação:
 
 ## 8. Sintaxe
 
-A sintaxe segue o estilo C/Java/Rust. O que é próprio do Kestrel vem do ternário (`tri`, `<=>`, `walk` simétrico, `on NaT`) e da posse (`own`, `lend`, `give`, `burn`).
+A sintaxe segue o estilo C/Java/Rust. O que é próprio do Kestrel vem do ternário (`tri`, `<=>`, `walk` simétrico, `on NaT`) e da posse (`&`, `give`, `burn`).
 
 **Convenção de nomes** (a mesma do Java): procs, variáveis e campos em `camelCase` (`readFile`, `idadeMinima`); tipos (`struct`, `enum`) em `PascalCase` (`TokenKind`); `const` em `MAIÚSCULAS` (`MAX_SIZE`). Os built-ins seguem essa convenção. O compilador não obriga, mas a biblioteca padrão e o `ksc.ks` seguem.
 
 ### 8.1 `proc` e `return`
 
 ```
-proc sum(lent sym v[]: int, k: int) -> int { ... return acc; }
+proc sum(sym &v[]: int, k: int) -> int { ... return acc; }
 proc main() -> int { ... return 0; }
 ```
 
@@ -277,21 +279,54 @@ O ponto de entrada é `main`. Um `proc` sem `-> T` usa `return;` sem valor.
 
 ```
 x: int = 5;          // declaração: o tipo é sempre escrito
-total: int;          // declarada sem valor: vale NaT até receber um
+total: int?;         // sem valor: só com `?`, e começa null
 x = x + 1;            // atribuição
 x += 1;               // o mesmo que x = x + 1  (também -=  *=  /=  %=)
 x++;                  // o mesmo que x += 1     (também x--)
 ```
 
 - **Toda variável tem o tipo escrito.** O compilador nunca adivinha o tipo pelo valor (não existe o `var` do Java).
-- **Sem valor = NaT**, o `null` do Kestrel: `total: int;` vale NaT. Imprimir mostra `NaT`; usar numa conta dispara Trap (como o `NullPointerException`), a não ser com `on NaT`. Vale para números, `bool`, `text` e structs (cada campo fica NaT).
-- Qualquer comparação com NaT dá NaT (`x == NaT` também), como o `NaN` de outras linguagens. Para perguntar se algo está sem valor, use **`isNaT(x)`**, que devolve `bool` e nunca dispara Trap (o `x == null` do Java). Vale para números, `bool`, `text` e enums.
-- Arrays e objetos declarados sem valor (`c: Conta;`) não podem ser usados antes de receber um: isso é **erro de compilação** (`c has no value yet`), porque o compilador acompanha a posse deles. `final` precisa de valor na declaração.
+- **Declarar sem valor exige `?`**: `x: int;` é erro, `x: int?;` começa `null`. Arrays e structs nunca são null, então sempre recebem um valor (um array pode começar vazio: `{}`). `final` precisa de valor na declaração. Veja §8.2.1.
 - `++` e `--` são **comandos**, não expressões (como em Go): `x = i++;` é erro, e não existe `++i`.
 - Valem também em células de buffer: `b[i] += 2;`, `b[i]++;`.
 - Em tri arms, escreva `- =>` com espaço: `-=>` seria lido como `-=` seguido de `>`.
 
 Cada declaração ocupa um slot próprio, então um `x` declarado num bloco interno não sobrescreve o `x` de fora.
+
+#### 8.2.1 `null` e tipos `T?` (null-safety, como em Kotlin)
+
+```
+idade: int? = toInt(texto);      // null se o texto não for um número
+if idade != null {
+    printl(idade + 1);           // aqui `idade` é int
+}
+n: int = toInt(texto);           // ERRO: pode ser null
+k: int = toInt(texto) on NaT { return; };   // ou trate o null na linha
+
+proc metade(x: int) -> int? {
+    if x % 2 != 0 { return null; }
+    return x / 2;
+}
+
+printl(n?.proximo?.valor);       // `?.`: null se algo no caminho for null
+```
+
+- **Um tipo sem `?` nunca é null.** `int`, `text`, `bool`, enums, objetos e interfaces ganham `?` para poder ser null: `int?`, `text?`, `Cor?`, `No?`. Arrays e structs não têm `?` (um struct pode ter campos `?`). Elementos de array também não.
+- Na escrita é `null` (`x: int? = null;`, `return null;`). Por dentro, null é o NaT da VM. A palavra `NaT` só aparece no `on NaT`.
+- **Conferir:** `x == null` e `x != null` devolvem `bool` e são o único teste que aceita null. Comparar um tipo sem `?` com null é erro (nunca seria verdade).
+- **Usar um `T?` como `T`** (numa conta, numa condição, como argumento `T`, num método) só é permitido onde o compilador provou que não é null; senão é erro: `this is int?: it may be null`. Ele prova:
+  - dentro de `if x != null { ... }` (e no `else` de `if x == null`);
+  - depois de `if x == null { return; }` (ou `break`, `continue`, `exit`), até o fim do bloco;
+  - no lado direito de `x != null && ...` e de `x == null || ...`;
+  - dentro de `while x != null { ... }`;
+  - depois de `assert(x != null);`;
+  - depois de atribuir um valor que não é null (`x = 5;`).
+- A prova vale para variáveis e caminhos de campos de objetos (`n.proximo.valor`), não para elementos de arrays nem campos de structs.
+- **A prova se perde** quando algo pode ter mudado o valor: atribuir (`x = null`), atribuir dentro de um `if`/laço/`match` (depois dele, e no laço inteiro), `give` do campo, emprestar o dono numa chamada ou chamar um método do dono.
+- **`a?.b`** e **`a?.m()`**: se `a` for null, o resultado é null (e o método não é chamado); senão, lê `b` ou chama `m`. O resultado é `T?`. Encadeia: `a?.b?.c`. Usar `?.` em algo que nunca é null é erro (use `.`).
+- **Built-ins que podem não ter resultado devolvem `?`**: `toInt(s) -> int?`, `toReal(s) -> real?`, `input() -> int?`. Eles não disparam mais Trap: devolvem null.
+- **Imprimir** um `T?` mostra `null` ou o valor (`printl`, `{x}`, `%s`). Um objeto `T?` precisa ser conferido antes de imprimir.
+- **`on NaT`** também trata um null: `k: int = toInt(s) on NaT { return; };` dá a `k` o tipo `int`.
 
 **`const` × `final`:**
 
@@ -392,14 +427,15 @@ for i: int = 10; i > 0; i -= 2 { ... }   // passo de -2
 ### 8.5 `on NaT` (barreira de veneno)
 
 ```
-s: int = sum(lend b, 2) on NaT { burn b; return -1; };
+s: int = sum(&b, 2) on NaT { burn b; return -1; };
 ```
 
 - É o `try/catch` do Kestrel, preso a uma linha. Enquanto a expressão é calculada, uma conta que falha produz NaT em vez de parar o programa.
 - Se a expressão não for NaT, `s` recebe o valor.
 - Caso contrário, executa o bloco, que precisa divergir (`return`, `break` ou `continue`).
-- Só as contas da própria linha são tratadas. Se um proc chamado nela falhar, o programa para; para avisar quem chamou, o proc usa `return NaT;`.
-- Depois do `;`, `s` com certeza não é NaT.
+- Só as contas da própria linha são tratadas. Se um proc chamado nela falhar, o programa para; para avisar quem chamou, o proc devolve `T?` e usa `return null;`.
+- A expressão também pode ser um `T?` (`toInt(s)`, um proc `-> int?`): null vai para o bloco, e `s` fica com o tipo sem `?`.
+- Depois do `;`, `s` com certeza não é null.
 
 ### 8.6 E/S
 
@@ -519,7 +555,7 @@ print(p);            // Pessoa { nome: "Ana", casa: Ponto { x: 3, y: 5 } }
 - Os campos podem ser números, `text`, enums e outros structs. **Arrays não**: um struct é copiado como um número, e um array tem dono.
 - Um struct não pode conter a si mesmo, nem por meio de outro struct.
 - Para criar, **todos** os campos recebem valor (`Ponto { x: 1, y: 2 }`), em qualquer ordem. Faltar, repetir ou inventar um campo é erro. Os valores são calculados na ordem em que os campos foram declarados.
-- **É copiado**, como um `int`: atribuir, passar para um proc e o `return` fazem cópias. Não precisa de `burn` e não usa `give`/`lend`.
+- **É copiado**, como um `int`: atribuir, passar para um proc e o `return` fazem cópias. Não precisa de `burn` e não usa `give`/`&`.
 - `p.x` lê um campo e `p.x = v` (ou `+=`, `++`...) muda um campo. Com `final`, nem os campos mudam.
 - `print`, `printl`, `{p}` e `%s` mostram o struct inteiro. `==`, `<` e as contas não existem para structs: compare os campos.
 - Por dentro, um struct ocupa um slot por campo (um struct aninhado ocupa os slots dos seus campos). O `dump` mostra cada campo como `p.x`, `p.casa.y`.
@@ -536,11 +572,11 @@ class Conta {
     public proc nova(nome: text) -> Conta {
         return Conta { nome: nome, saldo: 0.0, hist: {} };
     }
-    public proc depositar(lent self, v: real) {   // usa o objeto
+    public proc depositar(&self, v: real) {   // usa o objeto
         self.saldo += v;
         append(self.hist, v);
     }
-    public proc fechar(own self) -> real {        // consome o objeto
+    public proc fechar(self) -> real {        // consome o objeto
         s: real = self.saldo;
         burn self;
         return s;
@@ -555,13 +591,13 @@ total: real = c.fechar(); // depois disto, `c` não existe mais
 
 - Uma classe junta dados e métodos. É declarada fora dos `proc`, e um arquivo pode ter várias.
 - Campos e métodos são **privados** por padrão: só os métodos da própria classe os usam. `public` os deixa visíveis fora.
-- O objeto vive no heap e **tem dono**, como um array: não é copiado (`d: Conta = c;` é erro), passa com `give`/`lend` (parâmetros `own c: Conta` / `lent c: Conta`) e precisa de `burn`, `give` ou `return`.
+- O objeto vive no heap e **tem dono**, como um array: não é copiado (`d: Conta = c;` é erro), passa com `give`/`&` (parâmetros `c: Conta` / `c: &Conta`) e precisa de `burn`, `give` ou `return`.
 - `burn c` libera também os arrays e objetos que os campos de `c` possuem.
-- Um método recebe o objeto como primeiro parâmetro: `lent self` (empresta: pode ler e mudar os campos) ou `own self` (consome: precisa terminar com `burn self`, `give` ou `return`). `c.metodo(...)` passa `c` sozinho. Um método `own self` só pode ser chamado numa variável que é dona do objeto.
+- Um método recebe o objeto como primeiro parâmetro: `&self` (empresta: pode ler e mudar os campos) ou `self` (consome: precisa terminar com `burn self`, `give` ou `return`). `c.metodo(...)` passa `c` sozinho. Um método `self` só pode ser chamado numa variável que é dona do objeto.
 - Método sem `self` é da classe ("static"): `Conta.nova(...)`. Não há construtor especial; o objeto é criado preenchendo todos os campos, e só dentro da classe.
 - Campos podem ser de qualquer tipo, inclusive arrays e outros objetos. Um campo que possui algo (array ou objeto) não pode ser trocado, só alterado por dentro (`append(self.hist, x)`, `self.hist[i] = ...`). Lido de fora, ele vem emprestado.
 - Uma classe não pode ter um campo **obrigatório** dela mesma (nem por outra classe), porque o primeiro objeto nunca poderia ser criado. Para árvores e listas ligadas, use um array (`filhos[]: No`, que pode começar vazio) ou um campo opcional (`proximo: No?`, veja abaixo). Um struct não pode conter objetos.
-- Emprestar o mesmo objeto (ou um campo dele) duas vezes na mesma chamada é erro: `c.f(lend c.hist)`.
+- Emprestar o mesmo objeto (ou um campo dele) duas vezes na mesma chamada é erro: `c.f(&c.hist)`.
 - `print(c)`, `{c}` e `%s` mostram todos os campos, inclusive os privados (para depurar).
 
 #### Arrays de objetos
@@ -570,17 +606,17 @@ total: real = c.fechar(); // depois disto, `c` não existe mais
 contas[]: Conta = {give a, Conta.nova("Bia")};
 append(contas, Conta.nova("Caio"));
 contas[0].depositar(2.5);      // o elemento é emprestado para o método
-ver(lend contas[1]);           // empresta um elemento
+ver(&contas[1]);           // empresta um elemento
 x: Conta = remove(contas, 1);  // tira o objeto do array: agora `x` é o dono
 burn x;
 burn contas;                   // libera o array e todos os objetos dentro dele
 ```
 
 - O array **é dono** dos seus objetos. Eles entram com `give`, ou já novos (`Conta.nova(...)`): `{a}` e `append(v, a)` sem `give` são erro, porque copiariam o objeto.
-- `contas[i]` **fica no array**: chama métodos `lent self`, lê campos públicos e passa com `lend contas[i]`. Para ser dono dele, tire-o com `pop(v)` ou `remove(v, i)`. `x: Conta = contas[0];` é erro.
+- `contas[i]` **fica no array**: chama métodos `&self`, lê campos públicos e passa com `&contas[i]`. Para ser dono dele, tire-o com `pop(v)` ou `remove(v, i)`. `x: Conta = contas[0];` é erro.
 - Todo elemento é um objeto de verdade, nunca vazio. Por isso não existem para arrays de objetos: `claim n` (criaria elementos vazios), `resize` (crescer cria vazios, diminuir perderia objetos) e `clear` (perderia objetos). Trocar um elemento (`contas[0] = ...`) também é erro: tire o antigo com `remove`, dê `burn` nele, e ponha o novo com `insert`.
 - `pop`/`remove` devolvem o objeto, que precisa ser guardado: `pop(contas);` sozinho é erro.
-- Emprestar um elemento e tirar um elemento do mesmo array na mesma chamada é erro: `f(lend contas[0], remove(contas, 0))`.
+- Emprestar um elemento e tirar um elemento do mesmo array na mesma chamada é erro: `f(&contas[0], remove(contas, 0))`.
 - `burn contas` libera cada objeto (e o que eles possuem) antes do array. Um campo `contas[]: Conta` dentro de outra classe funciona igual.
 - O array inteiro não é impresso (como os de struct): imprima elemento por elemento.
 #### Objetos opcionais (`T?`)
@@ -588,67 +624,101 @@ burn contas;                   // libera o array e todos os objetos dentro dele
 ```
 class No {
     public valor: int;
-    public proximo: No?;          // pode estar vazio
-    public proc novo(v: int) -> No { return No { valor: v, proximo: NaT }; }
+    public proximo: No?;          // pode ser null
+    public proc novo(v: int) -> No { return No { valor: v, proximo: null }; }
 }
 
-proc soma(lent n: No?) -> int {
-    if isNaT(n) {
+proc soma(n: &No?) -> int {
+    if n == null {
         return 0;
     }
-    return n.valor + soma(lend n.proximo);   // aqui `n` já foi conferido
+    return n.valor + soma(&n.proximo);   // aqui `n` já foi conferido
 }
 
-if !isNaT(lista.proximo) {
+if lista.proximo != null {
     printl(lista.proximo.valor);             // só aqui dentro
 }
 resto: No? = give lista.proximo;             // tira o objeto; o campo fica vazio
 ```
 
-- `T?` (com `T` uma classe ou interface) é um objeto que **pode estar vazio**. Vazio é NaT: `proximo: NaT` ao criar, `x: No?;` declarado sem valor, e `isNaT(x)` confere. Vale em campos, variáveis, parâmetros (`own n: No?`, `lent n: No?`) e retornos (`-> No?`). Não vale em arrays nem em structs, nem para números e textos (que já podem ser NaT).
-- **O compilador obriga a conferir antes de usar** (como em Kotlin e Swift): chamar um método, ler um campo, emprestar como `lent No` ou guardar num `No` só é permitido onde uma conferência provou que não está vazio:
-  - dentro de `if !isNaT(x) { ... }` (ou no `else` de `if isNaT(x)`);
-  - depois de `if isNaT(x) { return; }` (ou `break`, `continue`, `exit`), até o fim do bloco;
-  - no lado direito de `!isNaT(x) && ...` e de `isNaT(x) || ...`;
-  - dentro de `while !isNaT(x) { ... }`.
-  Usar sem conferir é erro: `this is lent No?: it may be empty`.
-- A conferência vale para variáveis e caminhos de campos (`n.proximo.proximo`), não para elementos de arrays.
-- **A conferência de um campo deixa de valer** quando algo pode tê-lo esvaziado: emprestar o dono (ou um caminho acima do campo) numa chamada, chamar um método do dono (`n.mexer()`), ou `give n.proximo`. Usar o próprio campo (`n.proximo.metodo()`, `lend n.proximo`) não anula. Num laço, o que o corpo pode esvaziar não vale em nenhuma parte dele.
+- Um objeto ou interface `T?` segue as regras de §8.2.1 (`null`, `x == null`, a prova antes de usar, `?.`). Vale em campos, variáveis, parâmetros (`n: No?`, `n: &No?`) e retornos (`-> No?`); não vale em arrays nem em structs.
+- Usar o próprio campo (`n.proximo.metodo()`, `&n.proximo`) não anula a prova sobre ele; emprestar o dono ou chamar um método do dono anula.
 - `give n.proximo` tira o objeto de um campo `T?` e o deixa vazio. Só campos `T?` podem ser dados assim.
 - `n.proximo = x` e `v = x` (com `v: No?`) só funcionam se estiver **vazio**; senão dispara Trap (o objeto antigo seria perdido). Para trocar: `velho: No? = give n.proximo;`, `burn velho;` e então atribua.
 - Uma variável `T?` tem dono como um objeto: precisa de `burn` (que não faz nada se estiver vazia) ou `give`. `burn` de um objeto libera também os campos `T?` que não estão vazios.
 - Ao imprimir um objeto, um campo `T?` (ou de interface) aparece como `...`.
 
+#### Variáveis emprestadas (`&`)
+
+```
+proc tamanho(lista: &No) -> int {
+    n: int = 1;
+    atual: &No? = &lista.proximo;   // só empresta: não é dono
+    while atual != null {
+        n++;
+        atual = &atual.proximo;          // passa a emprestar outro
+    }
+    return n;
+}
+
+c: &Conta = &contas[0];
+c.depositar(5.0);
+burn contas;                                  // ok: `c` não é mais usado
+```
+
+- `x: &T = &caminho;` declara uma variável que **empresta** um array ou objeto (de uma variável, campo ou elemento), como um parâmetro `&`. Ela pode mudar para onde aponta (`x = &...;`, ou `x = null;` se for `T?`), mas não pode dar `burn` nem `give`.
+- Serve para percorrer listas ligadas e árvores com laços, sem recursão (e sem o limite de 6561 chamadas).
+- **Enquanto ela é usada** (até o último comando do bloco que a menciona), o dono do que ela empresta não pode: levar `burn` ou `give`, ter um elemento tirado (`pop`, `remove`, `give a.campo`), nem ser emprestado a uma chamada ou ter um método chamado. Usar a própria variável (`x.metodo()`, `&x`) pode, se ela for a única emprestando daquele dono.
+- Ler o dono (campos, impressão) continua permitido.
+- Uma variável `T?` com dono que é null ainda precisa de `burn` antes de um `return` (o `burn` de null não faz nada).
+
 ### 8.11 `interface`, `@impl` e `@override`
 
 ```
 interface Forma {
-    proc area(lent self) -> real;
-    proc nome(lent self) -> text;
+    proc area(&self) -> real;
+    proc nome(&self) -> text;
 }
 
 @impl(Forma)
 class Circulo {
     raio: real;
     @override
-    public proc area(lent self) -> real { return 3.0 * self.raio * self.raio; }
+    public proc area(&self) -> real { return 3.0 * self.raio * self.raio; }
     @override
-    public proc nome(lent self) -> text { return "circulo"; }
+    public proc nome(&self) -> text { return "circulo"; }
 }
 
-proc mostrar(lent f: Forma) {          // aceita qualquer classe que implemente Forma
+proc mostrar(f: &Forma) {          // aceita qualquer classe que implemente Forma
     printf("{f.nome()}: {f.area()}\n");
 }
 
 c: Circulo = Circulo.novo(1.0);
-mostrar(lend c);
+mostrar(&c);
 ```
 
 - Uma `interface` lista métodos sem corpo, cada um terminado em `;`. Todos recebem `self` e são públicos.
 - `@impl(A, B)` em cima da classe diz quais interfaces ela cumpre. O compilador confere que a classe tem **todos** os métodos de cada uma, públicos e com a mesma assinatura (`self`, parâmetros e retorno).
 - **`@override` é obrigatório** em cada método que cumpre uma interface, e um `@override` que não cumpre nada é erro (pega erros de digitação). Não há herança: cada classe escreve os seus métodos.
-- Um parâmetro `lent f: Forma` aceita `lend c` de qualquer classe que implemente `Forma`, ou `lend f` de outro valor `Forma`. Por dentro, um valor de interface leva o ponteiro do objeto e o número da sua classe, e `f.area()` chama o `area` daquela classe.
-- Pela interface só se chamam métodos dela: os campos e os outros métodos da classe não aparecem. Métodos `own self` não podem ser chamados por uma interface (o objeto está emprestado).
+- Um parâmetro `f: &Forma` aceita `&c` de qualquer classe que implemente `Forma`, ou `&f` de outro valor `Forma`. Por dentro, um valor de interface leva o ponteiro do objeto e o número da sua classe, e `f.area()` chama o `area` daquela classe.
+- Pela interface só se chamam métodos dela: os campos e os outros métodos da classe não aparecem. Métodos `self` não podem ser chamados por uma interface (o objeto está emprestado).
+
+#### Métodos padrão
+
+```
+interface Forma {
+    proc area(&self) -> real;
+    proc nome(&self) -> text;
+    proc descrever(&self) -> text {       // padrão: vale para quem não escrever o seu
+        return self.nome() + " de área " + toText(self.area());
+    }
+}
+```
+
+- Um método de interface com corpo é um **método padrão** (como no Java 8). Uma classe com `@impl(Forma)` que não o escreve ganha esse; uma que o escreve (com `@override`) usa o seu.
+- Dentro dele, `self` é a interface: só os métodos dela aparecem, nunca os campos de uma classe. Precisa ser `&self`.
+- Funciona pela interface (`f.descrever()`) e direto no objeto (`c.descrever()`).
+- Não há herança (decidido até a 1.0): métodos padrão e composição ocupam o lugar dela.
 
 #### Interfaces com dono
 
@@ -657,15 +727,15 @@ f: Forma = Circulo.novo(1.0);              // o objeto passa a ser visto como Fo
 formas[]: Forma = {give f, Poligono.novo(3.0, 4.0)};
 append(formas, Circulo.novo(2.0));
 for i: int = 0; i < len(formas); i++ {
-    mostrar(lend formas[i]);               // cada uma chama o seu `area`
+    mostrar(&formas[i]);               // cada uma chama o seu `area`
 }
 burn formas;                               // libera cada objeto, seja de que classe for
 
 proc criar(quadrado: bool) -> Forma { ... } // pode devolver classes diferentes
 ```
 
-- Uma variável, um campo, um parâmetro `own f: Forma`, um retorno `-> Forma` ou um array `formas[]: Forma` pode **ser dono** de um objeto de qualquer classe que implemente a interface. O objeto entra já novo ou com `give`, e a conversão está escrita no tipo da declaração (`f: Forma = ...`), sem adivinhação. Uma classe que não implementa a interface é erro.
-- O valor com dono segue as mesmas regras de um objeto: `give`, `lend`, `return`, `burn`, e esquecer é erro. Declarado sem valor (`f: Forma;`), não pode ser usado antes de receber um.
+- Uma variável, um campo, um parâmetro `f: Forma`, um retorno `-> Forma` ou um array `formas[]: Forma` pode **ser dono** de um objeto de qualquer classe que implemente a interface. O objeto entra já novo ou com `give`, e a conversão está escrita no tipo da declaração (`f: Forma = ...`), sem adivinhação. Uma classe que não implementa a interface é erro.
+- O valor com dono segue as mesmas regras de um objeto: `give`, `&`, `return`, `burn`, e esquecer é erro. Declarado sem valor (`f: Forma;`), não pode ser usado antes de receber um.
 - Pela interface só aparecem os métodos dela: `f.raio` é erro, e o valor não pode ser impresso inteiro (imprima o que os métodos devolvem).
 - `burn f` olha a classe do objeto para liberar também o que os campos dele possuem.
 - Arrays de interfaces seguem as regras dos arrays de objetos: `formas[i]` fica no array (emprestado), sai com `pop`/`remove`, e não valem `claim`, `resize`, `clear` nem `formas[i] = ...`.
@@ -673,7 +743,7 @@ proc criar(quadrado: bool) -> Forma { ... } // pode devolver classes diferentes
 #### Descobrir a classe: `is` e `match`
 
 ```
-proc descrever(lent f: Forma) {
+proc descrever(f: &Forma) {
     if f is Circulo {
         printl("raio", f.raio);       // aqui `f` é um Circulo
     } else {
@@ -692,11 +762,44 @@ if f is Circulo {
 ```
 
 - `f is Circulo` devolve um `bool`: se o valor de interface guarda um objeto daquela classe (`false` se for um `T?` vazio). A classe precisa implementar a interface, senão é erro (nunca seria verdade). Como em Kotlin, usa-se `is` e não `==`: `==` compara valores, `is` pergunta o tipo.
-- Onde o `is` provou a classe, **o próprio `f` passa a ser daquela classe**: campos públicos, todos os métodos, `lend f` para um `lent c: Circulo` e, se `f` tem dono, `give f` para um `Circulo`. Vale nos mesmos lugares da conferência do `isNaT`: dentro do `if`, depois de `if !(f is C) { return; }`, depois de `&&`, e para variáveis e caminhos de campos (`d.principal`), não para elementos de arrays (`fs[i] is Circulo` funciona como teste, sem mudar o tipo).
+- Onde o `is` provou a classe, **o próprio `f` passa a ser daquela classe**: campos públicos, todos os métodos, `&f` para um `c: &Circulo` e, se `f` tem dono, `give f` para um `Circulo`. Vale nos mesmos lugares da prova do `x != null` (§8.2.1): dentro do `if`, depois de `if !(f is C) { return; }`, depois de `&&`, e para variáveis e caminhos de campos (`d.principal`), não para elementos de arrays (`fs[i] is Circulo` funciona como teste, sem mudar o tipo).
 - `match f { Classe => ...; }` escolhe pela classe. Num ramo com uma só classe, `f` é daquela classe; num ramo com várias (`A | B`), continua sendo a interface. Sem `else`, o `match` precisa cobrir todas as classes que implementam a interface. Funciona em variáveis e campos (para um elemento, passe-o a um proc).
 - Não há um nome novo por ramo (`Circulo c =>`): seria um segundo nome para o mesmo objeto, e a posse evita isso. É como o `when` do Kotlin.
 
-### 8.12 `assert`, `@test` e `@deprecated`
+### 8.12 Genéricos
+
+```
+class List<T> {
+    items[]: T;
+    public proc new() -> List<T> {
+        xs[]: T = {};
+        return List<T> { items: give xs };
+    }
+    public proc add(&self, x: T) { append(self.items, give x); }
+    public proc size(&self) -> int { return len(self.items); }
+}
+
+proc maior<T extends Forma>(a: &T, b: &T) -> real {
+    if a.area() > b.area() { return a.area(); }
+    return b.area();
+}
+
+ns: List<int> = List<int>.new();      // o tipo sempre escrito
+ns.add(3);
+qs: List<Quadrado> = List<Quadrado>.new();
+m: real = maior<Quadrado>(&q, &p);
+```
+
+- Classes e procs podem ter **parâmetros de tipo**: `class Box<T>`, `class Map<K, V>`, `proc maior<T extends Forma>`. Structs, enums e métodos não (um método usa os parâmetros da classe).
+- **O tipo é sempre escrito**, nunca deduzido: `List<int>.new()`, `maior<Quadrado>(...)`, `x: Box<text>`, `Box<T> { ... }` dentro da classe.
+- `T` pode ser **qualquer tipo**: números (`List<int>`, sem as caixas `Integer` do Java), `text`, enums, structs, classes, interfaces, `T?` e outros genéricos (`List<List<int>>`). Arrays não (`List<int[]>`): use uma classe que guarde o array.
+- **O código genérico é conferido uma vez para todo `T` possível.** Um `T` pode ser um objeto, então ele é tratado como um: move-se com `give`, empresta-se com `&`, precisa de `burn`, e não pode ser copiado (`return self.v` de um campo `T` é erro). Sem `extends`, um `T` não tem métodos nem campos.
+- `T extends Forma`: o `T` precisa implementar a interface `Forma`, e o código pode chamar os métodos dela. Usar com um tipo que não a implementa é erro (`int` não implementa `Forma`).
+- Quando `T` vira um valor (`List<int>`), `give`, `&` e `burn` dele apenas copiam (e o `burn` não faz nada).
+- **Por dentro, há uma cópia do código por tipo usado** (como C++ e Rust), não *type erasure* como no Java: os valores têm tamanhos diferentes, e assim cada cópia é tão rápida quanto código escrito à mão.
+- Ainda não: `Object` (`==`, `hashCode` e impressão em qualquer `T`), `Comparable` (`<` num `T`), coringas (`? extends T`, `? super T`), métodos devolvendo `&T`.
+
+### 8.13 `assert`, `@test` e `@deprecated`
 
 ```
 @test
@@ -716,7 +819,7 @@ proc soma(a: int, b: int) -> int { return a + b; }
 - `@deprecated` (ou `@deprecated("use outra")`) marca um proc, um método ou uma classe como **obsoleto**. Continua funcionando, mas cada uso fora dele mostra um aviso (`warning:`) com a mensagem, e a compilação segue. Dentro da própria classe (ou do próprio proc) não há aviso.
 - Onde cada anotação vale: proc (`@test`, `@deprecated`), método (`@override`, `@deprecated`), classe (`@impl(...)`, `@deprecated`). Uma anotação desconhecida, ou no lugar errado, é erro.
 
-### 8.13 Limites do compilador
+### 8.14 Limites do compilador
 
 | Limite | Valor | Ao passar |
 |---|---|---|
@@ -787,7 +890,7 @@ Os saltos usam um **offset absoluto em bytes** (`u32`) dentro do código da pró
 
 ```ebnf
 program    = { const_decl | proc_decl | enum_decl | struct_decl | class_decl | iface_decl } ;
-iface_decl = "interface" IDENT "{" { "proc" IDENT "(" ( "lent" | "own" ) "self" { "," param } ")" [ "->" ret_type ] ";" } "}" ;
+iface_decl = "interface" IDENT "{" { "proc" IDENT "(" [ "&" ] "self" { "," param } ")" [ "->" ret_type ] ";" } "}" ;
 class_decl = { annotation } "class" IDENT "{" { member } "}" ;
 member     = [ "public" | "private" ] ( field | proc_decl ) ;
 field      = [ "sym" ] IDENT [ "[" "]" ] ":" type ";" ;
@@ -796,7 +899,7 @@ struct_decl = "struct" IDENT "{" { IDENT ":" type ";" } "}" ;
 enum_decl  = "enum" IDENT "{" [ IDENT [ "=" expr ] { "," IDENT [ "=" expr ] } [ "," ] ] "}" ;
 const_decl = "const" IDENT ":" scalar "=" expr ";" ;
 proc_decl  = "proc" IDENT "(" [ param { "," param } ] ")" [ "->" ret_type ] block ;
-param      = IDENT ":" type | ( "own" | "lent" ) ( [ "sym" ] IDENT "[" "]" ":" elem | IDENT ":" IDENT | "self" ) ;
+param      = IDENT ":" [ "&" ] type | [ "sym" ] [ "&" ] IDENT "[" "]" ":" elem | [ "&" ] "self" ;
 ret_type   = type | [ "sym" ] elem "[" "]" ;
 type       = scalar | "bool" | "text" | IDENT ;
 scalar     = "trit" | "tryte" | "int" | "real" ;
@@ -843,14 +946,14 @@ primary    = literal | IDENT | IDENT "(" [ arg { "," arg } ] ")"
            | "claim" expr | "{" [ expr { "," expr } [ "," ] ] "}"
            | IDENT "{" IDENT ":" expr { "," IDENT ":" expr } [ "," ] "}"
            | "input" "(" ")" | "len" "(" expr ")" | "(" expr ")" ;
-arg        = [ "give" | "lend" ] expr ;
+arg        = [ "give" | "&" ] expr ;
 ```
 
 
 ### Exemplo
 
 ```
-proc sum(lent sym v[]: int, k: int) -> int {
+proc sum(sym &v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k {
         acc += v[i];
@@ -864,7 +967,7 @@ proc main() -> int {
         b[i] = i * i;
     }
 
-    s: int = sum(lend b, 2) on NaT { burn b; return -1; };
+    s: int = sum(&b, 2) on NaT { burn b; return -1; };
     s = s << 1;                    // s = s * 3
 
     tri s <=> 10 {

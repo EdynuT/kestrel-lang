@@ -238,7 +238,9 @@ pub enum HExprKind {
     /// `d.m(args)` on an interface value: calls the method of the object's
     /// class, chosen by its class number from `impls`. `args[0]` is the
     /// receiver (a lent interface value: pointer and class number).
-    DynCall { impls: Vec<(i64, ProcId)>, args: Vec<HExpr> },
+    /// Each entry: class number, the proc, and whether it takes the receiver
+    /// whole (a default method: pointer and class number) or just the pointer.
+    DynCall { impls: Vec<(i64, ProcId, bool)>, args: Vec<HExpr> },
     /// A field of an array element, `pts[i].x`: the array (a pointer),
     /// index, offset of the field inside the element.
     ElemField(Box<HExpr>, Box<HExpr>, usize),
@@ -248,6 +250,10 @@ pub enum HExprKind {
     /// `f is Circulo`: an interface value (pointer and class number), the
     /// class's number and its name. False when it is empty.
     IsClass(Box<HExpr>, i64, &'static str),
+    /// `value` stored in the hidden local `tmp`; if it is null the result is
+    /// `null` (or NaT of the node's type when `None`), otherwise `then`
+    /// (which reads `tmp`, now known not null). For `a?.b` and printing `T?`.
+    IfNull { value: Box<HExpr>, tmp: LocalId, then: Box<HExpr>, null: Option<Box<HExpr>> },
 }
 
 impl HBlock {

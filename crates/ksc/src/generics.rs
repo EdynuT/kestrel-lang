@@ -430,7 +430,13 @@ fn walk_stmt(s: &mut Stmt, f: &mut dyn FnMut(Site)) {
             walk_expr(value, f);
         }
         StmtKind::Burn(_) | StmtKind::Break | StmtKind::Continue | StmtKind::Return(None) => {}
-        StmtKind::Return(Some(e)) | StmtKind::Expr(e) => walk_expr(e, f),
+        StmtKind::Return(Some(e)) | StmtKind::Expr(e) | StmtKind::Throw(e) => walk_expr(e, f),
+        StmtKind::Try { body, catches } => {
+            walk_block(body, f);
+            for c in catches {
+                walk_block(&mut c.body, f);
+            }
+        }
         StmtKind::Tri { head, neg, zero, pos } => {
             walk_expr(head, f);
             for b in [neg, zero, pos] {

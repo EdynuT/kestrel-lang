@@ -146,6 +146,10 @@ pub enum Op {
     RetN(u16),
     /// Stop with a trap; the reason is string `k`.
     Trap(u32),
+    /// Pop an error (object pointer, class number) and go to the nearest
+    /// handler that covers this instruction, in this function or a caller
+    /// (see `ksb::Handler`); with none, the program stops.
+    Throw,
 
     // I/O
     Input,
@@ -279,6 +283,7 @@ impl Op {
             Ret => 0x54,
             RetN(_) => 0x56,
             Trap(_) => 0x55,
+            Throw => 0x57,
 
             Input => 0x60,
             Emit => 0x61,
@@ -374,6 +379,7 @@ impl Op {
             Br3 { .. } => "br3",
             Call { .. } => "call",
             Ret => "ret",
+            Throw => "throw",
             RetN(_) => "retn",
             Trap(_) => "trap",
             Input => "input",
@@ -547,6 +553,7 @@ impl Op {
             0x54 => Ret,
             0x55 => Trap(r.u32()?),
             0x56 => RetN(r.u16()?),
+            0x57 => Throw,
             0x60 => Input,
             0x61 => Emit,
             0x62 => Print,
@@ -653,7 +660,7 @@ mod tests {
             FAdd, FSub, FMul, FDiv, FPow, FNeg, FCmp3,
             TLen, TIdx, Narrow6, Narrow1, IToF, FToI, TStr, TStrT, TStrV, TCat, TEq, TSub, TToI, TToF, CharIs(2),
             Alloc, LdIdx, StIdx, Purge(8), AllocZ, Pack { n: 3, sym: true }, AllocT { w: 2, sym: false }, PackT { n: 3, w: 2, sym: true }, LdElem { off: 1, n: 2 }, StElem { off: 0, n: 1 }, Append, PopEl, Insert, Remove, Resize, Clear, Replace, Hash, HashMix, TCmp,
-            Jmp(12), JNat(u32::MAX), Br3 { neg: 1, zero: 2, pos: 3 }, Call { f: 2, argc: 3 }, Ret, RetN(3),
+            Jmp(12), JNat(u32::MAX), Br3 { neg: 1, zero: 2, pos: 3 }, Call { f: 2, argc: 3 }, Ret, RetN(3), Throw,
             Input, Emit, Print, Show, Dump(5), ShowT, ShowV,
             ReadFile, FileExists, WriteFile, WriteBytes, ReadLine, Eof, ArgCount, Arg, Exit,
         ]

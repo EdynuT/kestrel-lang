@@ -14,6 +14,8 @@ use kestrel_core::{Module, Real, Word, Word27};
 
 /// Deepest call chain before the VM traps with a stack overflow.
 pub use kestrel_core::limits::MAX_CALL_DEPTH as MAX_DEPTH;
+/// The reason given when [`Vm::with_fuel`]'s limit runs out.
+const FUEL: &str = "out of fuel";
 /// Largest buffer `claim` may create, in cells.
 pub const MAX_CELLS: i64 = 1 << 24;
 /// Limit on characters in texts made at run time that are alive at once
@@ -95,6 +97,8 @@ struct Frame {
     locals: Vec<Value>,
     /// Set by `soft` (an `on NaT` line): failed arithmetic gives NaT instead of trapping.
     soft: bool,
+    /// Stack height when the frame started: a handler starts with the stack cut back to it.
+    base: usize,
 }
 
 pub struct Vm<'m, R, W> {
@@ -123,6 +127,11 @@ pub struct Vm<'m, R, W> {
     output: W,
     /// Byte offset of the instruction being executed, for trap reports.
     op_at: usize,
+    /// Where each `Trap` error made from a failure came from (by its
+    /// block), to report it as a trap if nothing catches it.
+    traps: std::collections::HashMap<u32, Trap>,
+    /// An error no frame caught: the program stops with it.
+    escaped: Option<Trap>,
 }
 
 type Step = Result<Option<Value>, String>;
@@ -146,6 +155,8 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             input,
             output,
             op_at: 0,
+            traps: std::collections::HashMap::new(),
+            escaped: None,
         }
     }
 
@@ -165,18 +176,84 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
 
     pub fn run(&mut self) -> Result<Value, Trap> {
         let entry = self.module.entry as usize;
-        let result = self.enter(entry, Vec::new()).and_then(|()| loop {
-            if let Some(v) = self.step()? {
-                break Ok(v);
-            }
-        });
+        let result = match self.enter(entry, Vec::new()) {
+            Ok(()) => self.go(),
+            Err(reason) => Err(Trap { func: self.module.functions[entry].name.clone(), at: 0, reason }),
+        };
         let _ = self.output.flush();
-        result.map_err(|reason| {
-            let func = self.frames.last().map_or(entry, |f| f.func);
-            let trap = Trap { func: self.module.functions[func].name.clone(), at: self.op_at, reason };
+        if result.is_err() {
             self.scrub();
-            trap
-        })
+        }
+        result
+    }
+
+    fn go(&mut self) -> Result<Value, Trap> {
+        loop {
+            match self.step() {
+                Ok(Some(v)) => return Ok(v),
+                Ok(None) => {}
+                Err(reason) => {
+                    if let Some(t) = self.escaped.take() {
+                        return Err(t);
+                    }
+                    let func = self.frames.last().map_or(self.module.entry as usize, |f| f.func);
+                    let trap = Trap { func: self.module.functions[func].name.clone(), at: self.op_at, reason };
+                    // Running out of fuel (a test's limit) is not the program's failure.
+                    if trap.reason == FUEL {
+                        return Err(trap);
+                    }
+                    // The failure becomes a `Trap` error, which a `catch` may take.
+                    let reason = trap.reason.chars().collect();
+                    if self.make_text(reason).is_err() {
+                        return Err(trap);
+                    }
+                    let text = self.pop().expect("the text was pushed");
+                    let p = self.alloc(vec![text], 1, false);
+                    self.traps.insert(p.block, trap);
+                    let tag = Value::Word(Word::new(kestrel_core::class_tag(kestrel_core::TRAP_CLASS)));
+                    if self.throw(Value::Ptr(p), tag).is_err() {
+                        return Err(self.escaped.take().expect("set by throw"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sends an error (object pointer, class number) to the nearest handler
+    /// covering the failing instruction: in this function, or else in the
+    /// caller, at its call, and so on. Each frame left is dropped. With no
+    /// handler at all, sets `escaped` and fails.
+    fn throw(&mut self, obj: Value, tag: Value) -> Result<(), String> {
+        let mut at = self.op_at;
+        loop {
+            let frame = self.frames.last_mut().expect("a frame is active while running");
+            let f = &self.module.functions[frame.func];
+            if let Some(h) = f.handlers.iter().find(|h| h.start as usize <= at && at < h.end as usize) {
+                frame.pc = h.target as usize;
+                frame.soft = false;
+                let base = frame.base;
+                self.stack.truncate(base);
+                self.stack.push(obj);
+                self.stack.push(tag);
+                return Ok(());
+            }
+            let base = frame.base;
+            self.frames.pop();
+            self.stack.truncate(base);
+            match self.frames.last() {
+                // The call instruction ends just before the caller's `pc`.
+                Some(caller) => at = caller.pc - 1,
+                None => {
+                    let trap = match obj {
+                        Value::Ptr(p) => self.traps.remove(&p.block),
+                        _ => None,
+                    };
+                    let name = self.module.functions[self.module.entry as usize].name.clone();
+                    self.escaped = Some(trap.unwrap_or(Trap { func: name, at: 0, reason: "an error was not caught".into() }));
+                    return Err(String::new());
+                }
+            }
+        }
     }
 
     /// Zero every heap cell and register (forensic wipe before aborting).
@@ -200,14 +277,15 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         let f = &self.module.functions[func];
         let mut locals = vec![Value::Word(Word::ZERO); usize::from(f.locals)];
         locals[..args.len()].copy_from_slice(&args);
-        self.frames.push(Frame { func, pc: 0, locals, soft: false });
+        let base = self.stack.len();
+        self.frames.push(Frame { func, pc: 0, locals, soft: false, base });
         Ok(())
     }
 
     fn step(&mut self) -> Step {
         if let Some(f) = &mut self.fuel {
             if *f == 0 {
-                return Err("out of fuel".into());
+                return Err(FUEL.into());
             }
             *f -= 1;
         }
@@ -498,6 +576,11 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 self.push(Value::Word(r));
             }
             Op::Trap(k) => return Err(self.module.strings[k as usize].clone()),
+            Op::Throw => {
+                let tag = self.pop()?;
+                let obj = self.pop()?;
+                self.throw(obj, tag)?;
+            }
             Op::JNat(a) => {
                 if self.stack.last().is_some_and(|v| v.is_nat()) {
                     self.stack.pop();

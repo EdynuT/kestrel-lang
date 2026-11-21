@@ -224,6 +224,8 @@ struct Sig {
     refs: Vec<bool>,
     ret: Type,
     span: Span,
+    /// `throws A, B`: names of error classes (or `Error`), checked in `check_proc`.
+    throws: Vec<&'static str>,
 }
 
 /// Names declared in one block. `names` keeps the latest local per name, so
@@ -396,6 +398,8 @@ struct IfaceMethod {
     ret: Type,
     /// The proc of a default method (`Forma.descrever`), if it has a body.
     default: Option<ProcId>,
+    /// `throws ...`: what the classes' methods may throw, at most.
+    throws: Vec<&'static str>,
 }
 
 struct EnumInfo {
@@ -520,6 +524,7 @@ impl Checker {
             this: None,
             params: vec![ast::Param { name: ast::Ident { name: "v".into(), span: sp }, ty: int, mode: None }],
             ret: Some(ast::TypeExpr { ty: Type::Text, span: sp }),
+            throws: Vec::new(),
             body: ast::Block { stmts, span: sp },
         };
         self.enums.insert(name.clone(), EnumInfo { name: ast::intern(name), variants, name_proc });
@@ -763,7 +768,8 @@ impl Checker {
                 default = Some(self.proc_ids[&decl.name.name]);
                 defaults.push(decl);
             }
-            methods.push(IfaceMethod { name: m.name.name.clone(), this: m.this, params, ret, default });
+            let throws = m.throws.iter().map(|t| ast::intern(&t.name)).collect();
+            methods.push(IfaceMethod { name: m.name.name.clone(), this: m.this, params, ret, default, throws });
         }
         // Every interface has the `Object` methods (every class has them).
         let lent = Some(ast::SelfMode::Lent);
@@ -774,7 +780,7 @@ impl Checker {
         ];
         for (n, params, ret) in object {
             if !methods.iter().any(|m| m.name == n) {
-                methods.push(IfaceMethod { name: n.to_string(), this: lent, params, ret, default: None });
+                methods.push(IfaceMethod { name: n.to_string(), this: lent, params, ret, default: None, throws: Vec::new() });
             }
         }
         self.ifaces.get_mut(&d.name.name).expect("registered").methods = methods;
@@ -839,6 +845,11 @@ impl Checker {
                     }
                     if !m.public {
                         return Err(err(format!("`{class}.{}` must be public: it fills in `{iname}`", im.name), decl.decl.name.span));
+                    }
+                    // Whoever calls it through the interface handles only what the interface lists.
+                    if let Some(t) = sig.throws.iter().find(|t| !im.throws.contains(t) && !im.throws.contains(&crate::object::ERROR)) {
+                        return Err(err(format!("`{class}.{}` throws `{t}`, which `{iname}.{}` does not list", im.name, im.name), decl.decl.name.span)
+                            .with_note(format!("add it to the `throws` of `{iname}.{}`, or catch it inside the method", im.name)));
                     }
                     if !decl.annotations.iter().any(|a| a.name.name == "override") {
                         return Err(err(format!("`{}` comes from `{iname}`; mark it `@override`", im.name), decl.decl.name.span));
@@ -1294,8 +1305,15 @@ impl Checker {
                 }
             }
         }
+        let mut throws: Vec<&'static str> = Vec::new();
+        for t in &p.throws {
+            if throws.contains(&t.name.as_str()) {
+                return Err(err(format!("`{}` is listed twice in `throws`", t.name), t.span));
+            }
+            throws.push(ast::intern(&t.name));
+        }
         self.proc_ids.insert(name.clone(), id);
-        self.sigs.push(Sig { params, refs, ret, span: p.name.span });
+        self.sigs.push(Sig { params, refs, ret, span: p.name.span, throws });
         Ok(())
     }
 
@@ -1822,8 +1840,9 @@ impl Checker {
             .collect();
         let refs = vec![false; all.len()];
         let body = HBlock { stmts: Vec::new(), scope: Vec::new(), span: Span::default() };
-        self.extra.push(HProc { name: name.clone(), params: all.len(), ret, locals, body, refs: refs.clone(), link: Link::Dispatch });
-        self.sigs.push(Sig { params: all, refs, ret, span: Span::default() });
+        let throws = self.ifaces[i].methods.iter().find(|x| x.name == m).map(|x| x.throws.clone()).unwrap_or_default();
+        self.extra.push(HProc { name: name.clone(), params: all.len(), ret, locals, body, refs: refs.clone(), link: Link::Dispatch, throws: throws.clone() });
+        self.sigs.push(Sig { params: all, refs, ret, span: Span::default(), throws });
         self.proc_ids.insert(name.clone(), id);
         self.dispatchers.insert(name, id);
         id
@@ -1841,7 +1860,17 @@ impl Checker {
                 .map(|(x, (_, ty))| Local { name: x.name.name.clone(), ty: *ty, kind: LocalKind::Param, span: x.name.span, is_final: false })
                 .collect();
             let body = HBlock { stmts: Vec::new(), scope: Vec::new(), span: p.body.span };
-            return Ok(HProc { name: p.name.name.clone(), params: p.params.len(), ret: sig.ret, locals, body, refs: sig.refs, link });
+            return Ok(HProc { name: p.name.name.clone(), params: p.params.len(), ret: sig.ret, locals, body, refs: sig.refs, link, throws: sig.throws });
+        }
+        for (t, written) in sig.throws.iter().zip(&p.throws) {
+            self.error_class(t, written.span)?;
+        }
+        let tested = self.tests.iter().any(|(_, id)| *id == self.proc_ids[&p.name.name]);
+        if let Some(t) = p.throws.first()
+            && (p.name.name == "main" || tested)
+        {
+            return Err(err(format!("`{}` cannot throw: nothing outside it would catch the error", p.name.name), t.span)
+                .with_note("catch it inside, with `try { ... } catch e: Error { ... }`"));
         }
         self.f = FnCx::new(sig.ret);
         self.f.instance = p.instance;
@@ -1869,7 +1898,24 @@ impl Checker {
             return Err(err(format!("`{}` must end with `return` (it returns {})", p.name.name, sig.ret), end));
         }
         let f = std::mem::replace(&mut self.f, FnCx::new(Type::Void));
-        Ok(HProc { name: p.name.name.clone(), params: p.params.len(), ret: sig.ret, locals: f.locals, body, refs: sig.refs.clone(), link })
+        Ok(HProc { name: p.name.name.clone(), params: p.params.len(), ret: sig.ret, locals: f.locals, body, refs: sig.refs.clone(), link, throws: sig.throws })
+    }
+
+    /// The class named in a `throws`, a `catch` or a `throw`: one with
+    /// `@impl(Error)` (its name and number), or `None` for `Error` itself.
+    fn error_class(&self, name: &str, span: Span) -> R<Option<(&'static str, i64)>> {
+        if name == crate::object::ERROR {
+            return Ok(None);
+        }
+        match self.classes.get(name) {
+            Some(c) if self.ifaces[crate::object::ERROR].impls.contains(&c.name) => Ok(Some((c.name, self.class_tags[c.name]))),
+            Some(_) => Err(err(format!("`{name}` is not an error"), span).with_note(format!(
+                "an error is a class with `@impl(Error)` and `@override public proc message(&self) -> text`; add them to `{name}`"
+            ))),
+            None if self.ifaces.contains_key(name) => Err(err(format!("`{name}` is an interface, not an error class"), span)
+                .with_note("name a class with `@impl(Error)`, or `Error` for any error")),
+            None => Err(self.unknown(name, span)),
+        }
     }
 
     // ---- scopes ----
@@ -1931,7 +1977,7 @@ impl Checker {
         }
         // What a compound statement assigns inside may be null after it (and,
         // in a loop, before that point too): forget what was proved about it.
-        if matches!(s.kind, StmtKind::If { .. } | StmtKind::Tri { .. } | StmtKind::Match { .. } | StmtKind::While { .. } | StmtKind::For { .. } | StmtKind::Walk { .. }) {
+        if matches!(s.kind, StmtKind::If { .. } | StmtKind::Tri { .. } | StmtKind::Match { .. } | StmtKind::While { .. } | StmtKind::For { .. } | StmtKind::Walk { .. } | StmtKind::Try { .. }) {
             let mut targets = Vec::new();
             assigned_in(s, &mut targets);
             for t in &targets {
@@ -2006,6 +2052,49 @@ impl Checker {
                 self.note_size(local, &value);
                 self.f.locals[local].is_final = *is_final;
                 HStmtKind::Let { local, value, on_nat }
+            }
+            StmtKind::Throw(e) => {
+                // `throw e;` gives `e` away, as `return e;` does.
+                let h = match &e.kind {
+                    ExprKind::Var(name) => {
+                        let id = self.lookup(name).ok_or_else(|| self.unknown(name, e.span))?;
+                        self.give(id, e.span)?
+                    }
+                    _ => self.expr(e, None)?,
+                };
+                let error = self.ifaces[crate::object::ERROR].name;
+                let class = match h.ty {
+                    Type::Class(c) => self.error_class(c, h.span)?.map(|(c, _)| c),
+                    Type::Iface(i) if i == error => None,
+                    Type::LentClass(_) | Type::LentIface(_) => {
+                        return Err(err("cannot throw something borrowed", e.span)
+                            .with_note("throw an error you own, like `throw NotFound(path);`"));
+                    }
+                    t => {
+                        return Err(err(format!("`throw` needs an error (an object of a class with `@impl(Error)`), found {t}"), e.span));
+                    }
+                };
+                HStmtKind::Throw { value: self.coerce(h, Type::Iface(error))?, class }
+            }
+            StmtKind::Try { body, catches } => {
+                let body = self.block(body)?;
+                let mut out = Vec::new();
+                for c in catches {
+                    let class = self.error_class(&c.class.name, c.class.span)?;
+                    let ty = match class {
+                        Some((n, _)) => Type::Class(n),
+                        None => Type::Iface(self.ifaces[crate::object::ERROR].name),
+                    };
+                    // The caught error is a variable of the catch block: it owns the error.
+                    self.f.scopes.push(Scope::default());
+                    let local = self.new_local(&c.var.name, ty, LocalKind::Let, c.var.span);
+                    let b = self.block(&c.body);
+                    self.f.scopes.pop();
+                    let mut b = b?;
+                    b.scope.push(local);
+                    out.push(HCatch { local, class, body: b, span: c.class.span });
+                }
+                HStmtKind::Try { body, catches: out }
             }
             StmtKind::Assign { target, value } => {
                 let nonnull = self.never_null(value);
@@ -3831,6 +3920,10 @@ fn assigned_in<'a>(s: &'a ast::Stmt, out: &mut Vec<&'a Expr>) {
             block(body, out);
         }
         StmtKind::Match { arms, .. } => arms.iter().for_each(|a| block(&a.body, out)),
+        StmtKind::Try { body, catches } => {
+            block(body, out);
+            catches.iter().for_each(|c| block(&c.body, out));
+        }
         _ => {}
     }
 }
@@ -3865,7 +3958,13 @@ fn visit_stmt(s: &ast::Stmt, f: &mut dyn FnMut(&Expr)) {
             visit_expr(target, f);
             visit_expr(value, f);
         }
-        StmtKind::Return(Some(e)) | StmtKind::Expr(e) | StmtKind::Assert { cond: e, .. } => visit_expr(e, f),
+        StmtKind::Return(Some(e)) | StmtKind::Expr(e) | StmtKind::Assert { cond: e, .. } | StmtKind::Throw(e) => visit_expr(e, f),
+        StmtKind::Try { body, catches } => {
+            visit_block(body, f);
+            for c in catches {
+                visit_block(&c.body, f);
+            }
+        }
         StmtKind::Return(None) | StmtKind::Burn(_) | StmtKind::Break | StmtKind::Continue => {}
         StmtKind::Tri { head, neg, zero, pos } => {
             visit_expr(head, f);

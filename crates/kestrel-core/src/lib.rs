@@ -16,6 +16,10 @@ pub use ksb::Module;
 pub use real::Real;
 pub use word::Word;
 
+/// The class of the error a VM failure becomes (overflow, division by zero,
+/// a bad index...): a program catches it with `catch e: Trap`.
+pub const TRAP_CLASS: &str = "Trap";
+
 /// A class's number, from its name (FNV-1a), so every file of a program
 /// gives a class the same one without talking to the others; never 0.
 pub fn class_tag(name: &str) -> i64 {

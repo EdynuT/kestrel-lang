@@ -125,6 +125,8 @@ fn stmt_uses(s: &HStmt, id: LocalId) -> bool {
         HStmtKind::Walk { var, span_tmp, start, end, body, .. } => {
             *var == id || span_tmp.as_ref().is_some_and(|(_, k)| e(k)) || e(start) || e(end) || b(body)
         }
+        HStmtKind::Throw { value, .. } => e(value),
+        HStmtKind::Try { body, catches } => b(body) || catches.iter().any(|c| c.local == id || b(&c.body)),
     }
 }
 
@@ -403,32 +405,52 @@ impl Checker<'_> {
                         ends.push((label, end));
                     }
                 }
-                let Some((_, mut first)) = ends.first().cloned() else {
-                    return Ok(None); // every arm diverges
+                let what = match origin {
+                    Branch::Tri => "the arms of this `tri`",
+                    Branch::If => "the branches of this `if`",
+                    Branch::Match => "the arms of this `match`",
                 };
-                for (_, other) in &ends[1..] {
-                    if let Some(id) = (0..first.len()).find(|&i| !first[i].agrees(other[i])) {
-                        let detail: Vec<String> =
-                            ends.iter().map(|(label, s)| format!("{label}: {}", s[id].describe())).collect();
-                        let what = match origin {
-                            Branch::Tri => "the arms of this `tri`",
-                            Branch::If => "the branches of this `if`",
-                            Branch::Match => "the arms of this `match`",
-                        };
-                        return Err(Diagnostic::new(
-                            format!("{what} leave `{}` in different states", self.name(id)),
-                            s.span,
-                        )
-                        .with_note(format!("{} (every path that continues must agree)", detail.join(", "))));
-                    }
-                    // If any arm gave the buffer away, its name cannot be reused afterwards.
-                    for (f, o) in first.iter_mut().zip(other) {
-                        if *o == St::Given {
-                            *f = St::Given;
-                        }
+                match self.merge(&ends, what, s.span)? {
+                    Some(m) => st = m,
+                    None => return Ok(None), // every arm diverges
+                }
+            }
+            HStmtKind::Throw { value, .. } => {
+                // What is still owned here is freed when the error leaves the block.
+                self.expr(value, &mut st)?;
+                return Ok(None);
+            }
+            HStmtKind::Try { body, catches } => {
+                let entry = st.clone();
+                let mut ends: Vec<(&str, State)> = Vec::new();
+                if let Some(end) = self.block(body, st)? {
+                    ends.push(("the `try` block", end));
+                }
+                // An error may leave the body anywhere: what the body changed
+                // is freed then, so each catch starts with it gone (a `T?`
+                // with it empty, which is a value).
+                let mut changed = Vec::new();
+                changed_in(body, &mut changed);
+                let mut start = entry.clone();
+                for id in changed {
+                    start[id] = match entry[id] {
+                        St::Untracked => St::Untracked,
+                        _ if self.p.locals[id].ty.is_opt() => St::Alive,
+                        St::Empty => St::Empty,
+                        _ => St::Burned,
+                    };
+                }
+                for c in catches {
+                    let mut at = start.clone();
+                    at[c.local] = St::Alive;
+                    if let Some(end) = self.block(&c.body, at)? {
+                        ends.push(("a `catch`", end));
                     }
                 }
-                st = first;
+                match self.merge(&ends, "the `try` and its `catch` blocks", s.span)? {
+                    Some(m) => st = m,
+                    None => return Ok(None),
+                }
             }
             HStmtKind::While { cond, body, step } => {
                 // The condition runs before every turn: it cannot consume anything.
@@ -466,6 +488,28 @@ impl Checker<'_> {
             HStmtKind::Dump(_) => {}
         }
         Ok(Some(st))
+    }
+
+    /// The state after paths that join (arms of a `tri`, a `try` and its
+    /// catches): they must agree on every buffer. `None` if none continues.
+    fn merge(&self, ends: &[(&str, State)], what: &str, span: Span) -> R<Option<State>> {
+        let Some((_, mut first)) = ends.first().cloned() else {
+            return Ok(None);
+        };
+        for (_, other) in &ends[1..] {
+            if let Some(id) = (0..first.len()).find(|&i| !first[i].agrees(other[i])) {
+                let detail: Vec<String> = ends.iter().map(|(label, s)| format!("{label}: {}", s[id].describe())).collect();
+                return Err(Diagnostic::new(format!("{what} leave `{}` in different states", self.name(id)), span)
+                    .with_note(format!("{} (every path that continues must agree)", detail.join(", "))));
+            }
+            // If any path gave the buffer away, its name cannot be reused afterwards.
+            for (f, o) in first.iter_mut().zip(other) {
+                if *o == St::Given {
+                    *f = St::Given;
+                }
+            }
+        }
+        Ok(Some(first))
     }
 
     /// A walk body may not consume (or create) buffers that live outside it.

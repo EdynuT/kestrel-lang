@@ -9,7 +9,7 @@ use crate::bet::Word27;
 use crate::isa::{DecodeError, Op};
 use crate::KSB_MAGIC;
 
-pub const KSB_VERSION: u16 = 2;
+pub const KSB_VERSION: u16 = 3;
 /// Flag bit 0: each function carries the names of its local slots.
 pub const FLAG_DEBUG_NAMES: u16 = 1;
 /// Flag bit 1: an object file (one `.ks` file, not yet linked): it ends
@@ -110,6 +110,18 @@ pub struct Function {
     /// Optional debug names, one per local slot (empty if absent).
     pub local_names: Vec<String>,
     pub kind: Kind,
+    /// Where a `throw` (or a failure of the VM) inside this function goes,
+    /// innermost first: like the exception table of a Java `.class`.
+    pub handlers: Vec<Handler>,
+}
+
+/// Code at `start..end` (byte offsets) that fails goes to `target`, with
+/// the error (object pointer, class number) as the only values on the stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Handler {
+    pub start: u32,
+    pub end: u32,
+    pub target: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -138,6 +150,8 @@ pub enum CodeProblem {
     ArgcMismatch { expected: u8, got: u8 },
     ParamsExceedLocals,
     BadDebugNames,
+    /// A handler whose range or target is not at an instruction.
+    BadHandler,
 }
 
 impl fmt::Display for KsbError {
@@ -196,6 +210,12 @@ impl Module {
             }
             out.extend_from_slice(&len32(&f.code).to_le_bytes());
             out.extend_from_slice(&f.code);
+            out.extend_from_slice(&len32(&f.handlers).to_le_bytes());
+            for h in &f.handlers {
+                for n in [h.start, h.end, h.target] {
+                    out.extend_from_slice(&n.to_le_bytes());
+                }
+            }
             if debug {
                 for n in &f.local_names {
                     write_name16(&mut out, n);
@@ -271,6 +291,9 @@ impl Module {
             };
             let code_len = r.u32()? as usize;
             f.code = r.take(code_len)?.to_vec();
+            for _ in 0..r.u32()? {
+                f.handlers.push(Handler { start: r.u32()?, end: r.u32()?, target: r.u32()? });
+            }
             if flags & FLAG_DEBUG_NAMES != 0 {
                 for _ in 0..f.locals {
                     let len = usize::from(r.u16()?);
@@ -379,6 +402,12 @@ impl Module {
                     _ => {}
                 }
             }
+            for h in &f.handlers {
+                let edge = |a: u32| starts.get(a as usize) == Some(&true) || a as usize == f.code.len();
+                if h.start > h.end || !edge(h.start) || !edge(h.end) || starts.get(h.target as usize) != Some(&true) {
+                    return Err(fail(h.target as usize, CodeProblem::BadHandler));
+                }
+            }
         }
         Ok(())
     }
@@ -401,6 +430,9 @@ impl Module {
                         break;
                     }
                 }
+            }
+            for h in &f.handlers {
+                s += &format!("  catch @{}..@{} -> @{}\n", h.start, h.end, h.target);
             }
         }
         s
@@ -499,6 +531,7 @@ mod tests {
             ]),
             local_names: vec!["x".into()],
             kind: Kind::Code,
+            handlers: Vec::new(),
         };
         let sum = Function {
             name: "sum".into(),
@@ -507,6 +540,8 @@ mod tests {
             code: code(&[Op::Load(0), Op::Load(0), Op::Add, Op::Ret]),
             local_names: vec!["v".into()],
             kind: Kind::Code,
+            // load@0 load@3 add@6 ret@7
+            handlers: vec![Handler { start: 0, end: 6, target: 7 }],
         };
         Module {
             entry: 0,
@@ -609,6 +644,11 @@ mod tests {
         assert_eq!(problem(&m), CodeProblem::ArgcMismatch { expected: 1, got: 3 });
 
         let mut m = sample();
+        m.functions[1].handlers[0].target = 2; // inside the first load
+        assert_eq!(problem(&m), CodeProblem::BadHandler);
+        m.functions[1].handlers[0] = Handler { start: 6, end: 3, target: 7 };
+        assert_eq!(problem(&m), CodeProblem::BadHandler);
+        m = sample();
         m.functions[0].code = vec![0xee];
         assert!(matches!(problem(&m), CodeProblem::Decode(_)));
 

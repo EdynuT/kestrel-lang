@@ -182,6 +182,9 @@ pub struct ProcDecl {
     pub this: Option<SelfMode>,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
+    /// `throws NotFound, ParseError`: the errors it may throw (classes
+    /// with `@impl(Error)`, or `Error` for any).
+    pub throws: Vec<Ident>,
     pub body: Block,
     /// `proc max<T extends Comparable>`: its type parameters.
     pub generics: Vec<TypeParam>,
@@ -513,7 +516,20 @@ pub enum StmtKind {
     While { cond: Expr, body: Block },
     /// `for init; cond; step { }`, like Java's `for` without parentheses.
     For { init: Box<Stmt>, cond: Expr, step: Box<Stmt>, body: Block },
+    /// `throw e;`: `e` is an object of a class with `@impl(Error)`, given away.
+    Throw(Expr),
+    /// `try { } catch e: NotFound { } catch e: Error { }`
+    Try { body: Block, catches: Vec<Catch> },
     Expr(Expr),
+}
+
+/// `catch e: NotFound { ... }`: `class` is an error class, `Error` (any
+/// error) or `Trap` (a failure of the VM).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Catch {
+    pub var: Ident,
+    pub class: Ident,
+    pub body: Block,
 }
 
 #[derive(Clone, Debug, PartialEq)]

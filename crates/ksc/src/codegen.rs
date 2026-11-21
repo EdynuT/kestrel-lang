@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use kestrel_core::isa::{Addr, Op, Slot};
 use kestrel_core::limits::{MAX_LOCALS, MAX_PARAMS};
-use kestrel_core::ksb::{Function, Impl, Kind, Module};
+use kestrel_core::ksb::{Function, Handler, Impl, Kind, Module};
 use kestrel_core::{Real, Word, Word27};
 
 use crate::diag::{Diagnostic, Span};
@@ -39,7 +39,7 @@ pub fn generate(hir: &Hir) -> R<Module> {
             let obj = Local { name: "obj".into(), ty: Type::Class(c), kind: LocalKind::Param, span: Span::default(), is_final: false };
             let body = HBlock { stmts: Vec::new(), scope: Vec::new(), span: Span::default() };
             let link = link_of.get(c).map_or(Link::Own, |l| l.link);
-            (*c, HProc { name: format!("$burn.{c}"), params: 1, ret: Type::Void, locals: vec![obj], body, refs: vec![false], link })
+            (*c, HProc { name: format!("$burn.{c}"), params: 1, ret: Type::Void, locals: vec![obj], body, refs: vec![false], link, throws: Vec::new() })
         })
         .collect();
     // Which parameters of each proc are `x: &int` (written back after a call).
@@ -74,7 +74,7 @@ pub fn generate(hir: &Hir) -> R<Module> {
     }
     for i in &hir.iface_names {
         let names = vec!["$obj".to_string(), "$class".to_string()];
-        functions.push(Function { name: format!("$burnI.{i}"), params: 2, locals: 2, code: Vec::new(), local_names: names, kind: Kind::BurnDispatch });
+        functions.push(Function { name: format!("$burnI.{i}"), params: 2, locals: 2, code: Vec::new(), local_names: names, kind: Kind::BurnDispatch, handlers: Vec::new() });
     }
     // What the linker needs: this file's classes and how they answer.
     let mut link = kestrel_core::ksb::Link::default();
@@ -101,7 +101,7 @@ fn stub(structs: &Structs, p: &HProc, kind: Kind) -> Function {
         leaf_names(structs, l.ty, &l.name, &mut names);
     }
     let n = names.len();
-    Function { name: p.name.clone(), params: n as u8, locals: n as u16, code: Vec::new(), local_names: names, kind }
+    Function { name: p.name.clone(), params: n as u8, locals: n as u16, code: Vec::new(), local_names: names, kind, handlers: Vec::new() }
 }
 
 /// What every proc's code generation reads.
@@ -165,6 +165,8 @@ struct ProcGen<'a> {
     loops: Vec<LoopLabels>,
     /// Slots taken by the parameters (a struct parameter takes several).
     param_slots: usize,
+    /// Where errors go (see `ksb::Handler`), innermost first.
+    handlers: Vec<Handler>,
 }
 
 impl<'a> ProcGen<'a> {
@@ -205,7 +207,7 @@ impl<'a> ProcGen<'a> {
             )
             .with_note("each struct field counts as one value"));
         }
-        Ok(ProcGen { p, structs, classes, burners, burn_ifaces, refs, pools, slots, names, code: Vec::new(), loops: Vec::new(), param_slots })
+        Ok(ProcGen { p, structs, classes, burners, burn_ifaces, refs, pools, slots, names, code: Vec::new(), loops: Vec::new(), param_slots, handlers: Vec::new() })
     }
 
     fn width(&self, ty: Type) -> usize {
@@ -442,7 +444,7 @@ impl<'a> ProcGen<'a> {
         }
         self.push_word(Word::ZERO);
         self.emit(Op::Ret);
-        Function { name: self.p.name.clone(), params: 1, locals: self.names.len() as u16, code: self.code, local_names: self.names, kind: Kind::Code }
+        Function { name: self.p.name.clone(), params: 1, locals: self.names.len() as u16, code: self.code, local_names: self.names, kind: Kind::Code, handlers: Vec::new() }
     }
 
 
@@ -461,11 +463,29 @@ impl<'a> ProcGen<'a> {
     }
 
     fn run(mut self) -> R<Function> {
+        // An error that leaves the proc frees what its variables still own
+        // (a moved or burned variable holds NaT), so each starts empty.
+        let owned: Vec<LocalId> = (0..self.p.locals.len()).filter(|&i| self.owned(i)).collect();
+        for &i in owned.iter().filter(|&&i| i >= self.p.params) {
+            let ty = self.p.locals[i].ty;
+            self.push_nat(ty);
+            self.store(self.slot(i), self.width(ty));
+        }
+        let start = self.here();
         self.block(&self.p.body)?;
         if !self.p.body.diverges() {
             // A proc without `-> T` that falls off its end returns nothing.
             self.push_word(Word::ZERO);
             self.ret();
+        }
+        if !owned.is_empty() {
+            // The proc's own handler: frees its variables and passes the error on.
+            let (end, target) = (self.here(), self.here());
+            for &i in &owned {
+                self.burn_alive(i);
+            }
+            self.emit(Op::Throw);
+            self.handlers.push(Handler { start, end, target });
         }
         Ok(Function {
             name: self.p.name.clone(),
@@ -474,7 +494,30 @@ impl<'a> ProcGen<'a> {
             code: self.code,
             local_names: self.names,
             kind: Kind::Code,
+            handlers: self.handlers,
         })
+    }
+
+    /// A variable that may own something when an error leaves its block.
+    fn owned(&self, id: LocalId) -> bool {
+        let l = &self.p.locals[id];
+        matches!(l.kind, LocalKind::Param | LocalKind::Let) && owns(l.ty)
+    }
+
+    /// Frees what variable `id` owns, if it still owns something.
+    ///   load v; jnat SKIP; pop; <burn v>; SKIP:
+    fn burn_alive(&mut self, id: LocalId) {
+        let (slot, ty) = (self.slot(id), self.p.locals[id].ty);
+        if ty.is_opt() {
+            self.burn(slot, ty); // checks for empty itself
+            return;
+        }
+        self.emit(Op::Load(slot));
+        let skip = self.emit(Op::JNat(0));
+        self.emit(Op::Pop);
+        self.burn(slot, ty);
+        let end = self.here();
+        self.patch(skip, 0, end);
     }
 
     // ---- emission helpers ----
@@ -682,6 +725,79 @@ impl<'a> ProcGen<'a> {
                 let k = self.pools.string(label);
                 self.emit(Op::Dump(k));
             }
+            HStmtKind::Throw { value, .. } => {
+                self.expr(value)?;
+                self.emit(Op::Throw);
+            }
+            HStmtKind::Try { body, catches } => self.try_catch(body, catches)?,
+        }
+        Ok(())
+    }
+
+    /// ```text
+    ///         <body>; jmp END
+    /// HANDLER: (error, class) store $error; <free what the body changed>
+    ///         load $error.class; push C; cmp3; test =; br3 NEXT, NEXT, THIS
+    ///   THIS: load $error; store e; <catch body>; jmp END
+    ///   NEXT: ... (`catch e: Error` takes any)
+    ///         load $error; throw          (no catch took it: pass it on)
+    /// END:
+    /// ```
+    fn try_catch(&mut self, body: &HBlock, catches: &[HCatch]) -> R<()> {
+        let start = self.here();
+        self.block(body)?;
+        let end = self.here();
+        let mut exits = vec![self.emit(Op::Jmp(0))];
+        let target = self.here();
+        self.handlers.push(Handler { start, end, target });
+        let err = self.scratch("$error", 2);
+        self.store(err, 2);
+        let mut changed = Vec::new();
+        changed_in(body, &mut changed);
+        for id in changed {
+            if self.owned(id) {
+                self.burn_alive(id);
+            }
+        }
+        for c in catches {
+            let s = self.slot(c.local);
+            let test = match c.class {
+                Some((_, tag)) => {
+                    self.emit(Op::Load(err + 1));
+                    self.push_word(Word::new(tag));
+                    self.emit(Op::Cmp3);
+                    self.emit(Op::Test(0b010));
+                    let br = self.emit(Op::Br3 { neg: 0, zero: 0, pos: 0 });
+                    let this = self.here();
+                    self.patch(br, 2, this);
+                    self.emit(Op::Load(err));
+                    self.emit(Op::Store(s));
+                    Some(br)
+                }
+                None => {
+                    self.load(err, 2);
+                    self.store(s, 2);
+                    None
+                }
+            };
+            self.block(&c.body)?;
+            if !c.body.diverges() {
+                exits.push(self.emit(Op::Jmp(0)));
+            }
+            match test {
+                Some(br) => {
+                    let next = self.here();
+                    self.patch(br, 0, next);
+                    self.patch(br, 1, next);
+                }
+                None => break,
+            }
+        }
+        self.load(err, 2);
+        self.emit(Op::Throw);
+        let after = self.here();
+        for j in exits {
+            self.patch(j, 0, after);
         }
         Ok(())
     }

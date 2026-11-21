@@ -465,6 +465,15 @@ impl Parser {
         }
         self.expect(Tok::RParen)?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.ret_type()?) } else { None };
+        let mut throws = Vec::new();
+        if self.eat(&Tok::Throws) {
+            loop {
+                throws.push(self.dotted()?);
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+        }
         // In an interface, a method ends with `;` (no body), unless it is a
         // default method with a `{ ... }` body.
         if self.class.is_some_and(|c| c.starts_with('@')) && self.peek() != &Tok::LBrace {
@@ -474,6 +483,7 @@ impl Parser {
                 this,
                 params,
                 ret,
+                throws,
                 body: Block { stmts: Vec::new(), span: at },
                 generics,
                 instance: false,
@@ -481,7 +491,7 @@ impl Parser {
             });
         }
         let body = self.block()?;
-        Ok(ProcDecl { name, this, params, ret, body, generics, instance: false, annotations: Vec::new() })
+        Ok(ProcDecl { name, this, params, ret, throws, body, generics, instance: false, annotations: Vec::new() })
     }
 
     /// `interface Name { proc m(&self, ...) -> T; ... }`
@@ -762,6 +772,29 @@ impl Parser {
                 end(self)?;
                 StmtKind::Burn(name)
             }
+            Tok::Throw => {
+                self.bump();
+                let value = self.expr()?;
+                end(self)?;
+                StmtKind::Throw(value)
+            }
+            Tok::Try => {
+                self.bump();
+                let body = self.block()?;
+                let mut catches = Vec::new();
+                while self.eat(&Tok::Catch) {
+                    let var = self.ident()?;
+                    self.expect(Tok::Colon)?;
+                    let class = self.dotted()?;
+                    let body = self.block()?;
+                    catches.push(Catch { var, class, body });
+                }
+                if catches.is_empty() {
+                    return Err(self.unexpected("`catch e: SomeError { ... }` after the `try` block"));
+                }
+                StmtKind::Try { body, catches }
+            }
+            Tok::Catch => return Err(Diagnostic::new("`catch` without a `try` before it", self.span())),
             Tok::Return => {
                 self.bump();
                 let value = if matches!(self.peek(), Tok::Semi | Tok::Comma) { None } else { Some(self.expr()?) };

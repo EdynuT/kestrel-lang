@@ -90,6 +90,8 @@ pub struct HProc {
     /// passed with `&n`; its final value is written back to `n`).
     pub refs: Vec<bool>,
     pub link: Link,
+    /// The errors it declares (`throws`): class names, or `Error` for any.
+    pub throws: Vec<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,6 +167,116 @@ pub enum HStmtKind {
     },
     Expr(HExpr),
     Dump(String),
+    /// `throw e;`: `value` is the error seen as an `Error` (pointer and class
+    /// number); `class` is its class, `None` when it is only known as an `Error`.
+    Throw { value: HExpr, class: Option<&'static str> },
+    /// `try { body } catch ...`: an error inside `body` frees what `body`
+    /// owns or changed (see [`changed_in`]), then goes to the first catch
+    /// that takes it, or on to whoever handles it outside.
+    Try { body: HBlock, catches: Vec<HCatch> },
+}
+
+/// `catch e: C { body }`: `class` is `None` for `catch e: Error` (any error).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HCatch {
+    pub local: LocalId,
+    pub class: Option<(&'static str, i64)>,
+    pub body: HBlock,
+    pub span: Span,
+}
+
+/// The locals a block declares, or gives away, burns or assigns: what may
+/// own something (or nothing any more) when an error leaves it midway.
+pub fn changed_in(b: &HBlock, out: &mut Vec<LocalId>) {
+    fn add(out: &mut Vec<LocalId>, id: LocalId) {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    fn expr(e: &HExpr, out: &mut Vec<LocalId>) {
+        match &e.kind {
+            HExprKind::Give(id) => add(out, *id),
+            HExprKind::Word(_) | HExprKind::Real(_) | HExprKind::Text(_) | HExprKind::Local(_) | HExprKind::Lend(_) | HExprKind::Field(..) => {}
+            HExprKind::Neg(a) | HExprKind::Convert(a) | HExprKind::Claim(a) | HExprKind::ToIface(a, _) | HExprKind::TakeField(a, _) | HExprKind::IsClass(a, ..) => {
+                expr(a, out)
+            }
+            HExprKind::Binary(_, a, c) | HExprKind::Index(a, c) | HExprKind::ElemField(a, c, _) | HExprKind::Bind(_, a, c) => {
+                expr(a, out);
+                expr(c, out);
+            }
+            HExprKind::Call(_, xs) | HExprKind::Builtin(_, xs) | HExprKind::Pack(xs) | HExprKind::StructLit(xs) | HExprKind::NewObj(xs) => {
+                xs.iter().for_each(|x| expr(x, out))
+            }
+            HExprKind::Print(ps) => ps.iter().for_each(|(_, x)| expr(x, out)),
+            HExprKind::IfNull { value, then, null, .. } => {
+                expr(value, out);
+                expr(then, out);
+                if let Some(n) = null {
+                    expr(n, out);
+                }
+            }
+        }
+    }
+    for id in &b.scope {
+        add(out, *id);
+    }
+    for s in &b.stmts {
+        match &s.kind {
+            HStmtKind::Let { local, value, on_nat } => {
+                add(out, *local);
+                expr(value, out);
+                if let Some(x) = on_nat {
+                    changed_in(x, out);
+                }
+            }
+            HStmtKind::Declare(id) | HStmtKind::Burn(id) => add(out, *id),
+            HStmtKind::Assign { local, index, value, .. } => {
+                if index.is_none() {
+                    add(out, *local);
+                }
+                if let Some(i) = index {
+                    expr(i, out);
+                }
+                expr(value, out);
+            }
+            HStmtKind::SetElem { arr, index, value, .. } => {
+                expr(arr, out);
+                expr(index, out);
+                expr(value, out);
+            }
+            HStmtKind::Return(v) => v.iter().for_each(|x| expr(x, out)),
+            HStmtKind::Break | HStmtKind::Continue | HStmtKind::Trap(_) | HStmtKind::Dump(_) => {}
+            HStmtKind::Tri { head, arms, .. } => {
+                expr(head, out);
+                arms.iter().for_each(|x| changed_in(x, out));
+            }
+            HStmtKind::Block(x) => changed_in(x, out),
+            HStmtKind::While { cond, body, step } => {
+                expr(cond, out);
+                changed_in(body, out);
+                if let Some(x) = step {
+                    changed_in(x, out);
+                }
+            }
+            HStmtKind::Exit(x) | HStmtKind::Expr(x) => expr(x, out),
+            HStmtKind::Walk { span_tmp, start, end, body, .. } => {
+                if let Some((_, k)) = span_tmp {
+                    expr(k, out);
+                }
+                expr(start, out);
+                expr(end, out);
+                changed_in(body, out);
+            }
+            HStmtKind::Throw { value, .. } => expr(value, out),
+            HStmtKind::Try { body, catches } => {
+                changed_in(body, out);
+                for c in catches {
+                    add(out, c.local);
+                    changed_in(&c.body, out);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -295,7 +407,9 @@ impl HBlock {
     pub fn diverges(&self) -> bool {
         self.stmts.last().is_some_and(|s| match &s.kind {
             HStmtKind::Return(_) | HStmtKind::Break | HStmtKind::Continue | HStmtKind::Trap(_) | HStmtKind::Exit(_) => true,
+            HStmtKind::Throw { .. } => true,
             HStmtKind::Tri { arms, .. } => arms.iter().all(HBlock::diverges),
+            HStmtKind::Try { body, catches } => body.diverges() && catches.iter().all(|c| c.body.diverges()),
             HStmtKind::Block(b) => b.diverges(),
             _ => false,
         })

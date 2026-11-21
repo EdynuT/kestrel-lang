@@ -2,7 +2,7 @@
 //!
 //! Phases: [`lexer`] -> [`parser`] -> [`modules`] (the files reached by `use`,
 //! with names resolved by [`resolve`]) -> [`generics`] (one copy per use) ->
-//! [`sema`] (types, HIR) -> [`linear`] (ownership) -> [`codegen`] (bytecode).
+//! [`sema`] (types, HIR) -> [`throws`] (checked errors) -> [`linear`] (ownership) -> [`codegen`] (bytecode).
 
 pub mod ast;
 pub mod codegen;
@@ -16,6 +16,7 @@ pub mod object;
 pub mod parser;
 pub mod resolve;
 pub mod sema;
+pub mod throws;
 
 use kestrel_core::Module;
 
@@ -192,6 +193,7 @@ pub fn compile_unit(units: &[modules::Unit], headers: &[ast::Program], k: usize,
     let program = generics::expand(program)?;
     let program = object::add_defaults(program)?;
     let hir = sema::check_with(&program, need_main)?;
+    throws::check(&hir)?;
     linear::check(&hir)?;
     let object = codegen::generate(&hir)?;
     Ok(Compiled { object, warnings: hir.warnings, tests: hir.tests.into_iter().map(|(n, _)| n).collect() })

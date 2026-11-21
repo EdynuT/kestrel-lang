@@ -275,6 +275,8 @@ Erros de compilação:
 | **Conta que falha** | Overflow, divisão por zero, cast fora do intervalo, `toInt`/`toReal`/`input` inválido, conta com NaT | Trap com o motivo. Numa linha com `on NaT`, o valor vira NaT e o bloco trata |
 | **Trap** (estrutura) | `claim` inválido, índice fora dos limites, `tri`/`if`/`while` sobre NaT, `if`/`while` sobre `0`, limite de `walk` NaT, ponteiro inválido, `burn` duplo | A VM **zera todo o heap e os registradores** e aborta com código ≠ 0 |
 
+Toda falha da tabela vira o erro `Trap`, que um `catch e: Trap` (ou `catch e: Error`) pode pegar (§8.17). Sem `catch`, o programa para como descrito acima.
+
 ## 8. Sintaxe
 
 A sintaxe segue o estilo C/Java/Rust. O que é próprio do Kestrel vem do ternário (`tri`, `<=>`, `walk` simétrico, `on NaT`) e da posse (`&`, `give`, `burn`).
@@ -965,6 +967,51 @@ lib/fisica/Corpo.ksb ───────────────────�
 
 Por dentro, cada item de outro arquivo ganha o nome completo (`Geometry.area`, `shapes.Circle`), que é o que aparece nas mensagens, nos testes e no `--disasm`. Cada classe recebe um número calculado do nome, igual em todos os arquivos; o ligador confere que duas classes nunca têm o mesmo.
 
+### 8.17 Erros: `throw`, `try` e `catch`
+
+Como no Java: um erro sobe de um proc para quem o chamou até um `catch` pegá-lo.
+
+```kestrel
+@impl(Error)
+class NotFound {
+    path: text;
+    public proc NotFound(p: text) -> NotFound { return NotFound { path: p }; }
+    @override
+    public proc message(&self) -> text { return "not found: " + self.path; }
+}
+
+proc load(p: text) -> Config throws NotFound, ParseError {
+    if !fileExists(p) {
+        throw NotFound(p);
+    }
+    ...
+}
+
+proc main() {
+    try {
+        c: Config = load("app.cfg");
+        ...
+    } catch e: NotFound {
+        printl(e.message());
+        burn e;
+    } catch e: Error {
+        printl("outro erro: " + e.message());
+        burn e;
+    }
+}
+```
+
+- **Um erro é um objeto** de uma classe com `@impl(Error)`. A interface `Error` (automática, como `Comparable`) pede `message(&self) -> text`.
+- **`throw e;`** entrega o erro (`throw e` de uma variável funciona como `give e`). Nada roda depois dele no bloco.
+- **`throws`** lista os erros que um proc pode lançar: `proc f() throws NotFound, ParseError`. `throws Error` aceita qualquer um. **O compilador confere**: quem chama um proc com `throws` precisa de um `try` com `catch` para cada erro, ou de declarar o erro no próprio `throws`. A chamada não leva marca (como no Java).
+- **`catch e: C`** pega os erros da classe `C`; `catch e: Error` pega todos e fica por último. Os `catch` são testados em ordem. Um erro que nenhum pega continua subindo.
+- **É erro:** um `catch` de algo que o `try` nunca lança, o mesmo erro pego duas vezes, um `catch` depois do de `Error`, e `main` ou um `@test` com `throws` (ninguém fora deles pegaria).
+- **`Trap`:** as falhas da VM (§7) viram o erro `Trap`, que não precisa de `throws` (como `RuntimeException`). `catch e: Trap` pega; `e.message()` dá o motivo.
+- **Interfaces:** um método de interface pode ter `throws`. O método da classe só lança o que a interface lista, porque é isso que quem chama pela interface trata.
+- **Posse:** o erro pego tem dono como qualquer objeto: o `catch` precisa de `burn e;` ou `give e`. Quando um erro sai de um bloco, o compilador libera sozinho o que ainda tinha dono ali (as variáveis do proc, as do `try`, e o que ele recebeu). Por isso, no começo de cada `catch`, o que o `try` deu, queimou ou criou já não existe: usar é erro. Um `T?` fica vazio.
+
+Por dentro, cada função do `.ksb` tem uma **tabela de tratadores** (como a do `.class` do Java): faixas do código e para onde vai um erro que acontece nelas. A instrução `THROW` procura a faixa na função atual e depois em quem chamou. Cada função com variáveis que têm dono ganha um tratador que as libera e passa o erro adiante.
+
 ## 9. BET-VM
 
 - **Representação interna:** `i64`, com o NaT como sentinela `i64::MIN`. A forma `Word27` (BET em `u64`, 54 bits) só aparece no `.ksb`, no `dump` e na formatação `0t`/`0v`.
@@ -984,7 +1031,7 @@ Por dentro, cada item de outro arquivo ganha o nome completo (`Geometry.area`, `
 | Modo das falhas | `SOFT` (contas que falham produzem NaT; emitido antes do valor de uma linha com `on NaT`), `HARD` (volta ao padrão: Trap). Cada proc começa em `HARD` |
 | Tamanho de arrays | `APPEND`, `POPEL`, `INSERT`, `REMOVE`, `RESIZE`, `CLEAR`, `REPLACE` (faixa `0x7_`; os valores do elemento vão abaixo do ponteiro na pilha) |
 | Memória | `ALLOC` (sym), `ALLOCZ` (a partir de 0), `ALLOCT w sym` (elementos de `w` células, preenchidos com um modelo: `real`, `text`, struct), `PACK n sym` (literal `{...}`), `PACKT n w sym`, `LDIDX`, `STIDX`, `LDELEM off n` / `STELEM off n` (`n` células de um elemento, a partir da célula `off`: campos de struct), `PURGE s` |
-| Fluxo | `JMP a`, `JNAT a`, `BR3 a- a0 a+`, `CALL f n` (`n` = valores passados; um struct conta um por campo), `RET`, `RETN n` (devolve os `n` valores de um struct), `TRAP str` |
+| Fluxo | `JMP a`, `JNAT a`, `BR3 a- a0 a+`, `CALL f n` (`n` = valores passados; um struct conta um por campo), `RET`, `RETN n` (devolve os `n` valores de um struct), `TRAP str`, `THROW` (tira o erro, ponteiro e número da classe, e vai ao tratador mais próximo; §8.17) |
 | E/S | `INPUT`, `EMIT`, `PRINT`, `SHOW`, `SHOWT` (`0t`), `SHOWV` (`0v`), `DUMP str`, `READF`, `FEXISTS`, `WRITEF`, `WRITEB`, `READLN`, `EOF`, `ARGC`, `ARG`, `EXIT` |
 
 **Codificação:** cada instrução tem 1 byte de opcode seguido de operandos de tamanho fixo, em little-endian. Os tipos são `k`, `f` e `a` (`u32`), `s` (`u16`) e `n` (`u8`). As faixas são: pilha `0x0_`, ALU inteira `0x1_`, ALU real `0x2_`, texto e conversão `0x3_`, memória `0x4_`, fluxo `0x5_` e E/S `0x6_`. A tabela completa está em `crates/kestrel-core/src/isa.rs`.
@@ -1012,6 +1059,10 @@ Functions      fn_count ×
                             4 burn por interface
   code_len u32 (em bytes)
   code: opcode u8 + operandos fixos
+  handler_count u32
+  handlers: handler_count × (início u32, fim u32, destino u32)
+                            um erro em início..fim-1 vai ao destino,
+                            com o erro na pilha (os mais internos primeiro)
   [se flags & 1] local_count × (u16 len + nome UTF-8)
 [se flags & 2] Ligação (objeto)
   classes  u32 × (nome, número i64)
@@ -1026,7 +1077,7 @@ Functions      fn_count ×
 - **Bit 0 de `flags`** indica que o arquivo traz os nomes das variáveis, para o `dump` mostrar `R0 (acc)`.
 - **Bit 1 de `flags`** marca um **objeto**: um arquivo `.ks` compilado sozinho, ainda não ligado. Funções de outros arquivos aparecem como importadas (sem código), e as de despacho são escritas pelo ligador. O `ksvm` só roda programas ligados.
 - **Executável:** uma cópia do `ksvm` seguida do `.ksb` do programa, do tamanho dele (`u64`) e da marca `K3B-EXE1`. Ao iniciar, o `ksvm` procura a marca no fim de si mesmo.
-- **Verificação na leitura:** o arquivo é rejeitado se algum salto cair fora do início de uma instrução, se um índice de constante, string, função ou slot não existir, ou se o número de argumentos de uma chamada não bater com os parâmetros da função chamada.
+- **Verificação na leitura:** o arquivo é rejeitado se algum salto cair fora do início de uma instrução, se um índice de constante, string, função ou slot não existir, se o número de argumentos de uma chamada não bater com os parâmetros da função chamada, ou se um tratador não começar, terminar e apontar para o início de uma instrução.
 
 Os saltos usam um **offset absoluto em bytes** (`u32`) dentro do código da própria função.
 
@@ -1045,7 +1096,8 @@ annotation = "@" IDENT [ "(" IDENT { "," IDENT } ")" ] ;
 struct_decl = "struct" IDENT "{" { IDENT ":" type ";" } "}" ;
 enum_decl  = "enum" IDENT "{" [ IDENT [ "=" expr ] { "," IDENT [ "=" expr ] } [ "," ] ] "}" ;
 const_decl = "const" IDENT ":" scalar "=" expr ";" ;
-proc_decl  = "proc" IDENT "(" [ param { "," param } ] ")" [ "->" ret_type ] block ;
+proc_decl  = "proc" IDENT "(" [ param { "," param } ] ")" [ "->" ret_type ] [ "throws" name { "," name } ] block ;
+name       = IDENT { "." IDENT } ;
 param      = IDENT ":" [ "&" ] type | [ "sym" ] [ "&" ] IDENT "[" "]" ":" elem | [ "&" ] "self" ;
 ret_type   = type | [ "sym" ] elem "[" "]" ;
 type       = scalar | "bool" | "text" | IDENT ;
@@ -1061,6 +1113,8 @@ stmt       = [ "final" ] IDENT ":" type "=" expr [ on_nat ] ";"
            | place ( "++" | "--" ) ";"
            | "burn" IDENT ";"
            | "return" [ expr ] ";"
+           | "throw" expr ";"
+           | "try" block "catch" IDENT ":" name block { "catch" IDENT ":" name block }
            | "break" ";" | "continue" ";"
            | "tri" tri_head "{" arm arm arm "}"
            | "if" expr block [ "else" ( block | if_stmt ) ]

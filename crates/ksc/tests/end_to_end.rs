@@ -2242,3 +2242,136 @@ fn libraries() {
     assert!(run("use corpos.Corpo;\nproc main() { }").unwrap_err().contains("keep one"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Error classes for the `try`/`catch` tests.
+const ERRORS: &str = r#"
+@impl(Error)
+class NotFound {
+    path: text;
+    public proc NotFound(p: text) -> NotFound { return NotFound { path: p }; }
+    @override
+    public proc message(&self) -> text { return "not found: " + self.path; }
+}
+@impl(Error)
+class Bad {
+    code: int;
+    public proc Bad(c: int) -> Bad { return Bad { code: c }; }
+    @override
+    public proc message(&self) -> text { return "bad " + toText(self.code); }
+}
+proc load(p: text) -> int throws NotFound, Bad {
+    v[]: int = {1, 2, 3};
+    if p == "x" { throw NotFound(p); }
+    if p == "b" { throw Bad(4); }
+    burn v;
+    return 7;
+}
+"#;
+
+#[test]
+fn try_catch() {
+    let src = format!(
+        r#"{ERRORS}
+proc middle(p: text) -> int throws NotFound {{
+    try {{
+        return load(p);
+    }} catch e: Bad {{
+        printl("middle: " + e.message());
+        burn e;
+    }}
+    return -1;
+}}
+proc divide(a: int, b: int) -> int {{ return a / b; }}
+proc main() {{
+    try {{
+        printl(middle("ok"));
+        printl(middle("b"));
+        printl(middle("x"));
+        printl("not here");
+    }} catch e: NotFound {{
+        printl("main: " + e.message());
+        burn e;
+    }}
+    try {{
+        printl(divide(1, 0));
+    }} catch e: Trap {{
+        printl("trap: " + e.message());
+        burn e;
+    }}
+    try {{
+        printl(load("b"));
+    }} catch e: Error {{
+        printl("any: " + e.message());
+        burn e;
+    }}
+    printl("end");
+}}"#
+    );
+    assert_eq!(
+        out(&src),
+        "7\nmiddle: bad 4\n-1\nmain: not found: x\ntrap: division by zero (handle it with `on NaT`)\nany: bad 4\nend\n"
+    );
+    // Uncaught, a failure still stops the program where it happened.
+    let (r, _) = run_with("proc f(a: int) -> int { return 1 / a; } proc main() { printl(f(0)); }", "");
+    let t = r.unwrap_err();
+    assert_eq!((t.func.as_str(), t.reason.as_str()), ("f", "division by zero (handle it with `on NaT`)"));
+    // A rethrow from a catch goes to the next `try` out.
+    let src = format!(
+        "{ERRORS} proc main() {{ try {{ try {{ load(\"x\"); }} catch e: NotFound {{ throw e; }} }} catch e: Error {{ printl(e.message()); burn e; }} }}"
+    );
+    assert_eq!(out(&src), "not found: x\n");
+}
+
+#[test]
+fn try_frees_what_it_owned() {
+    // `v` (given to `f`) and `a` (made in the `try`) are freed by the error;
+    // only `w` is left in the heap at the `catch`.
+    let src = format!(
+        "{ERRORS} proc f(v[]: int) throws NotFound {{ throw NotFound(\"a\"); }} \
+         proc main() {{ v[]: int = {{1, 2}}; w[]: int = {{9}}; \
+         try {{ a[]: int = {{5, 5, 5}}; f(give v); burn a; }} catch e: NotFound {{ burn e; dump(\"c\"); }} burn w; }}"
+    );
+    let o = out(&src);
+    assert_eq!(o.matches(" cells): ").count(), 1, "{o}");
+    assert!(o.contains("[0]=9"), "{o}");
+}
+
+#[test]
+fn checked_errors() {
+    for (body, why) in [
+        ("proc f() throws NotFound { throw NotFound(\"a\"); } proc main() { f(); }", "which `main` neither catches nor declares"),
+        ("proc main() { try { printl(1); } catch e: NotFound { burn e; } }", "nothing in this `try` throws `NotFound`"),
+        (
+            "proc main() { try { load(\"x\"); } catch e: Error { burn e; } catch e: NotFound { burn e; } }",
+            "this `catch` never runs",
+        ),
+        ("proc main() { try { load(\"x\"); } catch e: Error { burn e; } catch e: Error { burn e; } }", "this `catch` never runs"),
+        ("proc main() throws NotFound { throw NotFound(\"a\"); }", "`main` cannot throw"),
+        ("proc main() { try { load(\"x\"); } catch e: Error { printl(1); } }", "`e` is never burned"),
+        (
+            "proc main() { v[]: int = {1}; try { load(\"x\"); burn v; } catch e: Error { burn e; printl(len(v)); } }",
+            "`v` is used after it was burned",
+        ),
+        ("proc main() { throw 5; }", "`throw` needs an error"),
+        ("class P { x: int; } proc main() { try { load(\"x\"); } catch e: P { burn e; } }", "`P` is not an error"),
+        ("proc main() { try { load(\"x\"); } catch e: Nope { burn e; } }", "unknown name `Nope`"),
+        (
+            "interface S { proc get(&self) -> int; } @impl(S) class A { x: int; @override public proc get(&self) -> int throws Bad { throw Bad(1); } }",
+            "`A.get` throws `Bad`, which `S.get` does not list",
+        ),
+        ("proc main() { catch e: Error { } }", "`catch` without a `try`"),
+        ("proc main() { try { printl(1); } }", "`catch e: SomeError"),
+    ] {
+        let src = format!("{ERRORS} {body}");
+        let src = if src.contains("proc main") { src } else { src + " proc main() {}" };
+        let e = ksc::compile(&src).expect_err(body);
+        assert!(e.message.contains(why) || e.note.as_ref().is_some_and(|n| n.contains(why)), "{body}: got {}", e.message);
+    }
+    // Through an interface: the interface's `throws` is what callers handle.
+    let src = format!(
+        "{ERRORS} interface S {{ proc get(&self) -> int throws Bad; }} \
+         @impl(S) class A {{ x: int; public proc A() -> A {{ return A {{ x: 1 }}; }} @override public proc get(&self) -> int throws Bad {{ throw Bad(2); }} }} \
+         proc main() {{ s: S = A(); try {{ printl(s.get()); }} catch e: Bad {{ printl(e.message()); burn e; }} burn s; }}"
+    );
+    assert_eq!(out(&src), "bad 2\n");
+}

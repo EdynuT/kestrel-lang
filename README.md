@@ -47,6 +47,7 @@ proc main() -> int {
 | Memory | an array `x[]: int` must be `burn`ed or `give`n exactly once | `Box<[T]>` without `Drop` |
 | Borrowing | `&v[]: int`, `c: &Conta`, caller writes `&x` | `&mut [T]`, `&mut T` |
 | Arrays | `a[]: int = {1, 2, 3}` (0-based) or `sym s[]: int = claim 5` (`-2..+2`) | `int[]`, or `malloc` with the pointer in the middle |
+| Errors | `proc f() throws NotFound`, `try { } catch e: NotFound { }`; checked by the compiler; VM failures are a catchable `Trap` | Java checked exceptions |
 | Files | `use shapes.Circle;` reads `src/shapes/Circle.ks`, then `Circle.area(2.0)`; only `public` items are visible; each file compiles to its own `.ksb`, linked into one executable | C `#include` + `ld`, without writing headers |
 
 Negation is free in balanced ternary: flip every trit (`0t+0-` = 8, `0t-0+` = −8). There is no sign bit and no two's complement.
@@ -56,7 +57,7 @@ Negation is free in balanced ternary: flip every trit (`0t+0-` = 8, `0t-0+` = �
 ```
 crates/
 ├── kestrel-core/   ternary int and real types, instruction set, .ksb format, linker
-├── ksc/            compiler: lexer, parser, modules, type checker, ownership checker, codegen
+├── ksc/            compiler: lexer, parser, modules, type checker, checked errors, ownership checker, codegen
 └── ksvm/           virtual machine, runs .ksb
 std/                the standard library (Kestrel), built into ksc
 SPEC.md             language and VM specification (Portuguese)

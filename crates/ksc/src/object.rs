@@ -21,16 +21,30 @@ pub const METHODS: [&str; 3] = ["toString", "hashCode", "equals"];
 /// gets it with `@impl(Comparable)` and its own `compareTo(&self, other: &C) -> int`.
 pub const COMPARABLE: &str = "Comparable";
 
-/// Declares `Comparable` (unless the program has its own), before generics
-/// are expanded so `T extends Comparable` finds it.
+/// What every thrown error has: `throw` takes an object of a class with
+/// `@impl(Error)`, and `catch e: Error` catches any of them.
+pub const ERROR: &str = "Error";
+
+/// Declares `Comparable`, `Error` and `Trap` (unless the program has its
+/// own `Comparable`), before generics are expanded so `T extends
+/// Comparable` finds it. `Trap` is the error a failure of the VM becomes
+/// (overflow, division by zero, a bad index...); only the VM makes one.
 pub fn prelude(mut program: Program) -> Result<Program, Diagnostic> {
-    if program.items.iter().any(|i| matches!(i, Item::Interface(d) if d.name.name == COMPARABLE)) {
-        return Ok(program);
+    let mut text = String::new();
+    if !program.items.iter().any(|i| matches!(i, Item::Interface(d) if d.name.name == COMPARABLE)) {
+        text += "interface Comparable { proc compareTo(&self, other: &Comparable) -> int; }\n";
     }
-    let text = "interface Comparable { proc compareTo(&self, other: &Comparable) -> int; }";
-    let tokens = lexer::lex(text).map_err(|d| bug(d, text))?;
-    let parsed = parser::parse(tokens).map_err(|d| bug(d, text))?;
-    program.items.extend(parsed.items);
+    text += "interface Error { proc message(&self) -> text; }\n";
+    text += "@impl(Error) class Trap { reason: text; @override public proc message(&self) -> text { return self.reason; } }\n";
+    let tokens = lexer::lex(&text).map_err(|d| bug(d, &text))?;
+    let parsed = parser::parse(tokens).map_err(|d| bug(d, &text))?;
+    for mut item in parsed.items {
+        // Every file has it: the linker keeps one copy of its code.
+        if let Item::Class(c) = &mut item {
+            c.instance = true;
+        }
+        program.items.push(item);
+    }
     Ok(program)
 }
 

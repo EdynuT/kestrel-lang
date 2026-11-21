@@ -308,6 +308,9 @@ impl Resolver<'_> {
         if let Some(r) = &mut p.ret {
             self.type_expr(r)?;
         }
+        for t in &mut p.throws {
+            self.ident(t)?;
+        }
         self.block(&mut p.body)?;
         self.type_params = class_params.to_vec();
         Ok(())
@@ -379,6 +382,15 @@ impl Resolver<'_> {
                 self.expr(cond)?;
                 self.stmt(step)?;
                 self.block(body)
+            }
+            StmtKind::Throw(e) => self.expr(e),
+            StmtKind::Try { body, catches } => {
+                self.block(body)?;
+                for c in catches {
+                    self.ident(&mut c.class)?;
+                    self.block(&mut c.body)?;
+                }
+                Ok(())
             }
         }
     }
@@ -530,6 +542,13 @@ fn collect_stmt(s: &Stmt, out: &mut HashSet<String>) {
             collect_stmt(init, out);
             collect_stmt(step, out);
             collect_locals(body, out);
+        }
+        StmtKind::Try { body, catches } => {
+            collect_locals(body, out);
+            for c in catches {
+                out.insert(c.var.name.clone());
+                collect_locals(&c.body, out);
+            }
         }
         _ => {}
     }

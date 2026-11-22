@@ -60,6 +60,13 @@ fn to_text_values() {
     let body = r#"n: int = -5; t: text = toText(n, 't'); printl("n = " + toText(n) + " = " + t + " = " + toText(n, 'v'));
         print(len(t)); print(" "); emit(t[2]); print(" " + toText(1.0 / 4.0));"#;
     assert_eq!(main_out(body), "n = -5 = 0t-++ = 0ve\n5 - 0.25");
+    // Characters: a tryte, or an array of trytes, becomes a text.
+    let body = r#"cs[]: tryte = {'K', 's'}; append(cs, '!'); empty[]: tryte = {};
+        printl(toText(cs, 'c') + toText('?', 'c') + "[" + toText(empty, 'c') + "]"); burn cs; burn empty;"#;
+    assert_eq!(main_out(body), "Ks!?[]\n");
+    assert!(main_trap("c: tryte = 300; printl(toText(c, 'c'));").contains("not a character"));
+    let e = ksc::compile("proc main() { x: int = 5; printl(toText(x, 'c')); }").unwrap_err();
+    assert!(e.message.contains("takes a tryte or an array of trytes"));
 }
 
 #[test]

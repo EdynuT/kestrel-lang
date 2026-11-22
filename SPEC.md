@@ -80,7 +80,7 @@ valor = (mantissa / 3²⁰) × 3^expoente
 - `toInt(s)` e `toReal(s)` leem um número (`"123"`, `"-7"`, `"0t+0-"`, `"2.5"`). Texto inválido é uma conta que falha (§1.3): use `on NaT` para tratar.
 - `isDigit(c)`, `isLetter(c)`, `isUpper(c)`, `isLower(c)` e `isSpace(c)` dizem (`+`/`-`) se um `tryte` é dígito, letra (com acentos), maiúscula, minúscula ou espaço (`' '`, `\n`, `\t`).
 - Cada caractere precisa existir na tabela §4. Um caractere fora dela, como `&` ou `ñ`, é **erro de compilação**.
-- `toText(x)` cria um texto novo a partir de um número (§8.6). Um texto criado com o programa rodando (`+`, `sub`, `toText`, `readLine`...) é liberado sozinho quando nenhuma variável, array ou valor em uso aponta mais para ele (coleta de lixo só para textos, sem pausas perceptíveis). O limite é de 2²⁴ caracteres em textos **vivos ao mesmo tempo**. Para montar texto caractere por caractere, use um array de `tryte`, como um array de `char` em C.
+- `toText(x)` cria um texto novo a partir de um número (§8.6). Um texto criado com o programa rodando (`+`, `sub`, `toText`, `readLine`...) é liberado sozinho quando nenhuma variável, array ou valor em uso aponta mais para ele (coleta de lixo só para textos, sem pausas perceptíveis). O limite é de 2²⁴ caracteres em textos **vivos ao mesmo tempo**. Para montar texto caractere por caractere, use um array de `tryte`, como um array de `char` em C, e no fim `toText(arr, 'c')`.
 
 ---
 
@@ -465,6 +465,7 @@ s: int = sum(&b, 2) on NaT { burn b; return -1; };
 | `len(s)` | Tamanho de um `text` |
 | `toText(x)` | Converte um número em `text`, em decimal: `toText(-5)` → `"-5"`, `toText(1.5)` → `"1.5"`. Com um array, gera `"[-8, -1, 0, 1, 8]"` |
 | `toText(x, 't')` / `toText(x, 'v')` | Converte um inteiro em `text` ternário (`"0t-++"`) ou heptavintimal (`"0ve"`), como o `Integer.toString(x, base)` do Java |
+| `toText(c, 'c')` | Um `tryte` ou um array de `tryte` vira o texto desses caracteres: `toText(letras, 'c')`, como o `new String(char[])` do Java. Um código fora da tabela dispara Trap |
 | `emit(c)` | Imprime um `tryte` como caractere (tabela §4) |
 | `input()` | Lê um `int` (decimal, `0t` ou `0v`). Entrada inválida é uma conta que falha |
 | `dump("label")` | Mostra os registradores e o heap |
@@ -1027,7 +1028,7 @@ Por dentro, cada função do `.ksb` tem uma **tabela de tratadores** (como a do 
 | Pilha e locais | `PUSHC k` (int), `PUSHR k` (real), `LOAD s`, `STORE s`, `MOVE s`, `POP` |
 | ALU (inteira) | `ADD`, `SUB`, `MUL`, `DIV`, `MOD`, `POW`, `NEG`, `SHL3`, `SHR3`, `CMP3`, `KAND`, `KOR`, `TEST m` (resultado de `CMP3` → `trit`; os bits 0/1/2 de `m` dizem se −/0/+ vira `+`) |
 | ALU (real) | `FADD`, `FSUB`, `FMUL`, `FDIV`, `FPOW`, `FNEG`, `FCMP3` |
-| Texto | `PUSHS k`, `TLEN`, `TIDX`, `TSTR`, `TSTRT`, `TSTRV` (número → texto), `TCAT`, `TEQ`, `TSUB`, `TTOI`, `TTOF`, `CHARIS k` |
+| Texto | `PUSHS k`, `TLEN`, `TIDX`, `TSTR`, `TSTRT`, `TSTRV` (número → texto), `TSTRC` (tryte ou array de trytes → texto), `TCAT`, `TEQ`, `TSUB`, `TTOI`, `TTOF`, `CHARIS k` |
 | Largura | `NARROW6`, `NARROW1`, `ITOF`, `FTOI` (overflow vira NaT) |
 | Modo das falhas | `SOFT` (contas que falham produzem NaT; emitido antes do valor de uma linha com `on NaT`), `HARD` (volta ao padrão: Trap). Cada proc começa em `HARD` |
 | Tamanho de arrays | `APPEND`, `POPEL`, `INSERT`, `REMOVE`, `RESIZE`, `CLEAR`, `REPLACE` (faixa `0x7_`; os valores do elemento vão abaixo do ponteiro na pilha) |

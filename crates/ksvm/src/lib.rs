@@ -803,6 +803,19 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 let s: Vec<char> = self.render(v, op)?.chars().collect();
                 self.make_text(s)?;
             }
+            Op::TStrC => {
+                let codes: Vec<Value> = match self.pop()? {
+                    Value::Ptr(p) => self.cells(p)?.to_vec(),
+                    v => vec![v],
+                };
+                let mut s = Vec::with_capacity(codes.len());
+                for c in codes {
+                    let Value::Word(w) = c else { return Err(format!("toText(.., 'c'): expected a tryte, found {c:?}")) };
+                    let code = w.get().ok_or("toText(.., 'c'): a character is NaT")?;
+                    s.push(tryte_to_char(code).ok_or_else(|| format!("toText(.., 'c'): {code} is not a character of the tryte table"))?);
+                }
+                self.make_text(s)?;
+            }
             Op::TCat => {
                 let b = self.pop_text()?;
                 let a = self.pop_text()?;

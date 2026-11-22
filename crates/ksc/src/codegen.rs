@@ -1158,6 +1158,7 @@ impl<'a> ProcGen<'a> {
                     Builtin::Arg => Op::Arg,
                     Builtin::ToText(Fmt::Trits) => Op::TStrT,
                     Builtin::ToText(Fmt::Hepta) => Op::TStrV,
+                    Builtin::ToText(Fmt::Char) => Op::TStrC,
                     Builtin::ToText(_) => Op::TStr,
                 });
             }

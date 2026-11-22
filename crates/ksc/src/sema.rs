@@ -3400,8 +3400,9 @@ impl Checker {
                     None => Fmt::Plain,
                     Some(ExprKind::Char(c)) if char_to_tryte('t') == Some(*c) => Fmt::Trits,
                     Some(ExprKind::Char(c)) if char_to_tryte('v') == Some(*c) => Fmt::Hepta,
+                    Some(ExprKind::Char(c)) if char_to_tryte('c') == Some(*c) => Fmt::Char,
                     Some(_) => {
-                        return Err(err("the base of `toText` must be 't' (ternary) or 'v' (heptavintimal)", base.map_or(span, |b| b.span))
+                        return Err(err("the base of `toText` must be 't' (ternary), 'v' (heptavintimal) or 'c' (characters)", base.map_or(span, |b| b.span))
                             .with_note("leave it out for decimal: `toText(x)`"));
                     }
                 };
@@ -3411,6 +3412,14 @@ impl Checker {
                 }
                 let ok = match fmt {
                     Fmt::Plain => matches!(a.ty, Type::Scalar(_) | Type::Lent(_)),
+                    // A character, or an array of them (an `int` code is cast first).
+                    Fmt::Char => {
+                        if !(matches!(a.ty, Type::Scalar(Scalar::Tryte)) || matches!(a.ty, Type::Lent(ast::Buf { elem: Elem::Scalar(Scalar::Tryte), .. }))) {
+                            return Err(err(format!("`toText(x, 'c')` takes a tryte or an array of trytes, found {}", a.ty), a.span)
+                                .with_note("a character code in an int: cast it, `(tryte) x`"));
+                        }
+                        true
+                    }
                     _ => a.ty.is_int() || matches!(a.ty, Type::Lent(_)),
                 };
                 if !ok {
@@ -4228,7 +4237,7 @@ proc main() -> int {
         ok("n: int = 5; a: text = toText(n); b: text = toText(n, 't'); c: text = toText(1.5); print(\"x\" + toText(n, 'v'));");
         assert!(err_in("x: text = toText(1.5, 't');").contains("takes an integer, found real"));
         assert!(err_in("x: text = toText(\"a\");").contains("takes a number, found text"));
-        assert!(err_in("x: text = toText(5, 'x');").contains("must be 't' (ternary) or 'v'"));
+        assert!(err_in("x: text = toText(5, 'x');").contains("must be 't' (ternary), 'v'"));
         assert!(err_in("x: text = toText();").contains("1 or 2 arguments"));
     }
 

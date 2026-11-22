@@ -66,6 +66,8 @@ pub enum Op {
     TStr,
     TStrT,
     TStrV,
+    /// A tryte, or an array of trytes, to a new text of those characters.
+    TStrC,
     /// Pop b, a (texts), push the new text `a + b`.
     TCat,
     /// Pop b, a (texts), push `+` if equal, `-` if not.
@@ -248,6 +250,7 @@ impl Op {
             TStr => 0x36,
             TStrT => 0x37,
             TStrV => 0x38,
+            TStrC => 0x3f,
             TCat => 0x39,
             TEq => 0x3a,
             TSub => 0x3b,
@@ -343,6 +346,7 @@ impl Op {
             TStr => "tstr",
             TStrT => "tstrt",
             TStrV => "tstrv",
+            TStrC => "tstrc",
             TCat => "tcat",
             TEq => "teq",
             TSub => "tsub",
@@ -497,6 +501,7 @@ impl Op {
             0x36 => TStr,
             0x37 => TStrT,
             0x38 => TStrV,
+            0x3f => TStrC,
             0x39 => TCat,
             0x3a => TEq,
             0x3b => TSub,
@@ -658,7 +663,7 @@ mod tests {
             PushC(7), PushR(70_000), PushS(0), Load(4), Store(9), Move(0), Pop, IsNaT,
             Add, Sub, Mul, Div, Mod, Pow, Neg, Shl3, Shr3, Cmp3, KAnd, KOr, Test(0b101), Soft, Hard, ToBool, Trap(4),
             FAdd, FSub, FMul, FDiv, FPow, FNeg, FCmp3,
-            TLen, TIdx, Narrow6, Narrow1, IToF, FToI, TStr, TStrT, TStrV, TCat, TEq, TSub, TToI, TToF, CharIs(2),
+            TLen, TIdx, Narrow6, Narrow1, IToF, FToI, TStr, TStrT, TStrV, TStrC, TCat, TEq, TSub, TToI, TToF, CharIs(2),
             Alloc, LdIdx, StIdx, Purge(8), AllocZ, Pack { n: 3, sym: true }, AllocT { w: 2, sym: false }, PackT { n: 3, w: 2, sym: true }, LdElem { off: 1, n: 2 }, StElem { off: 0, n: 1 }, Append, PopEl, Insert, Remove, Resize, Clear, Replace, Hash, HashMix, TCmp,
             Jmp(12), JNat(u32::MAX), Br3 { neg: 1, zero: 2, pos: 3 }, Call { f: 2, argc: 3 }, Ret, RetN(3), Throw,
             Input, Emit, Print, Show, Dump(5), ShowT, ShowV,

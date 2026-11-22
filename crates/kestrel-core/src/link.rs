@@ -248,7 +248,7 @@ fn dispatch_fn(
     Op::Trap(pools.string("interface call on an object of an unknown class")).encode(&mut code);
     let mut local_names = vec!["$recv".to_string(), "$class".to_string()];
     local_names.resize(usize::from(params), "$arg".to_string());
-    Ok(Function { name: name.to_string(), params, locals: u16::from(params), code, local_names, kind: Kind::Code, handlers: Vec::new() })
+    Ok(Function { name: name.to_string(), params, locals: u16::from(params), code, local_names, kind: Kind::Code, ..Default::default() })
 }
 
 /// `$burnI.I`: frees an object seen through an interface (pointer, class
@@ -267,5 +267,5 @@ fn burn_fn(name: &str, burns: &[(i64, &str)], index: &HashMap<&str, u32>, pools:
     Op::PushC(pools.constant(Word27::from(Word::ZERO))).encode(&mut code);
     Op::Ret.encode(&mut code);
     let local_names = vec!["$obj".to_string(), "$class".to_string()];
-    Ok(Function { name: name.to_string(), params: 2, locals: 2, code, local_names, kind: Kind::Code, handlers: Vec::new() })
+    Ok(Function { name: name.to_string(), params: 2, locals: 2, code, local_names, kind: Kind::Code, ..Default::default() })
 }

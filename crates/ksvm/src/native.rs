@@ -186,7 +186,7 @@ pub fn run_if_present(args: Vec<String>) -> Option<u8> {
     unsafe { RT = Box::into_raw(runtime) };
     let entry = module.entry as usize;
     if let Err(reason) = rt().vm.enter(entry, 0) {
-        finish(Err(Trap { func: module.functions[entry].name.clone(), at: 0, reason }));
+        finish(Err(Trap { func: module.functions[entry].name.clone(), at: 0, reason, trace: Vec::new() }));
     }
     sync_out(&mut rt().vm);
     let main: extern "C" fn() = unsafe { std::mem::transmute(entries[entry]) };

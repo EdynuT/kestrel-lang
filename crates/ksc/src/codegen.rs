@@ -74,7 +74,7 @@ pub fn generate(hir: &Hir) -> R<Module> {
     }
     for i in &hir.iface_names {
         let names = vec!["$obj".to_string(), "$class".to_string()];
-        functions.push(Function { name: format!("$burnI.{i}"), params: 2, locals: 2, code: Vec::new(), local_names: names, kind: Kind::BurnDispatch, handlers: Vec::new() });
+        functions.push(Function { name: format!("$burnI.{i}"), params: 2, locals: 2, code: Vec::new(), local_names: names, kind: Kind::BurnDispatch, ..Default::default() });
     }
     // What the linker needs: this file's classes and how they answer.
     let mut link = kestrel_core::ksb::Link::default();
@@ -101,7 +101,7 @@ fn stub(structs: &Structs, p: &HProc, kind: Kind) -> Function {
         leaf_names(structs, l.ty, &l.name, &mut names);
     }
     let n = names.len();
-    Function { name: p.name.clone(), params: n as u8, locals: n as u16, code: Vec::new(), local_names: names, kind, handlers: Vec::new() }
+    Function { name: p.name.clone(), params: n as u8, locals: n as u16, code: Vec::new(), local_names: names, kind, ..Default::default() }
 }
 
 /// What every proc's code generation reads.
@@ -167,6 +167,10 @@ struct ProcGen<'a> {
     param_slots: usize,
     /// Where errors go (see `ksb::Handler`), innermost first.
     handlers: Vec<Handler>,
+    /// Where each statement's code starts, and the statement's position in
+    /// the source (`Function::lines` holds these until `ksc` turns them
+    /// into lines, see `crate::lines`).
+    marks: Vec<(u32, u32)>,
 }
 
 impl<'a> ProcGen<'a> {
@@ -207,7 +211,7 @@ impl<'a> ProcGen<'a> {
             )
             .with_note("each struct field counts as one value"));
         }
-        Ok(ProcGen { p, structs, classes, burners, burn_ifaces, refs, pools, slots, names, code: Vec::new(), loops: Vec::new(), param_slots, handlers: Vec::new() })
+        Ok(ProcGen { p, structs, classes, burners, burn_ifaces, refs, pools, slots, names, code: Vec::new(), loops: Vec::new(), param_slots, handlers: Vec::new(), marks: Vec::new() })
     }
 
     fn width(&self, ty: Type) -> usize {
@@ -444,7 +448,7 @@ impl<'a> ProcGen<'a> {
         }
         self.push_word(Word::ZERO);
         self.emit(Op::Ret);
-        Function { name: self.p.name.clone(), params: 1, locals: self.names.len() as u16, code: self.code, local_names: self.names, kind: Kind::Code, handlers: Vec::new() }
+        Function { name: self.p.name.clone(), params: 1, locals: self.names.len() as u16, code: self.code, local_names: self.names, kind: Kind::Code, ..Default::default() }
     }
 
 
@@ -463,6 +467,7 @@ impl<'a> ProcGen<'a> {
     }
 
     fn run(mut self) -> R<Function> {
+        self.mark(self.p.body.span.start);
         // An error that leaves the proc frees what its variables still own
         // (a moved or burned variable holds NaT), so each starts empty.
         let owned: Vec<LocalId> = (0..self.p.locals.len()).filter(|&i| self.owned(i)).collect();
@@ -495,6 +500,8 @@ impl<'a> ProcGen<'a> {
             local_names: self.names,
             kind: Kind::Code,
             handlers: self.handlers,
+            lines: self.marks,
+            ..Default::default()
         })
     }
 
@@ -610,7 +617,20 @@ impl<'a> ProcGen<'a> {
         b.stmts.iter().try_for_each(|s| self.stmt(s))
     }
 
+    /// The code from here on comes from source position `pos`.
+    fn mark(&mut self, pos: usize) {
+        let at = self.here();
+        match self.marks.last_mut() {
+            Some(last) if last.0 == at => last.1 = pos as u32,
+            _ => self.marks.push((at, pos as u32)),
+        }
+    }
+
     fn stmt(&mut self, s: &HStmt) -> R<()> {
+        // Blocks mark their own statements.
+        if !matches!(s.kind, HStmtKind::Block(_)) {
+            self.mark(s.span.start);
+        }
         match &s.kind {
             HStmtKind::Let { local, value, on_nat } => {
                 // With `on NaT`, failed arithmetic on this line gives NaT for

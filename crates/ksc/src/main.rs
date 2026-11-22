@@ -429,7 +429,7 @@ fn run_tests(output: &ksc::Output) -> ExitCode {
         let why = match result {
             Ok(ksvm::Value::Word(w)) if w.get().is_some_and(|c| c != 0) => Some(format!("exit({})", w.get().unwrap_or(0))),
             Ok(_) => None,
-            Err(trap) => Some(trap.reason),
+            Err(trap) => Some(trap.to_string()),
         };
         match why {
             None => println!("test {name} ... ok"),

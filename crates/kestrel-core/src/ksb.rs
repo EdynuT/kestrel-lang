@@ -9,7 +9,7 @@ use crate::bet::Word27;
 use crate::isa::{DecodeError, Op};
 use crate::KSB_MAGIC;
 
-pub const KSB_VERSION: u16 = 3;
+pub const KSB_VERSION: u16 = 4;
 /// Flag bit 0: each function carries the names of its local slots.
 pub const FLAG_DEBUG_NAMES: u16 = 1;
 /// Flag bit 1: an object file (one `.ks` file, not yet linked): it ends
@@ -113,6 +113,19 @@ pub struct Function {
     /// Where a `throw` (or a failure of the VM) inside this function goes,
     /// innermost first: like the exception table of a Java `.class`.
     pub handlers: Vec<Handler>,
+    /// The `.ks` file it was written in (empty if unknown), for tracebacks.
+    pub file: String,
+    /// Which line of `file` each part of the code comes from: from byte
+    /// offset `.0` on (until the next entry), line `.1`. In offset order.
+    pub lines: Vec<(u32, u32)>,
+}
+
+impl Function {
+    /// The line of `file` the instruction at byte `at` comes from.
+    pub fn line_at(&self, at: usize) -> Option<u32> {
+        let k = self.lines.partition_point(|&(off, _)| off as usize <= at);
+        k.checked_sub(1).map(|k| self.lines[k].1)
+    }
 }
 
 /// Code at `start..end` (byte offsets) that fails goes to `target`, with
@@ -216,6 +229,12 @@ impl Module {
                     out.extend_from_slice(&n.to_le_bytes());
                 }
             }
+            write_name16(&mut out, &f.file);
+            out.extend_from_slice(&len32(&f.lines).to_le_bytes());
+            for (off, line) in &f.lines {
+                out.extend_from_slice(&off.to_le_bytes());
+                out.extend_from_slice(&line.to_le_bytes());
+            }
             if debug {
                 for n in &f.local_names {
                     write_name16(&mut out, n);
@@ -293,6 +312,10 @@ impl Module {
             f.code = r.take(code_len)?.to_vec();
             for _ in 0..r.u32()? {
                 f.handlers.push(Handler { start: r.u32()?, end: r.u32()?, target: r.u32()? });
+            }
+            f.file = r.name16()?;
+            for _ in 0..r.u32()? {
+                f.lines.push((r.u32()?, r.u32()?));
             }
             if flags & FLAG_DEBUG_NAMES != 0 {
                 for _ in 0..f.locals {
@@ -532,6 +555,8 @@ mod tests {
             local_names: vec!["x".into()],
             kind: Kind::Code,
             handlers: Vec::new(),
+            file: String::new(),
+            lines: Vec::new(),
         };
         let sum = Function {
             name: "sum".into(),
@@ -542,6 +567,8 @@ mod tests {
             kind: Kind::Code,
             // load@0 load@3 add@6 ret@7
             handlers: vec![Handler { start: 0, end: 6, target: 7 }],
+            file: "sum.ks".into(),
+            lines: vec![(0, 2), (6, 3)],
         };
         Module {
             entry: 0,

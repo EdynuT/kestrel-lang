@@ -135,6 +135,7 @@ fn compile_here(
             }
         }
         let mut unit = compile_unit(&units, &headers, k, need_main && k == 0)?;
+        lines(&mut unit.object, map);
         let link = unit.object.link.as_mut().expect("an object");
         link.stamp = stamp;
         link.decls = modules::declarations(src, units[k].base, &units[k].program);
@@ -166,6 +167,27 @@ fn object_path(dir: &std::path::Path, module: &str) -> std::path::PathBuf {
     }
     p.set_extension("ksb");
     p
+}
+
+/// Turns the source positions codegen left in each function's `lines` into
+/// its file and line numbers (a function's code all comes from one file).
+fn lines(object: &mut Module, map: &diag::SourceMap) {
+    // Where each line starts, by file (found once).
+    let mut starts: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    for f in &mut object.functions {
+        let Some(file) = f.lines.first().and_then(|&(_, pos)| map.file_at(pos as usize)) else { continue };
+        f.file = file.path.clone();
+        let newlines = starts.entry(file.base).or_insert_with(|| file.src.bytes().enumerate().filter(|&(_, b)| b == b'\n').map(|(i, _)| i).collect());
+        let mut out: Vec<(u32, u32)> = Vec::new();
+        for &(at, pos) in &f.lines {
+            let local = (pos as usize).saturating_sub(file.base);
+            let line = newlines.partition_point(|&n| n < local) as u32 + 1;
+            if out.last().is_none_or(|&(_, l)| l != line) {
+                out.push((at, line));
+            }
+        }
+        f.lines = out;
+    }
 }
 
 /// One file compiled on its own: its object for the linker.

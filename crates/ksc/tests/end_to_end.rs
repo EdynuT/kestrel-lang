@@ -2385,3 +2385,17 @@ fn checked_errors() {
     );
     assert_eq!(out(&src), "bad 2\n");
 }
+
+#[test]
+fn traceback_has_lines() {
+    let src = "proc divide(a: int, b: int) -> int {\n    return a / b;\n}\nproc deep(n: int) -> int {\n    if n == 0 { return divide(1, n); }\n    return deep(n - 1) + 1;\n}\nproc main() {\n    printl(1);\n    printl(deep(3));\n}\n";
+    let (r, _) = run_with(src, "");
+    let t = r.unwrap_err();
+    let at: Vec<(String, Option<u32>)> = t.trace.iter().map(|c| (c.func.clone(), c.line)).collect();
+    let want = [("divide", 2), ("deep", 5), ("deep", 6), ("deep", 6), ("deep", 6), ("main", 10)];
+    assert_eq!(at, want.map(|(f, l)| (f.to_string(), Some(l))));
+    assert_eq!(
+        t.to_string(),
+        "TRAP: division by zero (handle it with `on NaT`)\n  at divide (main.ks:2)\n  at deep (main.ks:5)\n  at deep (main.ks:6) (3 times)\n  at main (main.ks:10)"
+    );
+}

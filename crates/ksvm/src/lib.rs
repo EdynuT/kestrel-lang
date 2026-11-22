@@ -98,11 +98,74 @@ pub struct Trap {
     pub func: String,
     pub at: usize,
     pub reason: String,
+    /// The calls running when it happened, innermost first.
+    pub trace: Vec<Call>,
 }
 
+/// One call in a [`Trap`]'s trace: the function and where it was.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Call {
+    pub func: String,
+    /// The `.ks` file and line, when the program has them.
+    pub file: String,
+    pub line: Option<u32>,
+    /// The byte in the function's code.
+    pub at: usize,
+}
+
+impl Trap {
+    /// A trap with no trace (before the program started).
+    fn bare(func: String, reason: String) -> Trap {
+        Trap { func, at: 0, reason, trace: Vec::new() }
+    }
+}
+
+impl fmt::Display for Call {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.line {
+            Some(line) if !self.file.is_empty() => write!(f, "at {} ({}:{line})", self.func, self.file),
+            _ => write!(f, "at {} (byte {})", self.func, self.at),
+        }
+    }
+}
+
+/// `TRAP: reason`, then one line per call, innermost first (like Java's):
+/// ```text
+/// TRAP: division by zero
+///   at divide (Main.ks:3)
+///   at main (Main.ks:9)
+/// ```
 impl fmt::Display for Trap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TRAP in {}() at byte {}: {}", self.func, self.at, self.reason)
+        write!(f, "TRAP: {}", self.reason)?;
+        if self.trace.is_empty() {
+            return write!(f, "\n  at {} (byte {})", self.func, self.at);
+        }
+        // A recursion repeats the same line: it is shown once, with a count.
+        let mut groups: Vec<(String, usize)> = Vec::new();
+        for c in &self.trace {
+            let line = c.to_string();
+            match groups.last_mut() {
+                Some((last, n)) if *last == line => *n += 1,
+                _ => groups.push((line, 1)),
+            }
+        }
+        // Calls that do not repeat (a long chain of different ones): the
+        // first and the last are the ones that tell what happened.
+        const SHOWN: usize = 20;
+        for (k, (line, n)) in groups.iter().enumerate() {
+            if groups.len() > SHOWN && k == SHOWN / 2 {
+                write!(f, "\n  ... {} more calls", groups.len() - SHOWN)?;
+            }
+            if groups.len() > SHOWN && (SHOWN / 2..groups.len() - SHOWN / 2).contains(&k) {
+                continue;
+            }
+            write!(f, "\n  {line}")?;
+            if *n > 1 {
+                write!(f, " ({n} times)")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -235,7 +298,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         let entry = self.module.entry as usize;
         let result = match self.enter(entry, 0) {
             Ok(()) => self.go(),
-            Err(reason) => Err(Trap { func: self.module.functions[entry].name.clone(), at: 0, reason }),
+            Err(reason) => Err(Trap::bare(self.module.functions[entry].name.clone(), reason)),
         };
         let _ = self.output.flush();
         if result.is_err() {
@@ -262,7 +325,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             return Err(t);
         }
         let func = self.frames.last().map_or(self.module.entry as usize, |f| f.func);
-        let trap = Trap { func: self.module.functions[func].name.clone(), at: self.op_at, reason };
+        let trap = Trap { func: self.module.functions[func].name.clone(), at: self.op_at, reason, trace: self.trace() };
         // Running out of fuel (a test's limit) is not the program's failure.
         if trap.reason == FUEL {
             return Err(trap);
@@ -312,11 +375,27 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                         _ => None,
                     };
                     let name = self.module.functions[self.module.entry as usize].name.clone();
-                    self.escaped = Some(trap.unwrap_or(Trap { func: name, at: 0, reason: "an error was not caught".into() }));
+                    self.escaped = Some(trap.unwrap_or_else(|| Trap::bare(name, "an error was not caught".into())));
                     return Err(String::new());
                 }
             }
         }
+    }
+
+    /// The calls running now, innermost first: the instruction being run in
+    /// the top one, the call in each of the others.
+    fn trace(&self) -> Vec<Call> {
+        self.frames
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(k, fr)| {
+                let f = &self.module.functions[fr.func];
+                // A caller's `pc` is past its call: the call is just before.
+                let at = if k == 0 { self.op_at } else { fr.pc.saturating_sub(1) };
+                Call { func: f.name.clone(), file: f.file.clone(), line: f.line_at(at), at }
+            })
+            .collect()
     }
 
     /// Zero every heap cell and register (forensic wipe before aborting).

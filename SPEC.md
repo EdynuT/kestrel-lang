@@ -275,7 +275,14 @@ Erros de compilação:
 | **Conta que falha** | Overflow, divisão por zero, cast fora do intervalo, `toInt`/`toReal`/`input` inválido, conta com NaT | Trap com o motivo. Numa linha com `on NaT`, o valor vira NaT e o bloco trata |
 | **Trap** (estrutura) | `claim` inválido, índice fora dos limites, `tri`/`if`/`while` sobre NaT, `if`/`while` sobre `0`, limite de `walk` NaT, ponteiro inválido, `burn` duplo | A VM **zera todo o heap e os registradores** e aborta com código ≠ 0 |
 
-Toda falha da tabela vira o erro `Trap`, que um `catch e: Trap` (ou `catch e: Error`) pode pegar (§8.17). Sem `catch`, o programa para como descrito acima.
+Toda falha da tabela vira o erro `Trap`, que um `catch e: Trap` (ou `catch e: Error`) pode pegar (§8.17). Sem `catch`, o programa para como descrito acima, mostrando o motivo e as chamadas que estavam rodando, da mais interna para fora, com arquivo e linha (como o *stack trace* do Java). Uma recursão aparece numa linha só, com quantas vezes:
+
+```
+ksvm: TRAP: division by zero (handle it with `on NaT`)
+  at calc.Math.divide (src/calc/Math.ks:3)
+  at deep (src/Main.ks:10) (30 times)
+  at main (src/Main.ks:15)
+```
 
 ## 8. Sintaxe
 
@@ -1065,6 +1072,10 @@ Functions      fn_count ×
   handlers: handler_count × (início u32, fim u32, destino u32)
                             um erro em início..fim-1 vai ao destino,
                             com o erro na pilha (os mais internos primeiro)
+  file: u16 len + UTF-8     o `.ks` de onde a função veio (vazio se não se sabe)
+  line_count u32
+  lines: line_count × (offset u32, linha u32)
+                            o código a partir de `offset` vem desta linha
   [se flags & 1] local_count × (u16 len + nome UTF-8)
 [se flags & 2] Ligação (objeto)
   classes  u32 × (nome, número i64)

@@ -43,13 +43,14 @@ use x86::{Alu, Asm, Cond, Label, Reg};
 /// `ksvm::native::PRESENT`
 const PRESENT: u64 = u64::from_le_bytes(*b"KRT-PROG");
 /// `ksvm::native::ABI`: the runtime this backend is written for.
-const ABI: u64 = 2;
+const ABI: u64 = 3;
 /// The size of a `ksvm::Value`; its value starts at byte 8.
 const V: i32 = 24;
 
 /// The runtime's functions and variables the code uses.
 struct Runtime {
     enter_fn: u64,
+    grow: u64,
     op: u64,
     unwind: u64,
     locals: u64,
@@ -69,6 +70,7 @@ pub fn build(module: &Module, runtime: &[u8]) -> Result<Vec<u8>, String> {
     let program = sym("KRT_PROGRAM")?;
     let rt = Runtime {
         enter_fn: sym("krt_enter_fn")?,
+        grow: sym("krt_grow")?,
         op: sym("krt_op")?,
         unwind: sym("krt_unwind")?,
         locals: sym("krt_locals")?,
@@ -80,7 +82,7 @@ pub fn build(module: &Module, runtime: &[u8]) -> Result<Vec<u8>, String> {
     let entries: Vec<Label> = module.functions.iter().map(|_| a.label()).collect();
     let mut landings = Vec::new();
     for k in 0..module.functions.len() {
-        landings.push(Gen { a: &mut a, rt: &rt, module, k, entries: &entries, slow: Vec::new() }.function()?);
+        landings.push(Gen { a: &mut a, rt: &rt, module, k, entries: &entries, slow: Vec::new(), pending: Vec::new(), real: 0 }.function()?);
     }
     // Addresses relative to `KRT_PROGRAM`, which is where the runtime finds them.
     let rel = |addr: u64| (addr as i64 - program as i64).to_le_bytes();
@@ -107,6 +109,21 @@ pub fn build(module: &Module, runtime: &[u8]) -> Result<Vec<u8>, String> {
     Ok(elf.with_segment(base, seg, &[(at, fields)]))
 }
 
+/// A value the code keeps track of instead of pushing it on the VM's stack
+/// yet: it is pushed (by [`Gen::flush`]) only when something needs it there.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Opnd {
+    /// An `int` constant (never NaT).
+    Const(i64),
+    /// The value of variable `s` (any value: it is checked where it is used).
+    Local(u16),
+    /// A value in registers: its kind in `r8`, its value in `r9` (and `r10`).
+    Tmp,
+}
+
+/// The most values kept back at once.
+const MAX_PENDING: usize = 6;
+
 /// The code of one function.
 struct Gen<'a> {
     a: &'a mut Asm,
@@ -114,10 +131,14 @@ struct Gen<'a> {
     module: &'a Module,
     k: usize,
     entries: &'a [Label],
-    /// Instructions done here only for plain `int`s: their slow path (the
+    /// Instructions done here for plain `int`s, and their slow path (the
     /// runtime), written after the function: label, instruction number, the
-    /// instruction, and where to go on.
-    slow: Vec<(Label, usize, Op, Label)>,
+    /// instruction, where to go on, the values kept back when it started.
+    slow: Vec<(Label, usize, Op, Label, Vec<Opnd>)>,
+    /// The values on top of the VM's stack that are not pushed yet (last on top).
+    pending: Vec<Opnd>,
+    /// Values the instruction being written took from the real stack.
+    real: i32,
 }
 
 impl Gen<'_> {
@@ -131,6 +152,18 @@ impl Gen<'_> {
             ops.push((op, pc));
             pc += size;
         }
+        // Where code jumps to: nothing may be kept back there (it can be
+        // reached from more than one place).
+        let mut targets: std::collections::HashSet<usize> = f.handlers.iter().map(|h| h.target as usize).collect();
+        for &(op, _) in &ops {
+            match op {
+                Op::Jmp(t) | Op::JNat(t) => {
+                    targets.insert(t as usize);
+                }
+                Op::Br3 { neg, zero, pos } => targets.extend([neg, zero, pos].map(|t| t as usize)),
+                _ => {}
+            }
+        }
         let mut at: HashMap<usize, Label> = ops.iter().map(|&(_, pc)| (pc, self.a.label())).collect();
         let end = self.a.label();
         at.insert(f.code.len(), end);
@@ -143,23 +176,43 @@ impl Gen<'_> {
         a.mov(Reg::R12, Reg::Rax);
         a.load_global(Reg::Rbx, self.rt.sp);
         for (idx, &(op, pc)) in ops.iter().enumerate() {
+            if targets.contains(&pc) {
+                self.flush();
+            }
             self.a.bind(at[&pc]);
-            let next = ops.get(idx + 1).map_or(end, |&(_, p)| at[&p]);
+            // Where a slow path comes back: right after this instruction,
+            // before anything kept back is pushed for the next one.
+            let next = self.a.label();
             let to = |t: u32| at[&(t as usize)];
+            self.real = 0;
             if let Op::Jmp(t) = op {
+                self.flush();
                 self.a.jmp(to(t));
             } else if !self.fast(idx, op, next, &to) {
+                self.flush();
                 self.generic(idx, op, fail, &to);
             }
+            self.a.bind(next);
         }
         // Falling off the end: the runtime reports it (there is no instruction `ops.len()`).
+        self.flush();
         self.a.bind(end);
         self.generic(ops.len(), Op::Pop, fail, &|_| end);
-        for (label, idx, op, next) in std::mem::take(&mut self.slow) {
+        for (label, idx, op, next, kept) in std::mem::take(&mut self.slow) {
             self.a.bind(label);
+            self.pending = kept;
+            self.flush();
             self.generic(idx, op, fail, &|t| at[&(t as usize)]);
-            if !matches!(op, Op::Br3 { .. }) {
+            if matches!(op, Op::JNat(_)) {
                 self.a.jmp(next);
+            } else if !matches!(op, Op::Br3 { .. }) {
+                // Its result goes where the fast code keeps it.
+                let a = &mut *self.a;
+                a.load(Reg::R8, Reg::Rbx, -V);
+                a.load(Reg::R9, Reg::Rbx, -V + 8);
+                a.load(Reg::R10, Reg::Rbx, -V + 16);
+                a.alu_imm(Alu::Sub, Reg::Rbx, V);
+                a.jmp(next);
             }
         }
         let a = &mut *self.a;
@@ -180,8 +233,9 @@ impl Gen<'_> {
         Ok(out)
     }
 
-    /// Instruction number `idx`, run by the runtime.
+    /// Instruction number `idx`, run by the runtime (nothing may be kept back).
     fn generic(&mut self, idx: usize, op: Op, fail: Label, to: &dyn Fn(u32) -> Label) {
+        debug_assert!(self.pending.is_empty());
         let (a, rt) = (&mut *self.a, self.rt);
         a.store_global(rt.sp, Reg::Rbx);
         a.mov_imm(Reg::Rdi, self.k as u32);
@@ -210,23 +264,73 @@ impl Gen<'_> {
         }
     }
 
-    /// A label for the slow path of instruction `idx` (written after the function).
-    fn slow_path(&mut self, idx: usize, op: Op, next: Label) -> Label {
-        let l = self.a.label();
-        self.slow.push((l, idx, op, next));
-        l
-    }
-
     /// `[r12 + ...]`: variable `s`.
     fn local(s: u16) -> i32 {
         i32::from(s) * V
     }
 
-    /// Goes to `slow` unless the value at `[rbx + at]` is a `Word` (kind 0).
-    fn word_at(&mut self, at: i32, slow: Label) {
-        self.a.load(Reg::Rax, Reg::Rbx, at);
-        self.a.test(Reg::Rax);
-        self.a.jcc(Cond::Ne, slow);
+    /// Makes room on the stack for `n` values, keeping the registers in use.
+    fn room(&mut self, n: usize) {
+        let (ok, a) = (self.a.label(), &mut *self.a);
+        a.mov(Reg::R11, Reg::Rbx);
+        a.alu_imm(Alu::Add, Reg::R11, n as i32 * V);
+        a.cmp_global(Reg::R11, self.rt.limit);
+        a.jcc(Cond::B, ok);
+        // Six pushes keep the machine stack aligned.
+        let saved = [Reg::Rax, Reg::Rcx, Reg::R8, Reg::R9, Reg::R10, Reg::R11];
+        saved.iter().for_each(|&r| a.push(r));
+        a.store_global(self.rt.sp, Reg::Rbx);
+        a.mov_imm(Reg::Rdi, n as u32);
+        a.call_addr(self.rt.grow);
+        a.load_global(Reg::Rbx, self.rt.sp);
+        saved.iter().rev().for_each(|&r| a.pop(r));
+        a.bind(ok);
+    }
+
+    /// Pushes every value kept back, in order.
+    fn flush(&mut self) {
+        let pending = std::mem::take(&mut self.pending);
+        if pending.is_empty() {
+            return;
+        }
+        self.room(pending.len());
+        let a = &mut *self.a;
+        for (i, p) in pending.iter().enumerate() {
+            let at = i as i32 * V;
+            match *p {
+                Opnd::Const(v) => {
+                    a.store_imm(Reg::Rbx, at, 0);
+                    a.mov_imm64(Reg::R11, v);
+                    a.store(Reg::Rbx, at + 8, Reg::R11);
+                }
+                Opnd::Local(s) => {
+                    for q in [0, 8, 16] {
+                        a.load(Reg::R11, Reg::R12, Self::local(s) + q);
+                        a.store(Reg::Rbx, at + q, Reg::R11);
+                    }
+                }
+                Opnd::Tmp => {
+                    a.store(Reg::Rbx, at, Reg::R8);
+                    a.store(Reg::Rbx, at + 8, Reg::R9);
+                    a.store(Reg::Rbx, at + 16, Reg::R10);
+                }
+            }
+        }
+        a.alu_imm(Alu::Add, Reg::Rbx, pending.len() as i32 * V);
+    }
+
+    /// Pushes what is kept back below the top `n` values (an instruction
+    /// that takes `n` values sees only those), and gives the label of the
+    /// instruction's slow path.
+    fn prepare(&mut self, idx: usize, op: Op, next: Label, n: usize) -> Label {
+        if self.pending.len() > n {
+            let top = self.pending.split_off(self.pending.len() - n);
+            self.flush();
+            self.pending = top;
+        }
+        let l = self.a.label();
+        self.slow.push((l, idx, op, next, self.pending.clone()));
+        l
     }
 
     /// Goes to `slow` if `r` is NaT (`i64::MIN`: the only value whose `- 1` overflows).
@@ -234,6 +338,52 @@ impl Gen<'_> {
         self.a.mov(Reg::Rdx, r);
         self.a.alu_imm(Alu::Sub, Reg::Rdx, 1);
         self.a.jcc(Cond::O, slow);
+    }
+
+    /// Takes the top value into `dst`, going to `slow` unless it is an `int`
+    /// (not NaT). Uses `rdx`.
+    fn take_int(&mut self, dst: Reg, slow: Label) {
+        match self.pending.pop() {
+            Some(Opnd::Const(v)) => self.a.mov_imm64(dst, v),
+            Some(Opnd::Local(s)) => {
+                self.a.load(dst, Reg::R12, Self::local(s));
+                self.a.test(dst);
+                self.a.jcc(Cond::Ne, slow);
+                self.a.load(dst, Reg::R12, Self::local(s) + 8);
+                self.not_nat(dst, slow);
+            }
+            Some(Opnd::Tmp) => {
+                self.a.test(Reg::R8);
+                self.a.jcc(Cond::Ne, slow);
+                self.a.mov(dst, Reg::R9);
+                self.not_nat(dst, slow);
+            }
+            None => {
+                self.real += 1;
+                let at = -self.real * V;
+                self.a.load(dst, Reg::Rbx, at);
+                self.a.test(dst);
+                self.a.jcc(Cond::Ne, slow);
+                self.a.load(dst, Reg::Rbx, at + 8);
+                self.not_nat(dst, slow);
+            }
+        }
+    }
+
+    /// The values taken from the real stack are gone (the instruction succeeded).
+    fn drop_taken(&mut self) {
+        if self.real > 0 {
+            self.a.alu_imm(Alu::Sub, Reg::Rbx, self.real * V);
+            self.real = 0;
+        }
+    }
+
+    /// The `int` in `rax` is the result, kept back in registers.
+    fn result(&mut self) {
+        self.drop_taken();
+        self.a.mov_imm(Reg::R8, 0);
+        self.a.mov(Reg::R9, Reg::Rax);
+        self.pending.push(Opnd::Tmp);
     }
 
     /// Goes to `slow` unless `-WORD_MAX <= rax <= WORD_MAX` (uses `rcx`, `rdx`).
@@ -246,106 +396,137 @@ impl Gen<'_> {
         a.jcc(Cond::A, slow);
     }
 
-    /// Goes to `slow` unless the stack has room for one more value.
-    fn room(&mut self, slow: Label) {
-        self.a.cmp_global(Reg::Rbx, self.rt.limit);
-        self.a.jcc(Cond::Ae, slow);
-    }
-
-    /// Copies a value (three 8-byte parts) from `[from + f]` to `[to + t]`.
-    fn copy(&mut self, from: Reg, f: i32, to: Reg, t: i32) {
-        for q in [0, 8, 16] {
-            self.a.load(Reg::Rax, from, f + q);
-            self.a.store(to, t + q, Reg::Rax);
-        }
-    }
-
-    /// The two `int`s on top of the stack into `rax` (below) and `rcx` (top), or `slow`.
-    fn two_ints(&mut self, slow: Label) {
-        let a = &mut *self.a;
-        a.load(Reg::Rax, Reg::Rbx, -2 * V);
-        a.or_load(Reg::Rax, Reg::Rbx, -V);
-        a.test(Reg::Rax);
-        a.jcc(Cond::Ne, slow);
-        a.load(Reg::Rcx, Reg::Rbx, -V + 8);
-        self.not_nat(Reg::Rcx, slow);
-        self.a.load(Reg::Rax, Reg::Rbx, -2 * V + 8);
-        self.not_nat(Reg::Rax, slow);
-    }
-
-    /// Replaces the two values on top with the `int` in `rax`.
-    fn put_int2(&mut self) {
-        self.a.store(Reg::Rbx, -2 * V + 8, Reg::Rax);
-        self.a.alu_imm(Alu::Sub, Reg::Rbx, V);
-    }
-
     /// Writes `op` as machine code for its common case (plain `int`s), with
     /// the runtime as its slow path. False if `op` always goes to the runtime.
     fn fast(&mut self, idx: usize, op: Op, next: Label, to: &dyn Fn(u32) -> Label) -> bool {
         match op {
             Op::PushC(k) => {
                 let Some(v) = Word::from(self.module.consts[k as usize]).get() else { return false };
-                let slow = self.slow_path(idx, op, next);
-                self.room(slow);
-                let a = &mut *self.a;
-                a.store_imm(Reg::Rbx, 0, 0);
-                a.mov_imm64(Reg::Rax, v);
-                a.store(Reg::Rbx, 8, Reg::Rax);
-                a.alu_imm(Alu::Add, Reg::Rbx, V);
-            }
-            Op::Load(s) | Op::Move(s) => {
-                let slow = self.slow_path(idx, op, next);
-                self.room(slow);
-                self.copy(Reg::R12, Self::local(s), Reg::Rbx, 0);
-                if let Op::Move(_) = op {
-                    // The variable is left without a value (NaT).
-                    self.a.store_imm(Reg::R12, Self::local(s), 0);
-                    self.a.mov_imm64(Reg::Rax, i64::MIN);
-                    self.a.store(Reg::R12, Self::local(s) + 8, Reg::Rax);
+                if self.pending.len() >= MAX_PENDING {
+                    self.flush();
                 }
-                self.a.alu_imm(Alu::Add, Reg::Rbx, V);
+                self.pending.push(Opnd::Const(v));
+            }
+            Op::Load(s) => {
+                if self.pending.len() >= MAX_PENDING {
+                    self.flush();
+                }
+                self.pending.push(Opnd::Local(s));
             }
             Op::Store(s) => {
-                self.a.alu_imm(Alu::Sub, Reg::Rbx, V);
-                self.copy(Reg::Rbx, 0, Reg::R12, Self::local(s));
-            }
-            Op::Pop => self.a.alu_imm(Alu::Sub, Reg::Rbx, V),
-            Op::Add | Op::Sub | Op::Mul => {
-                let slow = self.slow_path(idx, op, next);
-                self.two_ints(slow);
-                match op {
-                    Op::Add => self.a.alu(Alu::Add, Reg::Rax, Reg::Rcx),
-                    Op::Sub => self.a.alu(Alu::Sub, Reg::Rax, Reg::Rcx),
-                    _ => {
-                        self.a.imul(Reg::Rax, Reg::Rcx);
-                        self.a.jcc(Cond::O, slow);
+                let v = self.pending.pop();
+                // A value kept back may read the variable: push it before it changes.
+                if self.pending.contains(&Opnd::Local(s)) {
+                    self.flush();
+                }
+                let (a, at) = (&mut *self.a, Self::local(s));
+                match v {
+                    Some(Opnd::Const(c)) => {
+                        a.store_imm(Reg::R12, at, 0);
+                        a.mov_imm64(Reg::Rax, c);
+                        a.store(Reg::R12, at + 8, Reg::Rax);
+                    }
+                    Some(Opnd::Local(from)) => {
+                        for q in [0, 8, 16] {
+                            a.load(Reg::Rax, Reg::R12, Self::local(from) + q);
+                            a.store(Reg::R12, at + q, Reg::Rax);
+                        }
+                    }
+                    Some(Opnd::Tmp) => {
+                        a.store(Reg::R12, at, Reg::R8);
+                        a.store(Reg::R12, at + 8, Reg::R9);
+                        a.store(Reg::R12, at + 16, Reg::R10);
+                    }
+                    None => {
+                        a.alu_imm(Alu::Sub, Reg::Rbx, V);
+                        for q in [0, 8, 16] {
+                            a.load(Reg::Rax, Reg::Rbx, q);
+                            a.store(Reg::R12, at + q, Reg::Rax);
+                        }
                     }
                 }
-                self.in_range(slow);
-                self.put_int2();
             }
-            Op::Cmp3 => {
-                let slow = self.slow_path(idx, op, next);
-                self.two_ints(slow);
-                // Both are within ±WORD_MAX, so the difference does not overflow.
-                self.a.alu(Alu::Sub, Reg::Rax, Reg::Rcx);
-                self.a.sign(Reg::Rax);
-                self.put_int2();
+            Op::Move(s) => {
+                // Pushed now: the variable is left without a value (NaT).
+                if self.pending.contains(&Opnd::Local(s)) || self.pending.len() >= MAX_PENDING {
+                    self.flush();
+                }
+                self.room(self.pending.len() + 1);
+                self.flush();
+                let a = &mut *self.a;
+                for q in [0, 8, 16] {
+                    a.load(Reg::Rax, Reg::R12, Self::local(s) + q);
+                    a.store(Reg::Rbx, q, Reg::Rax);
+                }
+                a.store_imm(Reg::R12, Self::local(s), 0);
+                a.mov_imm64(Reg::Rax, i64::MIN);
+                a.store(Reg::R12, Self::local(s) + 8, Reg::Rax);
+                a.alu_imm(Alu::Add, Reg::Rbx, V);
+            }
+            Op::JNat(t) => {
+                // A real may be NaT too: the runtime decides that one.
+                self.flush();
+                let slow = self.prepare(idx, op, next, 0);
+                let a = &mut *self.a;
+                a.load(Reg::Rax, Reg::Rbx, -V);
+                a.alu_imm(Alu::Cmp, Reg::Rax, 1);
+                a.jcc(Cond::E, slow);
+                a.test(Reg::Rax);
+                a.jcc(Cond::Ne, next); // a text or a pointer is never NaT
+                a.load(Reg::Rax, Reg::Rbx, -V + 8);
+                a.alu_imm(Alu::Sub, Reg::Rax, 1);
+                a.jcc(Cond::No, next);
+                a.alu_imm(Alu::Sub, Reg::Rbx, V);
+                a.jmp(to(t));
+            }
+            Op::Pop => {
+                if self.pending.pop().is_none() {
+                    self.a.alu_imm(Alu::Sub, Reg::Rbx, V);
+                }
+            }
+            Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Cmp3 => {
+                let slow = self.prepare(idx, op, next, 2);
+                self.take_int(Reg::Rcx, slow);
+                self.take_int(Reg::Rax, slow);
+                let a = &mut *self.a;
+                match op {
+                    Op::Add => a.alu(Alu::Add, Reg::Rax, Reg::Rcx),
+                    Op::Sub => a.alu(Alu::Sub, Reg::Rax, Reg::Rcx),
+                    Op::Mul => {
+                        a.imul(Reg::Rax, Reg::Rcx);
+                        a.jcc(Cond::O, slow);
+                    }
+                    Op::Div | Op::Mod => {
+                        // Division by zero: the runtime gives NaT or the trap.
+                        a.test(Reg::Rcx);
+                        a.jcc(Cond::E, slow);
+                        a.cqo();
+                        a.idiv(Reg::Rcx);
+                        if op == Op::Mod {
+                            a.mov(Reg::Rax, Reg::Rdx);
+                        }
+                    }
+                    // Both are within ±WORD_MAX, so the difference does not overflow.
+                    _ => {
+                        a.alu(Alu::Sub, Reg::Rax, Reg::Rcx);
+                        a.sign(Reg::Rax);
+                    }
+                }
+                if matches!(op, Op::Add | Op::Sub | Op::Mul) {
+                    self.in_range(slow);
+                }
+                self.result();
             }
             Op::Neg => {
-                let slow = self.slow_path(idx, op, next);
-                self.word_at(-V, slow);
-                self.a.load(Reg::Rax, Reg::Rbx, -V + 8);
-                self.not_nat(Reg::Rax, slow);
+                let slow = self.prepare(idx, op, next, 1);
+                self.take_int(Reg::Rax, slow);
                 self.a.neg(Reg::Rax);
-                self.a.store(Reg::Rbx, -V + 8, Reg::Rax);
+                self.result();
             }
             Op::Test(mask) => {
                 // The trit is `+` for the signs whose bit is set in `mask`, `-` otherwise.
-                let slow = self.slow_path(idx, op, next);
-                self.word_at(-V, slow);
-                self.a.load(Reg::Rax, Reg::Rbx, -V + 8);
-                self.not_nat(Reg::Rax, slow);
+                let slow = self.prepare(idx, op, next, 1);
+                self.take_int(Reg::Rax, slow);
                 let trit = |bit: u8| if mask & (1 << bit) != 0 { 1 } else { -1 };
                 let (neg, zero, done) = (self.a.label(), self.a.label(), self.a.label());
                 let a = &mut *self.a;
@@ -360,34 +541,17 @@ impl Gen<'_> {
                 a.bind(zero);
                 a.mov_imm64(Reg::Rax, trit(1));
                 a.bind(done);
-                a.store(Reg::Rbx, -V + 8, Reg::Rax);
+                self.result();
             }
             Op::Br3 { neg, zero, pos } => {
-                let slow = self.slow_path(idx, op, next);
-                self.word_at(-V, slow);
-                self.a.load(Reg::Rax, Reg::Rbx, -V + 8);
-                self.not_nat(Reg::Rax, slow);
+                let slow = self.prepare(idx, op, next, 1);
+                self.take_int(Reg::Rax, slow);
+                self.drop_taken();
                 let a = &mut *self.a;
-                a.alu_imm(Alu::Sub, Reg::Rbx, V);
                 a.test(Reg::Rax);
                 a.jcc(Cond::L, to(neg));
                 a.jcc(Cond::E, to(zero));
                 a.jmp(to(pos));
-            }
-            Op::JNat(t) => {
-                // A real may be NaT too: the runtime decides that one.
-                let slow = self.slow_path(idx, op, next);
-                let a = &mut *self.a;
-                a.load(Reg::Rax, Reg::Rbx, -V);
-                a.alu_imm(Alu::Cmp, Reg::Rax, 1);
-                a.jcc(Cond::E, slow);
-                a.test(Reg::Rax);
-                a.jcc(Cond::Ne, next); // a text or a pointer is never NaT
-                a.load(Reg::Rax, Reg::Rbx, -V + 8);
-                a.alu_imm(Alu::Sub, Reg::Rax, 1);
-                a.jcc(Cond::No, next);
-                a.alu_imm(Alu::Sub, Reg::Rbx, V);
-                a.jmp(to(t));
             }
             _ => return false,
         }

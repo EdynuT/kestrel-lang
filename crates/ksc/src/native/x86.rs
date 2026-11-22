@@ -28,6 +28,10 @@ pub enum Reg {
     Rsp = 4,
     Rsi = 6,
     Rdi = 7,
+    R8 = 8,
+    R9 = 9,
+    R10 = 10,
+    R11 = 11,
     R12 = 12,
 }
 
@@ -228,6 +232,17 @@ impl Asm {
         self.code.extend_from_slice(&[0x0f, 0xaf, 0xc0 | dst.low() << 3 | src.low()]);
     }
 
+    /// `cqo`: sign-extends `rax` into `rdx`, before `idiv`.
+    pub fn cqo(&mut self) {
+        self.code.extend_from_slice(&[0x48, 0x99]);
+    }
+
+    /// `idiv r`: `rdx:rax / r`, the quotient (towards zero) in `rax`, the remainder in `rdx`.
+    pub fn idiv(&mut self, r: Reg) {
+        self.rex(0, r);
+        self.code.extend_from_slice(&[0xf7, 0xf8 | r.low()]);
+    }
+
     /// `neg r`
     pub fn neg(&mut self, r: Reg) {
         self.rex(0, r);
@@ -329,6 +344,12 @@ mod tests {
         assert_eq!(bytes(|a| a.neg(Reg::Rax)), [0x48, 0xf7, 0xd8]);
         assert_eq!(bytes(|a| a.mov_imm64(Reg::Rdx, -1)), [0x48, 0xba, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
         assert_eq!(bytes(|a| a.push(Reg::R12)), [0x41, 0x54]);
+        assert_eq!(bytes(|a| a.push(Reg::R9)), [0x41, 0x51]);
+        assert_eq!(bytes(|a| a.mov(Reg::R8, Reg::Rax)), [0x49, 0x89, 0xc0]);
+        assert_eq!(bytes(|a| a.mov(Reg::Rax, Reg::R9)), [0x4c, 0x89, 0xc8]);
+        assert_eq!(bytes(|a| a.load(Reg::R10, Reg::Rbx, -8)), [0x4c, 0x8b, 0x93, 0xf8, 0xff, 0xff, 0xff]);
+        assert_eq!(bytes(|a| a.cqo()), [0x48, 0x99]);
+        assert_eq!(bytes(|a| a.idiv(Reg::Rcx)), [0x48, 0xf7, 0xf9]);
         assert_eq!(bytes(|a| a.pop(Reg::R12)), [0x41, 0x5c]);
         assert_eq!(bytes(|a| a.jmp_reg(Reg::Rax)), [0xff, 0xe0]);
         // test rax,rax; setg dl; setl cl; sub dl,cl; movsx rax,dl

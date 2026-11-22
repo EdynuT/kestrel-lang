@@ -52,14 +52,15 @@ pub static mut KRT_LIMIT: usize = 0;
 #[used]
 pub static KRT_ABI: [u64; 2] = [ABI, std::mem::size_of::<Value>() as u64];
 /// Bumped when the native code's view of the runtime changes.
-pub const ABI: u64 = 2;
+pub const ABI: u64 = 3;
 /// Room kept free on the stack past its top, for native pushes.
 const SLACK: usize = 64;
 
 /// The functions the native code calls, kept by the linker through this table.
 #[used]
-static KEEP: [extern "C" fn(); 4] = unsafe {
+static KEEP: [extern "C" fn(); 5] = unsafe {
     [
+        std::mem::transmute::<extern "C" fn(u32), extern "C" fn()>(krt_grow),
         std::mem::transmute::<extern "C" fn(usize) -> *mut Value, extern "C" fn()>(krt_enter_fn),
         std::mem::transmute::<extern "C" fn(u32, u32) -> u64, extern "C" fn()>(krt_op),
         std::mem::transmute::<extern "C" fn() -> Landing, extern "C" fn()>(krt_unwind),
@@ -198,6 +199,15 @@ extern "C" fn krt_enter_fn(sp: usize) -> *mut Value {
     let f = rt().vm.frame();
     f.native_sp = sp;
     f.locals.as_mut_ptr()
+}
+
+/// Makes room for `n` more values on the stack (it may move).
+#[unsafe(no_mangle)]
+extern "C" fn krt_grow(n: u32) {
+    let vm = &mut rt().vm;
+    sync_in(vm);
+    vm.stack.reserve(n as usize + SLACK);
+    sync_out(vm);
 }
 
 /// The variables of the frame running now (after a jump to a handler).

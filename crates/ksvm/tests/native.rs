@@ -116,3 +116,38 @@ fn edges_natively() {
     assert_eq!(vm, native);
     assert_eq!(native.1, 101, "{}", native.0); // the last line overflows
 }
+
+/// Values the machine code keeps back instead of pushing: a variable read
+/// before it changes, long expressions, NaT and objects in the middle.
+const DEFERRED: &str = r#"
+proc half(x: int) -> int { r: int = x / 0 on NaT { return x % 3; }; return r; }
+proc main() {
+    a: int = 1; b: int = 2;
+    t: int = a; a = b; b = t;
+    printl(a * 10 + b);
+    a = a;
+    c: int = ((a + 1) * (b + 2) - (a - b) * 3) / 2 % 5 + (a + b + 1 + 2 + 3 + 4 + 5 + 6 + 7);
+    printl(c);
+    n: int? = null;
+    printl(n ?: a + b);
+    m: int? = 5;
+    printl((m ?: 0) + a);
+    printl(half(7) + half(-7));
+    printl(-7 / 2 + -7 % 2 * 10);
+    v[]: int = {4, 5, 6};
+    w[]: int = give v;
+    printl(len(w) + w[1] * a);
+    burn w;
+    s: int = 0;
+    walk i in 1..5 { if i % 2 == 0 { s = s + i * i; } else { s = s - i; } }
+    printl(s);
+    printl(1 / (a - 2));
+}
+"#;
+
+#[test]
+fn deferred_values_natively() {
+    let (vm, native) = both("deferred", DEFERRED);
+    assert_eq!(vm, native);
+    assert_eq!(native.1, 101, "{}", native.0); // the last line divides by zero
+}

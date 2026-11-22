@@ -57,8 +57,8 @@ Negation is free in balanced ternary: flip every trit (`0t+0-` = 8, `0t-0+` = �
 ```
 crates/
 ├── kestrel-core/   ternary int and real types, instruction set, .ksb format, linker
-├── ksc/            compiler: lexer, parser, modules, type checker, checked errors, ownership checker, codegen
-└── ksvm/           virtual machine, runs .ksb
+├── ksc/            compiler: lexer, parser, modules, type checker, checked errors, ownership checker, codegen, native x86-64 backend (own assembler and ELF writer)
+└── ksvm/           virtual machine, runs .ksb; the runtime of native executables
 std/                the standard library (Kestrel), built into ksc
 SPEC.md             language and VM specification (Portuguese)
 ```
@@ -68,7 +68,7 @@ SPEC.md             language and VM specification (Portuguese)
 Requires a recent stable Rust toolchain.
 
 ```
-cargo build --release   # ksc and ksvm in target/release (keep them together: an executable is a copy of ksvm)
+cargo build --release   # ksc and ksvm in target/release (keep them together: ksvm is the runtime of every native executable)
 ksc new Game         # creates Game/ with src/Main.ks
 cd Game
 ksc run              # compiles src/ into build/obj/ and the executable build/Game, then runs it

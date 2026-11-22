@@ -12,6 +12,27 @@ use kestrel_core::charset::{Class, char_to_tryte, tryte_to_char};
 use kestrel_core::isa::{Op, slot_name};
 use kestrel_core::{Module, Real, Word, Word27};
 
+pub mod native;
+
+/// The exit code of a run (and its message, on stderr): the value `main`
+/// returns (mod 256), 101 on a Trap, 102 if `main` returns NaT.
+pub fn exit_code(r: Result<Value, Trap>) -> u8 {
+    match r {
+        Ok(Value::Word(w)) => match w.get() {
+            Some(v) => v.rem_euclid(256) as u8,
+            None => {
+                eprintln!("ksvm: main yielded NaT");
+                102
+            }
+        },
+        Ok(_) => 0,
+        Err(trap) => {
+            eprintln!("\nksvm: {trap}\nksvm: heap and registers were zeroed");
+            101
+        }
+    }
+}
+
 /// Deepest call chain before the VM traps with a stack overflow.
 pub use kestrel_core::limits::MAX_CALL_DEPTH as MAX_DEPTH;
 /// The reason given when [`Vm::with_fuel`]'s limit runs out.
@@ -99,6 +120,8 @@ struct Frame {
     soft: bool,
     /// Stack height when the frame started: a handler starts with the stack cut back to it.
     base: usize,
+    /// In native mode: the machine stack pointer inside the frame's code.
+    native_sp: usize,
 }
 
 pub struct Vm<'m, R, W> {
@@ -192,30 +215,36 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             match self.step() {
                 Ok(Some(v)) => return Ok(v),
                 Ok(None) => {}
-                Err(reason) => {
-                    if let Some(t) = self.escaped.take() {
-                        return Err(t);
-                    }
-                    let func = self.frames.last().map_or(self.module.entry as usize, |f| f.func);
-                    let trap = Trap { func: self.module.functions[func].name.clone(), at: self.op_at, reason };
-                    // Running out of fuel (a test's limit) is not the program's failure.
-                    if trap.reason == FUEL {
-                        return Err(trap);
-                    }
-                    // The failure becomes a `Trap` error, which a `catch` may take.
-                    let reason = trap.reason.chars().collect();
-                    if self.make_text(reason).is_err() {
-                        return Err(trap);
-                    }
-                    let text = self.pop().expect("the text was pushed");
-                    let p = self.alloc(vec![text], 1, false);
-                    self.traps.insert(p.block, trap);
-                    let tag = Value::Word(Word::new(kestrel_core::class_tag(kestrel_core::TRAP_CLASS)));
-                    if self.throw(Value::Ptr(p), tag).is_err() {
-                        return Err(self.escaped.take().expect("set by throw"));
-                    }
-                }
+                Err(reason) => self.fail(reason)?,
             }
+        }
+    }
+
+    /// After an instruction failed with `reason` (or threw): goes to the
+    /// handler that takes the error (the top frame's `pc` is set to it), or
+    /// gives the trap that stops the program.
+    fn fail(&mut self, reason: String) -> Result<(), Trap> {
+        if let Some(t) = self.escaped.take() {
+            return Err(t);
+        }
+        let func = self.frames.last().map_or(self.module.entry as usize, |f| f.func);
+        let trap = Trap { func: self.module.functions[func].name.clone(), at: self.op_at, reason };
+        // Running out of fuel (a test's limit) is not the program's failure.
+        if trap.reason == FUEL {
+            return Err(trap);
+        }
+        // The failure becomes a `Trap` error, which a `catch` may take.
+        let reason = trap.reason.chars().collect();
+        if self.make_text(reason).is_err() {
+            return Err(trap);
+        }
+        let text = self.pop().expect("the text was pushed");
+        let p = self.alloc(vec![text], 1, false);
+        self.traps.insert(p.block, trap);
+        let tag = Value::Word(Word::new(kestrel_core::class_tag(kestrel_core::TRAP_CLASS)));
+        match self.throw(Value::Ptr(p), tag) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(self.escaped.take().expect("set by throw")),
         }
     }
 
@@ -278,7 +307,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         let mut locals = vec![Value::Word(Word::ZERO); usize::from(f.locals)];
         locals[..args.len()].copy_from_slice(&args);
         let base = self.stack.len();
-        self.frames.push(Frame { func, pc: 0, locals, soft: false, base });
+        self.frames.push(Frame { func, pc: 0, locals, soft: false, base, native_sp: 0 });
         Ok(())
     }
 
@@ -297,7 +326,12 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         self.op_at = frame.pc;
         let (op, size) = Op::decode(code, frame.pc).map_err(|e| e.to_string())?;
         frame.pc += size;
+        self.exec(op)
+    }
 
+    /// Runs one instruction (already read from `op_at`, with the frame's
+    /// `pc` past it). A jump or call only changes the frames' `pc`s.
+    fn exec(&mut self, op: Op) -> Step {
         match op {
             Op::PushC(k) => self.push(Value::Word(Word::from(self.module.consts[k as usize]))),
             Op::PushR(k) => self.push(Value::Real(Real::from(self.module.consts[k as usize]))),

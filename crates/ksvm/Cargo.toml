@@ -6,3 +6,7 @@ license.workspace = true
 
 [dependencies]
 kestrel-core = { path = "../kestrel-core" }
+
+[dev-dependencies]
+# The native tests compile programs with ksc and run them as executables.
+ksc = { path = "../ksc" }

@@ -963,7 +963,7 @@ lib/fisica/Corpo.ksb ───────────────────�
 2. **Um objeto por arquivo:** cada `.ks` é checado e compilado sozinho, lendo só as declarações dos arquivos que alcança, e vira um `.ksb` em `build/obj/`.
 3. **Recompilação, como no `make`:** um objeto é refeito só se o seu `.ks` mudou, ou a parte pública de um arquivo que ele alcança, ou o `ksc`. Mudar só o corpo de um proc (ou um comentário) recompila só aquele arquivo. Apagar `build/` recompila tudo.
 4. **Ligação:** o ligador junta os objetos pelo nome das funções, mantém uma cópia de cada genérico e escreve as funções que dependem do programa inteiro: cada chamada por interface (`$dispatch.Forma.area`) e cada `burn` de um valor de interface (`$burnI.Forma`) testam as classes de todos os arquivos. Por isso um arquivo pode receber, por uma interface, um objeto de uma classe que ele não conhece. Um `match` por classe sem `else` dispara Trap para uma classe que não lista.
-5. **Executável:** uma cópia do `ksvm` com o programa no fim. Roda sem instalar nada (vai junto a VM, não o compilador, como no Go).
+5. **Executável (código de máquina):** o `ksc` traduz o programa para x86-64 e escreve ele mesmo o ELF, sem `as` nem `ld`: uma cópia do `ksvm` (o *runtime*: heap, textos, reais, impressão) com um segmento a mais, que tem o código de máquina, o `.ksb` e uma tabela de endereços. Roda sem instalar nada. Por enquanto só Linux x86-64. Os saltos e as chamadas são instruções de verdade; as outras instruções ainda chamam o runtime, uma a uma (o próximo passo é traduzi-las para registradores).
 
 Por dentro, cada item de outro arquivo ganha o nome completo (`Geometry.area`, `shapes.Circle`), que é o que aparece nas mensagens, nos testes e no `--disasm`. Cada classe recebe um número calculado do nome, igual em todos os arquivos; o ligador confere que duas classes nunca têm o mesmo.
 
@@ -1076,7 +1076,7 @@ Functions      fn_count ×
 
 - **Bit 0 de `flags`** indica que o arquivo traz os nomes das variáveis, para o `dump` mostrar `R0 (acc)`.
 - **Bit 1 de `flags`** marca um **objeto**: um arquivo `.ks` compilado sozinho, ainda não ligado. Funções de outros arquivos aparecem como importadas (sem código), e as de despacho são escritas pelo ligador. O `ksvm` só roda programas ligados.
-- **Executável:** uma cópia do `ksvm` seguida do `.ksb` do programa, do tamanho dele (`u64`) e da marca `K3B-EXE1`. Ao iniciar, o `ksvm` procura a marca no fim de si mesmo.
+- **Executável:** uma cópia do `ksvm` com um segmento ELF a mais (código x86-64, o `.ksb` e a tabela de endereços das funções e dos tratadores); o `ksc` preenche a variável `KRT_PROGRAM` do runtime com onde eles estão. O `ksvm` também ainda roda o formato antigo: uma cópia dele seguida do `.ksb`, do tamanho dele (`u64`) e da marca `K3B-EXE1`.
 - **Verificação na leitura:** o arquivo é rejeitado se algum salto cair fora do início de uma instrução, se um índice de constante, string, função ou slot não existir, se o número de argumentos de uma chamada não bater com os parâmetros da função chamada, ou se um tratador não começar, terminar e apontar para o início de uma instrução.
 
 Os saltos usam um **offset absoluto em bytes** (`u32`) dentro do código da própria função.

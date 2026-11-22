@@ -12,6 +12,7 @@ pub mod hir;
 pub mod lexer;
 pub mod linear;
 pub mod modules;
+pub mod native;
 pub mod object;
 pub mod parser;
 pub mod resolve;

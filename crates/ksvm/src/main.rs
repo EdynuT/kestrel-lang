@@ -8,10 +8,14 @@ use std::io::{self, BufWriter};
 use std::process::ExitCode;
 
 use kestrel_core::Module;
-use ksvm::{Value, Vm};
+use ksvm::Vm;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    // An executable made by `ksc build`: native code (see `ksvm::native`).
+    if let Some(code) = ksvm::native::run_if_present(args[1..].to_vec()) {
+        return ExitCode::from(code);
+    }
     // An executable made by `ksc` is this program with a `.ksb` at its end:
     // then it runs that, and every argument is the program's.
     let me = std::env::current_exe().and_then(std::fs::read).unwrap_or_default();
@@ -36,18 +40,5 @@ fn main() -> ExitCode {
 
     let stdin = io::stdin().lock();
     let stdout = BufWriter::new(io::stdout().lock());
-    match Vm::new(&module, stdin, stdout).with_args(program_args).run() {
-        Ok(Value::Word(w)) => match w.get() {
-            Some(v) => ExitCode::from(v.rem_euclid(256) as u8),
-            None => {
-                eprintln!("ksvm: main yielded NaT");
-                ExitCode::from(102)
-            }
-        },
-        Ok(_) => ExitCode::SUCCESS,
-        Err(trap) => {
-            eprintln!("\nksvm: {trap}\nksvm: heap and registers were zeroed");
-            ExitCode::from(101)
-        }
-    }
+    ExitCode::from(ksvm::exit_code(Vm::new(&module, stdin, stdout).with_args(program_args).run()))
 }

@@ -264,8 +264,9 @@ fn write_program(out: &Path, output: &ksc::Output, ksb: bool) -> bool {
     let bytes = if ksb {
         program
     } else {
-        match runtime() {
-            Ok(vm) => kestrel_core::ksb::bundle(&vm, &program),
+        // Machine code, in a copy of the runtime (see `ksc::native`).
+        match runtime().and_then(|vm| ksc::native::build(&output.module, &vm)) {
+            Ok(exe) => exe,
             Err(e) => {
                 eprintln!("ksc: {e}\nksc: to write a `.ksb` for ksvm instead, use --ksb");
                 return false;
@@ -317,7 +318,7 @@ fn run(module: &kestrel_core::Module, args: Vec<String>) -> ExitCode {
 fn runtime() -> Result<Vec<u8>, String> {
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let vm = me.with_file_name(format!("ksvm{}", std::env::consts::EXE_SUFFIX));
-    std::fs::read(&vm).map_err(|e| format!("cannot read {} (an executable is a copy of it): {e}", vm.display()))
+    std::fs::read(&vm).map_err(|e| format!("cannot read {} (the runtime of every executable): {e}", vm.display()))
 }
 
 /// Tells this build of `ksc` from others, so `build/` objects made by

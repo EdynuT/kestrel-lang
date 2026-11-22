@@ -1954,6 +1954,8 @@ impl Checker {
     fn unknown(&self, name: &str, span: Span) -> Diagnostic {
         if self.proc_ids.contains_key(name) {
             err(format!("`{name}` is a proc; call it with `{name}(...)`"), span)
+        } else if let Some(key) = crate::modules::std_file_named(name) {
+            err(format!("unknown name `{name}`"), span).with_note(format!("add `use std.{key};` at the top of the file"))
         } else if name.starts_with(|c: char| c.is_ascii_uppercase()) {
             err(format!("unknown name `{name}`"), span)
                 .with_note(format!("if it is another file (`{name}.ks`), add `use {name};` at the top of this one"))

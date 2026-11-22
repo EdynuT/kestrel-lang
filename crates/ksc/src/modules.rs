@@ -35,6 +35,12 @@ pub fn std_source(key: &str) -> Option<&'static str> {
     STD.iter().find(|(k, _)| *k == key).map(|(_, t)| *t)
 }
 
+/// The file of the standard library named `alias` (`Console` is
+/// `io.Console`), if there is one.
+pub fn std_file_named(alias: &str) -> Option<&'static str> {
+    STD.iter().map(|(k, _)| *k).find(|k| k.rsplit('.').next() == Some(alias))
+}
+
 /// A file found for a `use`.
 pub struct Found {
     /// The path shown in messages.

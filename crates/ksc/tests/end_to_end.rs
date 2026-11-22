@@ -2441,6 +2441,9 @@ fn builtins_live_in_std() {
     assert_eq!(e.note.as_deref(), Some("add `use std.io.Console;` at the top of the file and write `Console.printl(...)`"));
     let e = ksc::compile("proc main() { b: bool = fileExists(\"x\"); }").unwrap_err();
     assert_eq!(e.note.as_deref(), Some("add `use std.io.Files;` at the top of the file and write `Files.exists(...)`"));
+    // Its file, without `use`.
+    let e = ksc::compile("proc main() { Console.printl(1); }").unwrap_err();
+    assert_eq!(e.note.as_deref(), Some("add `use std.io.Console;` at the top of the file"));
     // `len`, `append` and the rest of the arrays' stay where they were.
     assert_eq!(out("use std.io.Console;\nproc main() { v[]: int = {1}; append(v, 2); Console.printl(len(v)); burn v; }"), "2\n");
 }

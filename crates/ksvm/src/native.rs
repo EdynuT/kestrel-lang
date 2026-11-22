@@ -39,15 +39,52 @@ pub const PRESENT: u64 = u64::from_le_bytes(*b"KRT-PROG");
 #[used]
 pub static mut KRT_PROGRAM: Program = Program { present: ABSENT, code: 1, ksb: 1, ksb_len: 1, table: 1, table_len: 1 };
 
+/// The top of the VM's stack, while native code runs: the address of the
+/// next free value. Native code keeps it in `rbx`, and stores it here
+/// before calling in (and loads it back after).
+#[unsafe(no_mangle)]
+pub static mut KRT_SP: usize = 0;
+/// The end of the stack's room: native code pushes on its own only below it.
+#[unsafe(no_mangle)]
+pub static mut KRT_LIMIT: usize = 0;
+/// What `ksc` must agree with: this layout's version and the size of a [`Value`].
+#[unsafe(no_mangle)]
+#[used]
+pub static KRT_ABI: [u64; 2] = [ABI, std::mem::size_of::<Value>() as u64];
+/// Bumped when the native code's view of the runtime changes.
+pub const ABI: u64 = 2;
+/// Room kept free on the stack past its top, for native pushes.
+const SLACK: usize = 64;
+
 /// The functions the native code calls, kept by the linker through this table.
 #[used]
-static KEEP: [extern "C" fn(); 3] = unsafe {
+static KEEP: [extern "C" fn(); 4] = unsafe {
     [
-        std::mem::transmute::<extern "C" fn(usize), extern "C" fn()>(krt_enter_fn),
+        std::mem::transmute::<extern "C" fn(usize) -> *mut Value, extern "C" fn()>(krt_enter_fn),
         std::mem::transmute::<extern "C" fn(u32, u32) -> u64, extern "C" fn()>(krt_op),
         std::mem::transmute::<extern "C" fn() -> Landing, extern "C" fn()>(krt_unwind),
+        std::mem::transmute::<extern "C" fn() -> *mut Value, extern "C" fn()>(krt_locals),
     ]
 };
+
+/// Takes the stack's top from native code (it may have pushed or popped).
+fn sync_in(vm: &mut NativeVm) {
+    let base = vm.stack.as_ptr() as usize;
+    // The values up to `KRT_SP` were written by native code (or are the
+    // stack's own): `Value` is plain data, and `sync_out` kept the room.
+    unsafe { vm.stack.set_len((KRT_SP - base) / std::mem::size_of::<Value>()) };
+}
+
+/// Gives native code the stack's top and room (the stack may have moved).
+fn sync_out(vm: &mut NativeVm) {
+    vm.stack.reserve(SLACK);
+    let size = std::mem::size_of::<Value>();
+    let base = vm.stack.as_ptr() as usize;
+    unsafe {
+        KRT_SP = base + vm.stack.len() * size;
+        KRT_LIMIT = base + vm.stack.capacity() * size;
+    }
+}
 
 type NativeVm = Vm<'static, StdinLock<'static>, BufWriter<StdoutLock<'static>>>;
 
@@ -111,6 +148,7 @@ pub fn run_if_present(args: Vec<String>) -> Option<u8> {
     if let Err(reason) = rt().vm.enter(entry, Vec::new()) {
         finish(Err(Trap { func: module.functions[entry].name.clone(), at: 0, reason }));
     }
+    sync_out(&mut rt().vm);
     let main: extern "C" fn() = unsafe { std::mem::transmute(entries[entry]) };
     main();
     unreachable!("main ends the program in krt_op")
@@ -153,10 +191,19 @@ fn finish(r: Result<Value, Trap>) -> ! {
     std::process::exit(i32::from(code))
 }
 
-/// Called first by each native function: where its frame's code keeps the stack.
+/// Called first by each native function, with where its code keeps the
+/// machine stack; gives its variables (native code keeps them in `r12`).
 #[unsafe(no_mangle)]
-extern "C" fn krt_enter_fn(sp: usize) {
-    rt().vm.frame().native_sp = sp;
+extern "C" fn krt_enter_fn(sp: usize) -> *mut Value {
+    let f = rt().vm.frame();
+    f.native_sp = sp;
+    f.locals.as_mut_ptr()
+}
+
+/// The variables of the frame running now (after a jump to a handler).
+#[unsafe(no_mangle)]
+extern "C" fn krt_locals() -> *mut Value {
+    rt().vm.frame().locals.as_mut_ptr()
 }
 
 /// Runs instruction `idx` of function `func`. Gives 0, or for `br3` the arm
@@ -164,8 +211,14 @@ extern "C" fn krt_enter_fn(sp: usize) {
 #[unsafe(no_mangle)]
 extern "C" fn krt_op(func: u32, idx: u32) -> u64 {
     let rt = rt();
-    let (op, pc, size) = rt.ops[func as usize][idx as usize];
     let vm = &mut rt.vm;
+    sync_in(vm);
+    let Some(&(op, pc, size)) = rt.ops[func as usize].get(idx as usize) else {
+        // Past the last instruction: the code fell off its end.
+        vm.op_at = vm.module.functions[func as usize].code.len();
+        rt.pending = Some("reached the end of the function without ret".into());
+        return u64::MAX;
+    };
     vm.op_at = pc;
     vm.frame().pc = pc + size;
     let op = match op {
@@ -176,7 +229,9 @@ extern "C" fn krt_op(func: u32, idx: u32) -> u64 {
         }
         op => op,
     };
-    match vm.exec(op) {
+    let r = vm.exec(op);
+    sync_out(vm);
+    match r {
         Ok(Some(v)) => finish(Ok(v)),
         Ok(None) => match op {
             Op::Br3 { .. } | Op::JNat(_) => vm.frame().pc as u64,
@@ -204,6 +259,7 @@ pub struct Landing {
 #[unsafe(no_mangle)]
 extern "C" fn krt_unwind() -> Landing {
     let rt = rt();
+    sync_in(&mut rt.vm);
     if !std::mem::take(&mut rt.thrown) {
         let reason = rt.pending.take().unwrap_or_default();
         if let Err(trap) = rt.vm.fail(reason) {
@@ -211,6 +267,7 @@ extern "C" fn krt_unwind() -> Landing {
         }
     }
     let f = rt.vm.frames.last().expect("a handler's frame");
-    let addr = rt.landings[&(f.func, f.pc)];
-    Landing { addr, sp: f.native_sp }
+    let landing = Landing { addr: rt.landings[&(f.func, f.pc)], sp: f.native_sp };
+    sync_out(&mut rt.vm);
+    landing
 }

@@ -1,34 +1,92 @@
 //! A small x86-64 assembler: just the instructions the native code needs,
 //! encoded by hand (see the Intel manual, volume 2), with labels.
+//!
+//! An instruction on 64-bit registers starts with a REX byte (`0x48`, plus
+//! bits for registers `r8`-`r15`), then the opcode, then a ModRM byte that
+//! names the registers (`mod` 11) or a register and a memory place (`mod`
+//! 10: a base register plus a 32-bit offset; `mod` 00 with `rm` 101: an
+//! offset from the next instruction, "RIP-relative").
 
 /// A place in the code, known before its address is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Label(usize);
 
-/// Where a 32-bit jump or call goes.
+/// Where a 32-bit offset in the code points.
 enum Target {
     Label(Label),
-    /// An address outside this code (a runtime function).
+    /// An address outside this code (a runtime function or variable).
     Addr(u64),
 }
 
-/// The 64-bit registers the code uses, by their number in the encoding.
-#[derive(Clone, Copy)]
+/// The 64-bit registers, by their number in the encoding.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Reg {
     Rax = 0,
+    Rcx = 1,
     Rdx = 2,
+    Rbx = 3,
     Rsp = 4,
     Rsi = 6,
     Rdi = 7,
+    R12 = 12,
 }
 
-/// The conditions of `jcc` (the low nibble of its opcode).
+impl Reg {
+    fn low(self) -> u8 {
+        self as u8 & 7
+    }
+    fn high(self) -> u8 {
+        (self as u8 >> 3) & 1
+    }
+}
+
+/// The conditions of `jcc` and `setcc` (the low nibble of their opcodes).
 #[derive(Clone, Copy)]
 pub enum Cond {
+    /// Overflow.
+    O = 0x0,
+    /// No overflow.
+    No = 0x1,
     /// Below (unsigned `<`).
     B = 0x2,
+    /// Above or equal (unsigned `>=`).
+    Ae = 0x3,
     E = 0x4,
     Ne = 0x5,
+    /// Above (unsigned `>`).
+    A = 0x7,
+    /// Less (signed `<`).
+    L = 0xc,
+    /// Greater (signed `>`).
+    G = 0xf,
+}
+
+/// Operations of the form `op r/m, r` (the opcode) and `op r/m, imm32` (the ModRM digit).
+#[derive(Clone, Copy)]
+pub enum Alu {
+    Add,
+    Or,
+    Sub,
+    Cmp,
+}
+
+impl Alu {
+    fn rr(self) -> u8 {
+        match self {
+            Alu::Add => 0x01,
+            Alu::Or => 0x09,
+            Alu::Sub => 0x29,
+            Alu::Cmp => 0x39,
+        }
+    }
+    fn digit(self) -> u8 {
+        match self {
+            Alu::Add => 0,
+            Alu::Or => 1,
+            Alu::Sub => 5,
+            Alu::Cmp => 7,
+        }
+    }
 }
 
 pub struct Asm {
@@ -36,7 +94,7 @@ pub struct Asm {
     /// The address the code is loaded at.
     base: u64,
     labels: Vec<Option<usize>>,
-    /// rel32 fields to fill in: where, and where they point.
+    /// 32-bit offsets to fill in: where (they end the instruction), and where they point.
     fixups: Vec<(usize, Target)>,
 }
 
@@ -65,33 +123,144 @@ impl Asm {
         self.code.extend_from_slice(&[0; 4]);
     }
 
-    /// `mov r32, imm32` (also zeroes the top half of the register).
-    pub fn mov_imm(&mut self, r: Reg, v: u32) {
-        self.code.push(0xb8 + r as u8);
+    /// REX.W with the high bits of `reg` (ModRM.reg) and `rm` (ModRM.rm or base).
+    fn rex(&mut self, reg: u8, rm: Reg) {
+        self.code.push(0x48 | (reg >> 3 & 1) << 2 | rm.high());
+    }
+
+    /// ModRM for `[base + disp]` (always a 32-bit offset), with `reg` in the middle.
+    fn mem(&mut self, reg: u8, base: Reg, disp: i32) {
+        self.code.push(0x80 | (reg & 7) << 3 | base.low());
+        if base.low() == 4 {
+            self.code.push(0x24); // rsp and r12 as a base need a SIB byte
+        }
+        self.code.extend_from_slice(&disp.to_le_bytes());
+    }
+
+    /// `mov dst, [base + disp]`
+    pub fn load(&mut self, dst: Reg, base: Reg, disp: i32) {
+        self.rex(dst as u8, base);
+        self.code.push(0x8b);
+        self.mem(dst as u8, base, disp);
+    }
+
+    /// `mov [base + disp], src`
+    pub fn store(&mut self, base: Reg, disp: i32, src: Reg) {
+        self.rex(src as u8, base);
+        self.code.push(0x89);
+        self.mem(src as u8, base, disp);
+    }
+
+    /// `mov qword [base + disp], imm32` (sign-extended).
+    pub fn store_imm(&mut self, base: Reg, disp: i32, v: i32) {
+        self.rex(0, base);
+        self.code.push(0xc7);
+        self.mem(0, base, disp);
         self.code.extend_from_slice(&v.to_le_bytes());
     }
 
-    /// `mov dst, src` (64 bits).
+    /// `mov dst, [rip + to addr]` / `mov [rip + to addr], src`: a runtime variable.
+    pub fn load_global(&mut self, dst: Reg, addr: u64) {
+        self.rex(dst as u8, Reg::Rax);
+        self.code.extend_from_slice(&[0x8b, (dst.low() << 3) | 5]);
+        self.rel32(Target::Addr(addr));
+    }
+    pub fn store_global(&mut self, addr: u64, src: Reg) {
+        self.rex(src as u8, Reg::Rax);
+        self.code.extend_from_slice(&[0x89, (src.low() << 3) | 5]);
+        self.rel32(Target::Addr(addr));
+    }
+
+    /// `cmp r, [rip + to addr]`
+    pub fn cmp_global(&mut self, r: Reg, addr: u64) {
+        self.rex(r as u8, Reg::Rax);
+        self.code.extend_from_slice(&[0x3b, (r.low() << 3) | 5]);
+        self.rel32(Target::Addr(addr));
+    }
+
+    /// `mov r, imm64`
+    pub fn mov_imm64(&mut self, r: Reg, v: i64) {
+        self.code.extend_from_slice(&[0x48 | r.high(), 0xb8 + r.low()]);
+        self.code.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// `mov r32, imm32` (also zeroes the top half of the register).
+    pub fn mov_imm(&mut self, r: Reg, v: u32) {
+        if r.high() == 1 {
+            self.code.push(0x41);
+        }
+        self.code.push(0xb8 + r.low());
+        self.code.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// `mov dst, src`
     pub fn mov(&mut self, dst: Reg, src: Reg) {
-        self.code.extend_from_slice(&[0x48, 0x89, 0xc0 | (src as u8) << 3 | dst as u8]);
+        self.alu_raw(0x89, dst, src);
     }
 
-    /// `sub rsp, n` / `add rsp, n` (n < 128).
-    pub fn sub_rsp(&mut self, n: u8) {
-        self.code.extend_from_slice(&[0x48, 0x83, 0xec, n]);
-    }
-    pub fn add_rsp(&mut self, n: u8) {
-        self.code.extend_from_slice(&[0x48, 0x83, 0xc4, n]);
+    fn alu_raw(&mut self, op: u8, dst: Reg, src: Reg) {
+        self.rex(src as u8, dst);
+        self.code.extend_from_slice(&[op, 0xc0 | src.low() << 3 | dst.low()]);
     }
 
-    /// `cmp rax, imm8` (sign-extended: `-1` compares with `u64::MAX`).
-    pub fn cmp_rax(&mut self, v: i8) {
-        self.code.extend_from_slice(&[0x48, 0x83, 0xf8, v as u8]);
+    /// `op dst, src`
+    pub fn alu(&mut self, op: Alu, dst: Reg, src: Reg) {
+        self.alu_raw(op.rr(), dst, src);
     }
 
-    /// `test eax, eax`
-    pub fn test_eax(&mut self) {
-        self.code.extend_from_slice(&[0x85, 0xc0]);
+    /// `op r, imm32` (sign-extended).
+    pub fn alu_imm(&mut self, op: Alu, r: Reg, v: i32) {
+        self.rex(0, r);
+        self.code.extend_from_slice(&[0x81, 0xc0 | op.digit() << 3 | r.low()]);
+        self.code.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// `or dst, [base + disp]`
+    pub fn or_load(&mut self, dst: Reg, base: Reg, disp: i32) {
+        self.rex(dst as u8, base);
+        self.code.push(0x0b);
+        self.mem(dst as u8, base, disp);
+    }
+
+    /// `imul dst, src` (sets the overflow flag when the product does not fit).
+    pub fn imul(&mut self, dst: Reg, src: Reg) {
+        self.rex(dst as u8, src);
+        self.code.extend_from_slice(&[0x0f, 0xaf, 0xc0 | dst.low() << 3 | src.low()]);
+    }
+
+    /// `neg r`
+    pub fn neg(&mut self, r: Reg) {
+        self.rex(0, r);
+        self.code.extend_from_slice(&[0xf7, 0xd8 | r.low()]);
+    }
+
+    /// `test r, r`
+    pub fn test(&mut self, r: Reg) {
+        self.alu_raw(0x85, r, r);
+    }
+
+    /// `r = sign(r)`: -1, 0 or 1 (uses `rcx` and `rdx`).
+    ///   test r, r; setg dl; setl cl; sub dl, cl; movsx r, dl
+    pub fn sign(&mut self, r: Reg) {
+        self.test(r);
+        self.code.extend_from_slice(&[0x0f, 0x90 | Cond::G as u8, 0xc2]);
+        self.code.extend_from_slice(&[0x0f, 0x90 | Cond::L as u8, 0xc1]);
+        self.code.extend_from_slice(&[0x28, 0xca]);
+        self.rex(r as u8, Reg::Rdx);
+        self.code.extend_from_slice(&[0x0f, 0xbe, 0xc0 | r.low() << 3 | Reg::Rdx.low()]);
+    }
+
+    pub fn push(&mut self, r: Reg) {
+        if r.high() == 1 {
+            self.code.push(0x41);
+        }
+        self.code.push(0x50 + r.low());
+    }
+    pub fn pop(&mut self, r: Reg) {
+        if r.high() == 1 {
+            self.code.push(0x41);
+        }
+        self.code.push(0x58 + r.low());
     }
 
     pub fn call_addr(&mut self, addr: u64) {
@@ -112,13 +281,13 @@ impl Asm {
     }
     /// `jmp r` (to an address in a register).
     pub fn jmp_reg(&mut self, r: Reg) {
-        self.code.extend_from_slice(&[0xff, 0xe0 | r as u8]);
+        self.code.extend_from_slice(&[0xff, 0xe0 | r.low()]);
     }
     pub fn ret(&mut self) {
         self.code.push(0xc3);
     }
 
-    /// Fills in every jump and call: the code is final.
+    /// Fills in every jump, call and RIP-relative offset: the code is final.
     pub fn finish(mut self) -> Result<Vec<u8>, String> {
         for (at, t) in std::mem::take(&mut self.fixups) {
             let to = match t {
@@ -137,27 +306,43 @@ impl Asm {
 mod tests {
     use super::*;
 
+    fn bytes(f: impl FnOnce(&mut Asm)) -> Vec<u8> {
+        let mut a = Asm::new(0x1000);
+        f(&mut a);
+        a.finish().unwrap()
+    }
+
     #[test]
     fn encodings() {
-        // Checked against `objdump -d`.
-        let mut a = Asm::new(0x1000);
-        a.mov_imm(Reg::Rdi, 5); // bf 05 00 00 00
-        a.mov(Reg::Rdi, Reg::Rsp); // 48 89 e7
-        a.mov(Reg::Rsp, Reg::Rdx); // 48 89 d4
-        a.sub_rsp(8); // 48 83 ec 08
-        a.cmp_rax(-1); // 48 83 f8 ff
-        a.jmp_reg(Reg::Rax); // ff e0
-        let top = a.label();
-        a.bind(top);
-        a.jcc(Cond::E, top); // 0f 84 fa ff ff ff (back to itself)
-        a.call_addr(0x1000); // e8 ..: back to the start
-        let code = a.finish().unwrap();
-        assert_eq!(
-            code,
-            [
-                0xbf, 5, 0, 0, 0, 0x48, 0x89, 0xe7, 0x48, 0x89, 0xd4, 0x48, 0x83, 0xec, 8, 0x48, 0x83, 0xf8, 0xff, 0xff, 0xe0, 0x0f,
-                0x84, 0xfa, 0xff, 0xff, 0xff, 0xe8, 0xe0, 0xff, 0xff, 0xff
-            ]
-        );
+        // Each one checked against `objdump -d`.
+        assert_eq!(bytes(|a| a.mov_imm(Reg::Rdi, 5)), [0xbf, 5, 0, 0, 0]);
+        assert_eq!(bytes(|a| a.mov(Reg::Rdi, Reg::Rsp)), [0x48, 0x89, 0xe7]);
+        assert_eq!(bytes(|a| a.mov(Reg::R12, Reg::Rax)), [0x49, 0x89, 0xc4]);
+        assert_eq!(bytes(|a| a.load(Reg::Rax, Reg::Rbx, -40)), [0x48, 0x8b, 0x83, 0xd8, 0xff, 0xff, 0xff]);
+        assert_eq!(bytes(|a| a.load(Reg::Rax, Reg::R12, 8)), [0x49, 0x8b, 0x84, 0x24, 8, 0, 0, 0]);
+        assert_eq!(bytes(|a| a.store(Reg::R12, 0, Reg::Rcx)), [0x49, 0x89, 0x8c, 0x24, 0, 0, 0, 0]);
+        assert_eq!(bytes(|a| a.store_imm(Reg::Rbx, 0, 0)), [0x48, 0xc7, 0x83, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(bytes(|a| a.alu_imm(Alu::Add, Reg::Rbx, 24)), [0x48, 0x81, 0xc3, 24, 0, 0, 0]);
+        assert_eq!(bytes(|a| a.alu(Alu::Sub, Reg::Rax, Reg::Rcx)), [0x48, 0x29, 0xc8]);
+        assert_eq!(bytes(|a| a.or_load(Reg::Rax, Reg::Rbx, -24)), [0x48, 0x0b, 0x83, 0xe8, 0xff, 0xff, 0xff]);
+        assert_eq!(bytes(|a| a.imul(Reg::Rax, Reg::Rcx)), [0x48, 0x0f, 0xaf, 0xc1]);
+        assert_eq!(bytes(|a| a.neg(Reg::Rax)), [0x48, 0xf7, 0xd8]);
+        assert_eq!(bytes(|a| a.mov_imm64(Reg::Rdx, -1)), [0x48, 0xba, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(bytes(|a| a.push(Reg::R12)), [0x41, 0x54]);
+        assert_eq!(bytes(|a| a.pop(Reg::R12)), [0x41, 0x5c]);
+        assert_eq!(bytes(|a| a.jmp_reg(Reg::Rax)), [0xff, 0xe0]);
+        // test rax,rax; setg dl; setl cl; sub dl,cl; movsx rax,dl
+        assert_eq!(bytes(|a| a.sign(Reg::Rax)), [0x48, 0x85, 0xc0, 0x0f, 0x9f, 0xc2, 0x0f, 0x9c, 0xc1, 0x28, 0xca, 0x48, 0x0f, 0xbe, 0xc2]);
+        // RIP-relative: the offset counts from the end of the instruction.
+        assert_eq!(bytes(|a| a.load_global(Reg::Rbx, 0x1000)), [0x48, 0x8b, 0x1d, 0xf9, 0xff, 0xff, 0xff]);
+        assert_eq!(bytes(|a| a.cmp_global(Reg::Rbx, 0x1007)), [0x48, 0x3b, 0x1d, 0, 0, 0, 0]);
+        // A jump back to itself, and a call back to the start.
+        let code = bytes(|a| {
+            let top = a.label();
+            a.bind(top);
+            a.jcc(Cond::E, top);
+            a.call_addr(0x1000);
+        });
+        assert_eq!(code, [0x0f, 0x84, 0xfa, 0xff, 0xff, 0xff, 0xe8, 0xf5, 0xff, 0xff, 0xff]);
     }
 }

@@ -30,6 +30,7 @@ pub const POW3: [i64; 28] = {
 
 /// A 27-trit balanced-ternary integer, or NaT.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
 pub struct Word(i64);
 
 impl Word {

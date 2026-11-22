@@ -45,8 +45,11 @@ pub const MAX_TEXT_CHARS: usize = 1 << 24;
 /// Text memory made before the first collection of unused texts.
 const TEXT_GC_START: usize = 1 << 16;
 
-/// A value on the stack or in a register.
+/// A value on the stack or in a register. Its layout is fixed (native code
+/// reads and writes it, see [`native`]): the variant number in the first 8
+/// bytes (`Word` is 0), the value after them; 24 bytes in all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C, u64)]
 pub enum Value {
     Word(Word),
     Real(Real),

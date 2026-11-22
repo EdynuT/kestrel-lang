@@ -45,7 +45,7 @@ public class HashMap<K, V> {
     /* An empty map: `HashMap<text, int>()`. */
     public proc HashMap() -> HashMap<K, V> {
         buckets[]: Bucket<K, V> = {};
-        walk count in 1..BUCKETS {
+        walk i in 1..BUCKETS {
             append(buckets, Bucket<K, V>());
         }
         return HashMap<K, V> { buckets: give buckets, size: 0 };

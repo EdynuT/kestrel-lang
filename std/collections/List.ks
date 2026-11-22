@@ -61,9 +61,9 @@ public class List<T> {
 
     /* Where the first item equal to `item` is (`equals`), or -1. */
     public proc indexOf(&self, item: &T) -> int {
-        for index: int = 0; index < len(self.items); index++ {
-            if self.items[index].equals(&item) {
-                return index;
+        for i: int = 0; i < len(self.items); i++ {
+            if self.items[i].equals(&item) {
+                return i;
             }
         }
         return -1;

@@ -55,6 +55,8 @@ pub enum Cond {
     B = 0x2,
     /// Above or equal (unsigned `>=`).
     Ae = 0x3,
+    /// Below or equal (unsigned `<=`).
+    Be = 0x6,
     E = 0x4,
     Ne = 0x5,
     /// Above (unsigned `>`).
@@ -177,9 +179,27 @@ impl Asm {
 
     /// `cmp r, [rip + to addr]`
     pub fn cmp_global(&mut self, r: Reg, addr: u64) {
+        self.alu_global(Alu::Cmp, r, addr);
+    }
+
+    /// `op r, [rip + to addr]`
+    pub fn alu_global(&mut self, op: Alu, r: Reg, addr: u64) {
         self.rex(r as u8, Reg::Rax);
-        self.code.extend_from_slice(&[0x3b, (r.low() << 3) | 5]);
+        self.code.extend_from_slice(&[op.rr() + 2, (r.low() << 3) | 5]);
         self.rel32(Target::Addr(addr));
+    }
+
+    /// `imul dst, src, imm32`
+    pub fn imul_imm(&mut self, dst: Reg, src: Reg, v: i32) {
+        self.rex(dst as u8, src);
+        self.code.extend_from_slice(&[0x69, 0xc0 | dst.low() << 3 | src.low()]);
+        self.code.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// `shr r, n`
+    pub fn shr(&mut self, r: Reg, n: u8) {
+        self.rex(0, r);
+        self.code.extend_from_slice(&[0xc1, 0xe8 | r.low(), n]);
     }
 
     /// `mov r, imm64`
@@ -221,9 +241,49 @@ impl Asm {
 
     /// `or dst, [base + disp]`
     pub fn or_load(&mut self, dst: Reg, base: Reg, disp: i32) {
+        self.alu_load(Alu::Or, dst, base, disp);
+    }
+
+    /// `op dst, [base + disp]`
+    pub fn alu_load(&mut self, op: Alu, dst: Reg, base: Reg, disp: i32) {
         self.rex(dst as u8, base);
-        self.code.push(0x0b);
+        self.code.push(op.rr() + 2);
         self.mem(dst as u8, base, disp);
+    }
+
+    /// `cmp qword [base + disp], imm32`
+    pub fn cmp_mem(&mut self, base: Reg, disp: i32, v: i32) {
+        self.rex(0, base);
+        self.code.push(0x81);
+        self.mem(7, base, disp);
+        self.code.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// `cmp dword [base + disp], r32`
+    pub fn cmp32_mem(&mut self, base: Reg, disp: i32, r: Reg) {
+        if r.high() == 1 || base.high() == 1 {
+            self.code.push(0x40 | r.high() << 2 | base.high());
+        }
+        self.code.push(0x39);
+        self.mem(r as u8, base, disp);
+    }
+
+    /// `cmp byte [base + disp], imm8`
+    pub fn cmp8_mem(&mut self, base: Reg, disp: i32, v: u8) {
+        if base.high() == 1 {
+            self.code.push(0x41);
+        }
+        self.code.push(0x80);
+        self.mem(7, base, disp);
+        self.code.push(v);
+    }
+
+    /// `mov dst32, src32` (zeroes the top half of `dst`).
+    pub fn mov32(&mut self, dst: Reg, src: Reg) {
+        if dst.high() == 1 || src.high() == 1 {
+            self.code.push(0x40 | src.high() << 2 | dst.high());
+        }
+        self.code.extend_from_slice(&[0x89, 0xc0 | src.low() << 3 | dst.low()]);
     }
 
     /// `imul dst, src` (sets the overflow flag when the product does not fit).
@@ -349,6 +409,14 @@ mod tests {
         assert_eq!(bytes(|a| a.mov(Reg::Rax, Reg::R9)), [0x4c, 0x89, 0xc8]);
         assert_eq!(bytes(|a| a.load(Reg::R10, Reg::Rbx, -8)), [0x4c, 0x8b, 0x93, 0xf8, 0xff, 0xff, 0xff]);
         assert_eq!(bytes(|a| a.cqo()), [0x48, 0x99]);
+        assert_eq!(bytes(|a| a.cmp_mem(Reg::R12, 0, 3)), [0x49, 0x81, 0xbc, 0x24, 0, 0, 0, 0, 3, 0, 0, 0]);
+        assert_eq!(bytes(|a| a.cmp32_mem(Reg::Rsi, 32, Reg::Rax)), [0x39, 0x86, 32, 0, 0, 0]);
+        assert_eq!(bytes(|a| a.cmp8_mem(Reg::Rsi, 36, 0)), [0x80, 0xbe, 36, 0, 0, 0, 0]);
+        assert_eq!(bytes(|a| a.mov32(Reg::Rsi, Reg::Rax)), [0x89, 0xc6]);
+        assert_eq!(bytes(|a| a.alu_load(Alu::Sub, Reg::Rcx, Reg::Rsi, 24)), [0x48, 0x2b, 0x8e, 24, 0, 0, 0]);
+        assert_eq!(bytes(|a| a.imul_imm(Reg::R12, Reg::R12, 24)), [0x4d, 0x69, 0xe4, 24, 0, 0, 0]);
+        assert_eq!(bytes(|a| a.shr(Reg::R11, 3)), [0x49, 0xc1, 0xeb, 3]);
+        assert_eq!(bytes(|a| a.alu_global(Alu::Add, Reg::Rax, 0x1007)), [0x48, 0x03, 0x05, 0, 0, 0, 0]);
         assert_eq!(bytes(|a| a.idiv(Reg::Rcx)), [0x48, 0xf7, 0xf9]);
         assert_eq!(bytes(|a| a.pop(Reg::R12)), [0x41, 0x5c]);
         assert_eq!(bytes(|a| a.jmp_reg(Reg::Rax)), [0xff, 0xe0]);

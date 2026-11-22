@@ -20,7 +20,7 @@
 //! Every native function keeps the machine stack aligned to 16 bytes in
 //! its body, as calls into Rust require:
 //! ```text
-//! F:    push r12; mov rdi, rsp; call krt_enter_fn; mov r12, rax; mov rbx, [KRT_SP]
+//! F:    push r12; frame.sp = rsp; r12 = its variables     (a call writes the frame itself)
 //! op:   <fast code>, or (and as its slow path):
 //!       mov [KRT_SP], rbx; mov edi, func; mov esi, op; call krt_op; mov rbx, [KRT_SP]
 //!       cmp rax, -1; je FAIL
@@ -43,19 +43,48 @@ use x86::{Alu, Asm, Cond, Label, Reg};
 /// `ksvm::native::PRESENT`
 const PRESENT: u64 = u64::from_le_bytes(*b"KRT-PROG");
 /// `ksvm::native::ABI`: the runtime this backend is written for.
-const ABI: u64 = 3;
+const ABI: u64 = 5;
 /// The size of a `ksvm::Value`; its value starts at byte 8.
 const V: i32 = 24;
+/// The size of a frame (`ksvm`'s `Frame`), and where its fields are.
+const FRAME: i32 = 48;
+const F_FUNC: i32 = 0;
+const F_PC: i32 = 8;
+const F_LOCALS: i32 = 16;
+const F_BASE: i32 = 24;
+const F_SP: i32 = 32;
+const F_SOFT: i32 = 40;
+/// The size of a heap block (`ksvm`'s `Block`), and where its fields are.
+const BLOCK: i32 = 64;
+const B_AT: i32 = 0;
+const B_LEN: i32 = 8;
+const B_W: i32 = 16;
+const B_LO: i32 = 24;
+const B_GEN: i32 = 32;
+const B_LIVE: i32 = 36;
+/// The kind number of a pointer (`Value::Ptr`).
+const PTR: i32 = 3;
+/// A call writes the zeros of at most this many variables itself.
+const MAX_ZEROED: usize = 32;
 
 /// The runtime's functions and variables the code uses.
 struct Runtime {
-    enter_fn: u64,
     grow: u64,
     op: u64,
     unwind: u64,
     locals: u64,
     sp: u64,
     limit: u64,
+    frames: u64,
+    nframes: u64,
+    locals_at: u64,
+    nlocals: u64,
+    stack: u64,
+    heap: u64,
+    nheap: u64,
+    /// The runtime's limits: frames, and variables of all frames.
+    max_depth: i32,
+    max_locals: i32,
 }
 
 /// The executable for `module` (a linked program), made from `runtime`
@@ -63,32 +92,47 @@ struct Runtime {
 pub fn build(module: &Module, runtime: &[u8]) -> Result<Vec<u8>, String> {
     let elf = Elf::read(runtime)?;
     let sym = |n: &str| elf.symbol(n).ok_or_else(|| format!("the runtime has no `{n}` (is it a `ksvm` of this version, not stripped?)"));
-    let abi = elf.file_offset(sym("KRT_ABI")?).and_then(|at| runtime.get(at..at + 16)).ok_or("the runtime's `KRT_ABI` is not stored")?;
-    if abi[..8] != ABI.to_le_bytes() || abi[8..] != (V as u64).to_le_bytes() {
+    let abi = elf.file_offset(sym("KRT_ABI")?).and_then(|at| runtime.get(at..at + 48)).ok_or("the runtime's `KRT_ABI` is not stored")?;
+    let abi: Vec<u64> = abi.chunks(8).map(|c| u64::from_le_bytes(c.try_into().expect("8 bytes"))).collect();
+    if abi[..3] != [ABI, V as u64, FRAME as u64] || abi[5] != BLOCK as u64 {
         return Err("the runtime (`ksvm`) is not from this version of `ksc`".into());
     }
     let program = sym("KRT_PROGRAM")?;
     let rt = Runtime {
-        enter_fn: sym("krt_enter_fn")?,
         grow: sym("krt_grow")?,
         op: sym("krt_op")?,
         unwind: sym("krt_unwind")?,
         locals: sym("krt_locals")?,
         sp: sym("KRT_SP")?,
         limit: sym("KRT_LIMIT")?,
+        frames: sym("KRT_FRAMES")?,
+        nframes: sym("KRT_NFRAMES")?,
+        locals_at: sym("KRT_LOCALS")?,
+        nlocals: sym("KRT_NLOCALS")?,
+        stack: sym("KRT_STACK")?,
+        heap: sym("KRT_HEAP")?,
+        nheap: sym("KRT_NHEAP")?,
+        max_depth: i32::try_from(abi[3]).map_err(|e| e.to_string())?,
+        max_locals: i32::try_from(abi[4]).map_err(|e| e.to_string())?,
     };
     let base = elf.free_vaddr();
     let mut a = Asm::new(base);
     let entries: Vec<Label> = module.functions.iter().map(|_| a.label()).collect();
     let mut landings = Vec::new();
+    // The runtime starts at `main` here: `rbx` from where it keeps the stack's top.
+    let start = a.label();
+    a.bind(start);
+    a.load_global(Reg::Rbx, rt.sp);
+    a.jmp(entries[module.entry as usize]);
     for k in 0..module.functions.len() {
-        landings.push(Gen { a: &mut a, rt: &rt, module, k, entries: &entries, slow: Vec::new(), pending: Vec::new(), real: 0 }.function()?);
+        landings.push(Gen { a: &mut a, rt: &rt, module, k, entries: &entries, slow: Vec::new(), pending: Vec::new(), real: 0, after: 0 }.function()?);
     }
     // Addresses relative to `KRT_PROGRAM`, which is where the runtime finds them.
     let rel = |addr: u64| (addr as i64 - program as i64).to_le_bytes();
     let mut table = (module.functions.len() as u32).to_le_bytes().to_vec();
     for (k, l) in landings.iter().enumerate() {
-        table.extend_from_slice(&rel(a.addr(entries[k])));
+        let entry = if k == module.entry as usize { start } else { entries[k] };
+        table.extend_from_slice(&rel(a.addr(entry)));
         table.extend_from_slice(&(l.len() as u32).to_le_bytes());
         for &(pc, label) in l {
             table.extend_from_slice(&pc.to_le_bytes());
@@ -121,6 +165,14 @@ enum Opnd {
     Tmp,
 }
 
+/// Where a value of any kind is, to be copied once an instruction knows it can go on.
+enum Loc {
+    Const(i64),
+    /// Three 8-byte parts from `[base + disp]`.
+    Mem(Reg, i32),
+    Tmp,
+}
+
 /// The most values kept back at once.
 const MAX_PENDING: usize = 6;
 
@@ -139,6 +191,8 @@ struct Gen<'a> {
     pending: Vec<Opnd>,
     /// Values the instruction being written took from the real stack.
     real: i32,
+    /// The offset just past the instruction being written (where a call returns).
+    after: usize,
 }
 
 impl Gen<'_> {
@@ -169,12 +223,18 @@ impl Gen<'_> {
         at.insert(f.code.len(), end);
         let fail = self.a.label();
         let a = &mut *self.a;
+        // The frame was made by the caller: keep this code's stack pointer
+        // in it, and find its variables.
+        //   rax = the top frame; frame.sp = rsp; r12 = LOCALS + frame.locals * V
         a.bind(self.entries[self.k]);
         a.push(Reg::R12);
-        a.mov(Reg::Rdi, Reg::Rsp);
-        a.call_addr(self.rt.enter_fn);
-        a.mov(Reg::R12, Reg::Rax);
-        a.load_global(Reg::Rbx, self.rt.sp);
+        a.load_global(Reg::Rax, self.rt.nframes);
+        a.imul_imm(Reg::Rax, Reg::Rax, FRAME);
+        a.alu_global(Alu::Add, Reg::Rax, self.rt.frames);
+        a.store(Reg::Rax, F_SP - FRAME, Reg::Rsp);
+        a.load(Reg::R12, Reg::Rax, F_LOCALS - FRAME);
+        a.imul_imm(Reg::R12, Reg::R12, V);
+        a.alu_global(Alu::Add, Reg::R12, self.rt.locals_at);
         for (idx, &(op, pc)) in ops.iter().enumerate() {
             if targets.contains(&pc) {
                 self.flush();
@@ -185,6 +245,7 @@ impl Gen<'_> {
             let next = self.a.label();
             let to = |t: u32| at[&(t as usize)];
             self.real = 0;
+            self.after = pc + op.size();
             if let Op::Jmp(t) = op {
                 self.flush();
                 self.a.jmp(to(t));
@@ -203,9 +264,12 @@ impl Gen<'_> {
             self.pending = kept;
             self.flush();
             self.generic(idx, op, fail, &|t| at[&(t as usize)]);
-            if matches!(op, Op::JNat(_)) {
-                self.a.jmp(next);
-            } else if !matches!(op, Op::Br3 { .. }) {
+            let result = matches!(op, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Cmp3 | Op::Neg | Op::Test(_) | Op::LdIdx | Op::TLen);
+            if !result {
+                if !matches!(op, Op::Br3 { .. }) {
+                    self.a.jmp(next);
+                }
+            } else {
                 // Its result goes where the fast code keeps it.
                 let a = &mut *self.a;
                 a.load(Reg::R8, Reg::Rbx, -V);
@@ -370,6 +434,65 @@ impl Gen<'_> {
         }
     }
 
+    /// Takes the top value, of any kind, without reading it yet.
+    fn take_any(&mut self) -> Loc {
+        match self.pending.pop() {
+            Some(Opnd::Const(v)) => Loc::Const(v),
+            Some(Opnd::Local(s)) => Loc::Mem(Reg::R12, Self::local(s)),
+            Some(Opnd::Tmp) => Loc::Tmp,
+            None => {
+                self.real += 1;
+                Loc::Mem(Reg::Rbx, -self.real * V)
+            }
+        }
+    }
+
+    /// Takes the top value, a pointer, into `rax` (block number in the low
+    /// half, generation in the high half), or goes to `slow`.
+    fn take_ptr(&mut self, slow: Label) {
+        match self.take_any() {
+            Loc::Const(_) => self.a.jmp(slow), // a number is never a pointer
+            Loc::Mem(base, at) => {
+                self.a.cmp_mem(base, at, PTR);
+                self.a.jcc(Cond::Ne, slow);
+                self.a.load(Reg::Rax, base, at + 8);
+            }
+            Loc::Tmp => {
+                self.a.alu_imm(Alu::Cmp, Reg::R8, PTR);
+                self.a.jcc(Cond::Ne, slow);
+                self.a.mov(Reg::Rax, Reg::R9);
+            }
+        }
+    }
+
+    /// The block of the pointer in `rax`, into `rsi`, if it is alive, has one cell per
+    /// element and the generation matches; otherwise `slow`.
+    fn block(&mut self, slow: Label) {
+        let (a, rt) = (&mut *self.a, self.rt);
+        a.mov32(Reg::Rsi, Reg::Rax);
+        a.shr(Reg::Rax, 32);
+        a.cmp_global(Reg::Rsi, rt.nheap);
+        a.jcc(Cond::Ae, slow);
+        a.imul_imm(Reg::Rsi, Reg::Rsi, BLOCK);
+        a.alu_global(Alu::Add, Reg::Rsi, rt.heap);
+        a.cmp32_mem(Reg::Rsi, B_GEN, Reg::Rax);
+        a.jcc(Cond::Ne, slow);
+        a.cmp8_mem(Reg::Rsi, B_LIVE, 0);
+        a.jcc(Cond::E, slow);
+        a.cmp_mem(Reg::Rsi, B_W, 1);
+        a.jcc(Cond::Ne, slow);
+    }
+
+    /// The address of cell `rcx` (an index) of the block in `rsi`, into `rcx`, or `slow`.
+    fn cell(&mut self, slow: Label) {
+        let a = &mut *self.a;
+        a.alu_load(Alu::Sub, Reg::Rcx, Reg::Rsi, B_LO);
+        a.alu_load(Alu::Cmp, Reg::Rcx, Reg::Rsi, B_LEN);
+        a.jcc(Cond::Ae, slow); // also a negative one: unsigned, it is huge
+        a.imul_imm(Reg::Rcx, Reg::Rcx, V);
+        a.alu_load(Alu::Add, Reg::Rcx, Reg::Rsi, B_AT);
+    }
+
     /// The values taken from the real stack are gone (the instruction succeeded).
     fn drop_taken(&mut self) {
         if self.real > 0 {
@@ -478,6 +601,128 @@ impl Gen<'_> {
                 a.jcc(Cond::No, next);
                 a.alu_imm(Alu::Sub, Reg::Rbx, V);
                 a.jmp(to(t));
+            }
+            Op::Call { f, argc } => {
+                let callee = &self.module.functions[f as usize];
+                let (n, argc) = (usize::from(callee.locals), usize::from(argc));
+                if n - argc.min(n) > MAX_ZEROED {
+                    return false;
+                }
+                self.flush();
+                let slow = self.prepare(idx, op, next, 0);
+                let (a, rt) = (&mut *self.a, self.rt);
+                // Room for one more frame and its variables, or the runtime says why not.
+                a.load_global(Reg::Rax, rt.nframes);
+                a.alu_imm(Alu::Cmp, Reg::Rax, rt.max_depth);
+                a.jcc(Cond::Ae, slow);
+                a.load_global(Reg::Rcx, rt.nlocals);
+                a.mov(Reg::Rdx, Reg::Rcx);
+                a.alu_imm(Alu::Add, Reg::Rdx, n as i32);
+                a.alu_imm(Alu::Cmp, Reg::Rdx, rt.max_locals);
+                a.jcc(Cond::A, slow);
+                // The arguments become the first variables, the others start at 0.
+                a.imul_imm(Reg::Rdi, Reg::Rcx, V);
+                a.alu_global(Alu::Add, Reg::Rdi, rt.locals_at);
+                for i in 0..argc as i32 {
+                    for q in [0, 8, 16] {
+                        a.load(Reg::R11, Reg::Rbx, (i - argc as i32) * V + q);
+                        a.store(Reg::Rdi, i * V + q, Reg::R11);
+                    }
+                }
+                for i in argc as i32..n as i32 {
+                    a.store_imm(Reg::Rdi, i * V, 0);
+                    a.store_imm(Reg::Rdi, i * V + 8, 0);
+                }
+                a.alu_imm(Alu::Sub, Reg::Rbx, argc as i32 * V);
+                // The new frame, after the caller's (which now waits past this call).
+                a.imul_imm(Reg::Rsi, Reg::Rax, FRAME);
+                a.alu_global(Alu::Add, Reg::Rsi, rt.frames);
+                a.store_imm(Reg::Rsi, F_PC - FRAME, self.after as i32);
+                a.store_imm(Reg::Rsi, F_FUNC, f as i32);
+                a.store_imm(Reg::Rsi, F_PC, 0);
+                a.store(Reg::Rsi, F_LOCALS, Reg::Rcx);
+                // Its base: the stack's height, (rbx - STACK) / V, with V = 8 * 3:
+                // a shift and a multiplication by the inverse of 3 (exact, as it divides).
+                a.mov(Reg::R11, Reg::Rbx);
+                a.alu_global(Alu::Sub, Reg::R11, rt.stack);
+                a.shr(Reg::R11, 3);
+                a.mov_imm64(Reg::Rdx, 0xAAAA_AAAA_AAAA_AAABu64 as i64);
+                a.imul(Reg::R11, Reg::Rdx);
+                a.store(Reg::Rsi, F_BASE, Reg::R11);
+                a.store_imm(Reg::Rsi, F_SP, 0);
+                a.store_imm(Reg::Rsi, F_SOFT, 0);
+                a.alu_imm(Alu::Add, Reg::Rax, 1);
+                a.store_global(rt.nframes, Reg::Rax);
+                a.alu_imm(Alu::Add, Reg::Rcx, n as i32);
+                a.store_global(rt.nlocals, Reg::Rcx);
+                a.call(self.entries[f as usize]);
+            }
+            Op::Ret | Op::RetN(_) => {
+                // The result stays on the stack for the caller. Leaving
+                // `main` (the last frame) ends the program: the runtime does that.
+                self.flush();
+                let slow = self.prepare(idx, op, next, 0);
+                let (a, rt) = (&mut *self.a, self.rt);
+                a.load_global(Reg::Rax, rt.nframes);
+                a.alu_imm(Alu::Cmp, Reg::Rax, 1);
+                a.jcc(Cond::Be, slow);
+                a.alu_imm(Alu::Sub, Reg::Rax, 1);
+                a.store_global(rt.nframes, Reg::Rax);
+                a.imul_imm(Reg::Rax, Reg::Rax, FRAME);
+                a.alu_global(Alu::Add, Reg::Rax, rt.frames);
+                a.load(Reg::Rcx, Reg::Rax, F_LOCALS);
+                a.store_global(rt.nlocals, Reg::Rcx);
+                a.pop(Reg::R12);
+                a.ret();
+            }
+            Op::LdIdx => {
+                let slow = self.prepare(idx, op, next, 2);
+                self.take_int(Reg::Rcx, slow);
+                self.take_ptr(slow);
+                self.block(slow);
+                self.cell(slow);
+                self.drop_taken();
+                let a = &mut *self.a;
+                a.load(Reg::R8, Reg::Rcx, 0);
+                a.load(Reg::R9, Reg::Rcx, 8);
+                a.load(Reg::R10, Reg::Rcx, 16);
+                self.pending.push(Opnd::Tmp);
+            }
+            Op::StIdx => {
+                let slow = self.prepare(idx, op, next, 3);
+                let value = self.take_any();
+                self.take_int(Reg::Rcx, slow);
+                self.take_ptr(slow);
+                self.block(slow);
+                self.cell(slow);
+                let a = &mut *self.a;
+                match value {
+                    Loc::Const(v) => {
+                        a.store_imm(Reg::Rcx, 0, 0);
+                        a.mov_imm64(Reg::R11, v);
+                        a.store(Reg::Rcx, 8, Reg::R11);
+                    }
+                    Loc::Mem(base, at) => {
+                        for q in [0, 8, 16] {
+                            a.load(Reg::R11, base, at + q);
+                            a.store(Reg::Rcx, q, Reg::R11);
+                        }
+                    }
+                    Loc::Tmp => {
+                        a.store(Reg::Rcx, 0, Reg::R8);
+                        a.store(Reg::Rcx, 8, Reg::R9);
+                        a.store(Reg::Rcx, 16, Reg::R10);
+                    }
+                }
+                self.drop_taken();
+            }
+            Op::TLen => {
+                // An array's length; a text's goes to the runtime.
+                let slow = self.prepare(idx, op, next, 1);
+                self.take_ptr(slow);
+                self.block(slow);
+                self.a.load(Reg::Rax, Reg::Rsi, B_LEN);
+                self.result();
             }
             Op::Pop => {
                 if self.pending.pop().is_none() {

@@ -35,6 +35,8 @@ pub fn exit_code(r: Result<Value, Trap>) -> u8 {
 
 /// Deepest call chain before the VM traps with a stack overflow.
 pub use kestrel_core::limits::MAX_CALL_DEPTH as MAX_DEPTH;
+/// Variables of all the calls running at once, before a stack overflow.
+pub const MAX_LOCALS_ALIVE: usize = 1 << 21;
 /// The reason given when [`Vm::with_fuel`]'s limit runs out.
 const FUEL: &str = "out of fuel";
 /// Largest buffer `claim` may create, in cells.
@@ -84,6 +86,7 @@ impl Value {
 
 /// Generation-checked pointer to the center cell of a heap block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct Ptr {
     block: u32,
     generation: u32,
@@ -105,26 +108,49 @@ impl fmt::Display for Trap {
 
 impl std::error::Error for Trap {}
 
+/// A heap block. Its layout is fixed (native code reads it, see [`native`]):
+/// `at` and `len` show native code where `cells` are, so every change to
+/// `cells` ends with [`Block::sync`].
+#[repr(C)]
 struct Block {
-    cells: Vec<Value>,
+    at: usize,
+    len: usize,
     /// Cells per element: 1, or the number of fields of a struct.
     w: usize,
     /// Lowest valid index: `-k` for a symmetric buffer, `0` otherwise.
     lo: i64,
     generation: u32,
     live: bool,
+    cells: Vec<Value>,
 }
 
+impl Block {
+    fn new(cells: Vec<Value>, w: usize, lo: i64) -> Block {
+        let mut b = Block { at: 0, len: 0, w, lo, generation: 0, live: true, cells };
+        b.sync();
+        b
+    }
+
+    /// `at` and `len` after `cells` changed.
+    fn sync(&mut self) {
+        self.at = self.cells.as_ptr() as usize;
+        self.len = self.cells.len();
+    }
+}
+
+/// One call. Its layout is fixed (native code writes frames, see [`native`]).
+#[repr(C)]
 struct Frame {
     func: usize,
     pc: usize,
-    locals: Vec<Value>,
-    /// Set by `soft` (an `on NaT` line): failed arithmetic gives NaT instead of trapping.
-    soft: bool,
+    /// Where its variables start in [`Vm::locals`].
+    locals: usize,
     /// Stack height when the frame started: a handler starts with the stack cut back to it.
     base: usize,
     /// In native mode: the machine stack pointer inside the frame's code.
     native_sp: usize,
+    /// Set by `soft` (an `on NaT` line): failed arithmetic gives NaT instead of trapping.
+    soft: bool,
 }
 
 pub struct Vm<'m, R, W> {
@@ -146,7 +172,11 @@ pub struct Vm<'m, R, W> {
     /// Instructions left before a Trap, if limited (see [`Vm::with_fuel`]).
     fuel: Option<u64>,
     stack: Vec<Value>,
+    /// The calls running, at most [`MAX_DEPTH`] (room for them is kept from the start).
     frames: Vec<Frame>,
+    /// The variables of every frame, one after another (room for
+    /// [`MAX_LOCALS_ALIVE`] is kept from the start, so they never move).
+    locals: Vec<Value>,
     heap: Vec<Block>,
     free: Vec<u32>,
     input: R,
@@ -175,7 +205,8 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             args: Vec::new(),
             fuel: None,
             stack: Vec::new(),
-            frames: Vec::new(),
+            frames: Vec::with_capacity(MAX_DEPTH + 1),
+            locals: Vec::with_capacity(MAX_LOCALS_ALIVE),
             heap: Vec::new(),
             free: Vec::new(),
             input,
@@ -202,7 +233,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
 
     pub fn run(&mut self) -> Result<Value, Trap> {
         let entry = self.module.entry as usize;
-        let result = match self.enter(entry, Vec::new()) {
+        let result = match self.enter(entry, 0) {
             Ok(()) => self.go(),
             Err(reason) => Err(Trap { func: self.module.functions[entry].name.clone(), at: 0, reason }),
         };
@@ -270,7 +301,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 return Ok(());
             }
             let base = frame.base;
-            self.frames.pop();
+            self.leave();
             self.stack.truncate(base);
             match self.frames.last() {
                 // The call instruction ends just before the caller's `pc`.
@@ -294,24 +325,42 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             b.cells.fill(Value::Word(Word::ZERO));
             b.live = false;
         }
-        for f in &mut self.frames {
-            f.locals.fill(Value::NAT);
-        }
+        self.locals.fill(Value::NAT);
+        self.locals.clear();
         self.stack.fill(Value::NAT);
         self.stack.clear();
         self.frames.clear();
     }
 
-    fn enter(&mut self, func: usize, args: Vec<Value>) -> Result<(), String> {
-        if self.frames.len() >= MAX_DEPTH {
+    /// Starts a call of `func`, its `argc` arguments taken from the stack.
+    fn enter(&mut self, func: usize, argc: usize) -> Result<(), String> {
+        let n = usize::from(self.module.functions[func].locals);
+        if self.frames.len() >= MAX_DEPTH || self.locals.len() + n > MAX_LOCALS_ALIVE {
             return Err(format!("call stack overflow ({MAX_DEPTH} frames)"));
         }
-        let f = &self.module.functions[func];
-        let mut locals = vec![Value::Word(Word::ZERO); usize::from(f.locals)];
-        locals[..args.len()].copy_from_slice(&args);
+        if self.stack.len() < argc {
+            return Err("stack underflow in call".into());
+        }
+        let start = self.locals.len();
+        self.locals.extend_from_slice(&self.stack[self.stack.len() - argc..]);
+        self.locals.resize(start + n, Value::Word(Word::ZERO));
+        self.stack.truncate(self.stack.len() - argc);
         let base = self.stack.len();
-        self.frames.push(Frame { func, pc: 0, locals, soft: false, base, native_sp: 0 });
+        self.frames.push(Frame { func, pc: 0, locals: start, soft: false, base, native_sp: 0 });
         Ok(())
+    }
+
+    /// Ends the running call.
+    fn leave(&mut self) {
+        if let Some(f) = self.frames.pop() {
+            self.locals.truncate(f.locals);
+        }
+    }
+
+    /// Variable `s` of the running call.
+    fn slot(&mut self, s: u16) -> &mut Value {
+        let start = self.frame().locals;
+        &mut self.locals[start + usize::from(s)]
     }
 
     fn step(&mut self) -> Step {
@@ -340,15 +389,15 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
             Op::PushR(k) => self.push(Value::Real(Real::from(self.module.consts[k as usize]))),
             Op::PushS(k) => self.push(Value::Text(k)),
             Op::Load(s) => {
-                let v = self.frame().locals[usize::from(s)];
+                let v = *self.slot(s);
                 self.push(v);
             }
             Op::Store(s) => {
                 let v = self.pop()?;
-                self.frame().locals[usize::from(s)] = v;
+                *self.slot(s) = v;
             }
             Op::Move(s) => {
-                let slot = &mut self.frame().locals[usize::from(s)];
+                let slot = self.slot(s);
                 let v = std::mem::replace(slot, Value::NAT);
                 self.push(v);
             }
@@ -486,6 +535,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                     return Err(format!("append: out of memory (limit {MAX_CELLS} cells)"));
                 }
                 b.cells.extend(vals);
+                b.sync();
             }
             Op::PopEl => {
                 let p = self.pop_ptr()?;
@@ -495,6 +545,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 }
                 let at = b.cells.len() - b.w;
                 let vals = b.cells.split_off(at);
+                b.sync();
                 self.stack.extend(vals);
             }
             Op::Insert => {
@@ -510,6 +561,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 }
                 let at = i as usize * w;
                 b.cells.splice(at..at, vals);
+                b.sync();
             }
             Op::Remove => {
                 let i = self.pop_word()?;
@@ -517,6 +569,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 let b = self.block(p)?;
                 let at = elem_cell(b, i, 0, b.w).map_err(|e| format!("remove: {e}"))?;
                 let vals: Vec<Value> = b.cells.drain(at..at + b.w).collect();
+                b.sync();
                 self.stack.extend(vals);
             }
             Op::Resize => {
@@ -547,10 +600,13 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 while b.cells.len() < n * w {
                     b.cells.extend_from_slice(&zero);
                 }
+                b.sync();
             }
             Op::Clear => {
                 let p = self.pop_ptr()?;
-                self.block(p)?.cells.clear();
+                let b = self.block(p)?;
+                b.cells.clear();
+                b.sync();
             }
             Op::Replace => {
                 let d = self.pop_word()?;
@@ -583,23 +639,25 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 out.extend_from_slice(&cells[a0..a1]);
                 out.extend_from_slice(&cells[b1..]);
                 *cells = out;
+                blk.sync();
             }
             Op::LdIdx => self.load_elem(0, 1)?,
             Op::StIdx => self.store_elem(0, 1)?,
             Op::LdElem { off, n } => self.load_elem(usize::from(off), usize::from(n))?,
             Op::StElem { off, n } => self.store_elem(usize::from(off), usize::from(n))?,
             Op::Purge(s) => {
-                let slot = self.frame().locals[usize::from(s)];
+                let slot = *self.slot(s);
                 let Value::Ptr(p) = slot else {
                     return Err("burn of a buffer that was already burned or given away".into());
                 };
                 let b = self.block(p)?;
                 b.cells.fill(Value::Word(Word::ZERO));
                 b.cells = Vec::new();
+                b.sync();
                 b.live = false;
                 b.generation = b.generation.wrapping_add(1);
                 self.free.push(p.block);
-                self.frame().locals[usize::from(s)] = Value::NAT;
+                *self.slot(s) = Value::NAT;
             }
 
             Op::Jmp(a) => self.frame().pc = a as usize,
@@ -633,16 +691,11 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                 } as usize;
             }
             Op::Call { f, argc } => {
-                let argc = usize::from(argc);
-                if self.stack.len() < argc {
-                    return Err("stack underflow in call".into());
-                }
-                let args = self.stack.split_off(self.stack.len() - argc);
-                self.enter(f as usize, args)?;
+                self.enter(f as usize, usize::from(argc))?;
             }
             Op::Ret => {
                 let v = self.pop()?;
-                self.frames.pop();
+                self.leave();
                 if self.frames.is_empty() {
                     return Ok(Some(v));
                 }
@@ -654,7 +707,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
                     return Err("stack underflow in retn".into());
                 }
                 let vals = self.stack.split_off(self.stack.len() - n);
-                self.frames.pop();
+                self.leave();
                 if self.frames.is_empty() {
                     return Err("`main` cannot return a struct".into());
                 }
@@ -857,7 +910,7 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         let mut used = vec![false; self.texts.len()];
         let mut scanned = 0;
         let cells = self.heap.iter().filter(|b| b.live).flat_map(|b| b.cells.iter());
-        for v in self.stack.iter().chain(self.frames.iter().flat_map(|f| f.locals.iter())).chain(cells) {
+        for v in self.stack.iter().chain(self.locals.iter()).chain(cells) {
             scanned += 1;
             if let Value::Text(t) = v {
                 used[*t as usize] = true;
@@ -1038,12 +1091,13 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         if let Some(idx) = self.free.pop() {
             let b = &mut self.heap[idx as usize];
             b.cells = cells;
+            b.sync();
             b.w = w;
             b.lo = lo;
             b.live = true;
             Ptr { block: idx, generation: b.generation }
         } else {
-            self.heap.push(Block { cells, w, lo, generation: 0, live: true });
+            self.heap.push(Block::new(cells, w, lo));
             Ptr { block: (self.heap.len() - 1) as u32, generation: 0 }
         }
     }
@@ -1068,7 +1122,8 @@ impl<'m, R: BufRead, W: Write> Vm<'m, R, W> {
         let f = &self.module.functions[frame.func];
         let out = &mut self.output;
         writeln!(out, "\n=== dump: {} (in {}) ===", self.module.strings[label as usize], f.name)?;
-        for (i, v) in frame.locals.iter().enumerate() {
+        let vars = &self.locals[frame.locals..frame.locals + usize::from(f.locals)];
+        for (i, v) in vars.iter().enumerate() {
             let name = f.local_names.get(i).map_or("", String::as_str);
             if name.starts_with('$') {
                 continue; // compiler temporary

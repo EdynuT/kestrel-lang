@@ -47,33 +47,64 @@ pub static mut KRT_SP: usize = 0;
 /// The end of the stack's room: native code pushes on its own only below it.
 #[unsafe(no_mangle)]
 pub static mut KRT_LIMIT: usize = 0;
-/// What `ksc` must agree with: this layout's version and the size of a [`Value`].
+/// The frames (see `Frame`): where they are (they never move) and how many.
+#[unsafe(no_mangle)]
+pub static mut KRT_FRAMES: usize = 0;
+#[unsafe(no_mangle)]
+pub static mut KRT_NFRAMES: usize = 0;
+/// The variables of every frame: where they are (they never move) and how many.
+#[unsafe(no_mangle)]
+pub static mut KRT_LOCALS: usize = 0;
+#[unsafe(no_mangle)]
+pub static mut KRT_NLOCALS: usize = 0;
+/// The heap's blocks (see `Block`): where they are (they move when there
+/// are more) and how many.
+#[unsafe(no_mangle)]
+pub static mut KRT_HEAP: usize = 0;
+#[unsafe(no_mangle)]
+pub static mut KRT_NHEAP: usize = 0;
+/// Where the stack starts (it may move when it grows).
+#[unsafe(no_mangle)]
+pub static mut KRT_STACK: usize = 0;
+/// What `ksc` must agree with: this layout's version, the size of a
+/// [`Value`] and of a frame, and the limits on frames and variables.
 #[unsafe(no_mangle)]
 #[used]
-pub static KRT_ABI: [u64; 2] = [ABI, std::mem::size_of::<Value>() as u64];
+pub static KRT_ABI: [u64; 6] = [
+    ABI,
+    std::mem::size_of::<Value>() as u64,
+    std::mem::size_of::<crate::Frame>() as u64,
+    crate::MAX_DEPTH as u64,
+    crate::MAX_LOCALS_ALIVE as u64,
+    std::mem::size_of::<crate::Block>() as u64,
+];
 /// Bumped when the native code's view of the runtime changes.
-pub const ABI: u64 = 3;
+pub const ABI: u64 = 5;
 /// Room kept free on the stack past its top, for native pushes.
 const SLACK: usize = 64;
 
 /// The functions the native code calls, kept by the linker through this table.
 #[used]
-static KEEP: [extern "C" fn(); 5] = unsafe {
+static KEEP: [extern "C" fn(); 4] = unsafe {
     [
         std::mem::transmute::<extern "C" fn(u32), extern "C" fn()>(krt_grow),
-        std::mem::transmute::<extern "C" fn(usize) -> *mut Value, extern "C" fn()>(krt_enter_fn),
         std::mem::transmute::<extern "C" fn(u32, u32) -> u64, extern "C" fn()>(krt_op),
         std::mem::transmute::<extern "C" fn() -> Landing, extern "C" fn()>(krt_unwind),
         std::mem::transmute::<extern "C" fn() -> *mut Value, extern "C" fn()>(krt_locals),
     ]
 };
 
-/// Takes the stack's top from native code (it may have pushed or popped).
+/// Takes the stack's top, the frames and the variables from native code
+/// (it may have pushed, popped or called).
 fn sync_in(vm: &mut NativeVm) {
     let base = vm.stack.as_ptr() as usize;
-    // The values up to `KRT_SP` were written by native code (or are the
-    // stack's own): `Value` is plain data, and `sync_out` kept the room.
-    unsafe { vm.stack.set_len((KRT_SP - base) / std::mem::size_of::<Value>()) };
+    // What native code wrote up to these is plain data (`Value`, `Frame`),
+    // within the room `sync_out` (or `Vm::new`) kept.
+    unsafe {
+        vm.stack.set_len((KRT_SP - base) / std::mem::size_of::<Value>());
+        vm.frames.set_len(KRT_NFRAMES);
+        vm.locals.set_len(KRT_NLOCALS);
+    }
 }
 
 /// Gives native code the stack's top and room (the stack may have moved).
@@ -84,6 +115,13 @@ fn sync_out(vm: &mut NativeVm) {
     unsafe {
         KRT_SP = base + vm.stack.len() * size;
         KRT_LIMIT = base + vm.stack.capacity() * size;
+        KRT_STACK = base;
+        KRT_FRAMES = vm.frames.as_ptr() as usize;
+        KRT_NFRAMES = vm.frames.len();
+        KRT_LOCALS = vm.locals.as_ptr() as usize;
+        KRT_NLOCALS = vm.locals.len();
+        KRT_HEAP = vm.heap.as_ptr() as usize;
+        KRT_NHEAP = vm.heap.len();
     }
 }
 
@@ -146,7 +184,7 @@ pub fn run_if_present(args: Vec<String>) -> Option<u8> {
     let runtime = Box::new(Runtime { vm, ops, landings, pending: None, thrown: false });
     unsafe { RT = Box::into_raw(runtime) };
     let entry = module.entry as usize;
-    if let Err(reason) = rt().vm.enter(entry, Vec::new()) {
+    if let Err(reason) = rt().vm.enter(entry, 0) {
         finish(Err(Trap { func: module.functions[entry].name.clone(), at: 0, reason }));
     }
     sync_out(&mut rt().vm);
@@ -192,15 +230,6 @@ fn finish(r: Result<Value, Trap>) -> ! {
     std::process::exit(i32::from(code))
 }
 
-/// Called first by each native function, with where its code keeps the
-/// machine stack; gives its variables (native code keeps them in `r12`).
-#[unsafe(no_mangle)]
-extern "C" fn krt_enter_fn(sp: usize) -> *mut Value {
-    let f = rt().vm.frame();
-    f.native_sp = sp;
-    f.locals.as_mut_ptr()
-}
-
 /// Makes room for `n` more values on the stack (it may move).
 #[unsafe(no_mangle)]
 extern "C" fn krt_grow(n: u32) {
@@ -213,7 +242,9 @@ extern "C" fn krt_grow(n: u32) {
 /// The variables of the frame running now (after a jump to a handler).
 #[unsafe(no_mangle)]
 extern "C" fn krt_locals() -> *mut Value {
-    rt().vm.frame().locals.as_mut_ptr()
+    let vm = &mut rt().vm;
+    let start = vm.frame().locals;
+    vm.locals[start..].as_mut_ptr()
 }
 
 /// Runs instruction `idx` of function `func`. Gives 0, or for `br3` the arm

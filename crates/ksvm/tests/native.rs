@@ -151,3 +151,37 @@ fn deferred_values_natively() {
     assert_eq!(vm, native);
     assert_eq!(native.1, 101, "{}", native.0); // the last line divides by zero
 }
+
+/// Arrays read and written by machine code: symmetric ones, ones that grow
+/// (and move), texts, structs, and an index out of bounds.
+const ARRAYS: &str = r#"
+struct P { x: int; y: int; }
+proc sum(&v[]: int) -> int { s: int = 0; walk i in 0..len(v) - 1 { s = s + v[i]; } return s; }
+proc main() {
+    sym s[]: int = claim 5;
+    walk i in -2..2 { s[i] = i * i; }
+    printl(s[-2] + s[2] + s[0]);
+    v[]: int = {};
+    walk i in 1..100 { append(v, i); v[len(v) - 1] = v[len(v) - 1] * 2; }
+    printl(sum(&v));
+    printl(len(v));
+    t[]: text = {"a", "b"};
+    t[1] = t[0] + "c";
+    printl(t[1] + toText(len(t[1])));
+    ps[]: P = {P { x: 1, y: 2 }, P { x: 3, y: 4 }};
+    printl(ps[1].x + ps[0].y);
+    q: int = remove(v, 0);
+    printl(q + v[0]);
+    burn s; burn t; burn ps;
+    printl(v[100]);
+    burn v;
+}
+"#;
+
+#[test]
+fn arrays_natively() {
+    let (vm, native) = both("arrays", ARRAYS);
+    assert_eq!(vm, native);
+    assert_eq!(native.1, 101, "{}", native.0); // the last line is out of bounds
+    assert!(native.0.starts_with("8\n10100\n100\nac2\n5\n6\n"), "{}", native.0);
+}

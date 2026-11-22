@@ -10,7 +10,6 @@
 //!
 //! An item another file reads must be `public`.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -131,25 +130,6 @@ pub fn resolve(program: &mut Program, scope: &Scope) -> R<()> {
     let me = &scope.me;
     program.public = program.public.iter().map(|n| me.mangle(n)).collect();
     Ok(())
-}
-
-thread_local! {
-    /// The scope of each file, by where its spans fall, for the `{x}` in a
-    /// `printf` format (read only when the checker reaches it).
-    static FORMATS: RefCell<Vec<(usize, Scope)>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Sets the scopes [`format_expr`] uses: each file's base and scope.
-pub fn set_format_scopes(scopes: Vec<(usize, Scope)>) {
-    FORMATS.with(|f| *f.borrow_mut() = scopes);
-}
-
-/// Resolves the names in a `{expr}` of a format string (parsed late, by
-/// the checker), with the scope of the file it is written in.
-pub fn format_expr(e: &mut Expr) -> R<()> {
-    let scope = FORMATS.with(|f| f.borrow().iter().rev().find(|(base, _)| *base <= e.span.start).map(|(_, s)| s.clone()));
-    let Some(scope) = scope else { return Ok(()) };
-    Resolver { scope: &scope, type_params: Vec::new(), locals: HashSet::new() }.expr(e)
 }
 
 struct Resolver<'a> {
@@ -398,6 +378,13 @@ impl Resolver<'_> {
     fn expr(&mut self, e: &mut Expr) -> R<()> {
         let span = e.span;
         match &mut e.kind {
+            ExprKind::Format(pieces) => {
+                for p in pieces {
+                    if let FmtPiece::Value { expr, .. } = p {
+                        self.expr(expr)?;
+                    }
+                }
+            }
             ExprKind::Num(_)
             | ExprKind::Real(_)
             | ExprKind::Char(_)

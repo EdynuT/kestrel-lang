@@ -2120,6 +2120,9 @@ fn build_cache() {
     // A body changed: only that file.
     write("Lib.ks", "public proc f() -> int { return 10; }");
     assert_eq!(build(), ("12\n".to_string(), vec!["Lib.ks".to_string()]));
+    // A comment or the layout changed: only that file too.
+    write("Lib.ks", "// the library\npublic proc f()\n    -> int { return 10; }");
+    assert_eq!(build().1, vec!["Lib.ks".to_string()]);
     // Its public part changed: the files that use it too.
     write("Lib.ks", "public proc f() -> int { return 10; }\npublic proc h() { }");
     assert_eq!(build().1, vec!["Lib.ks".to_string(), "Main.ks".into()]);

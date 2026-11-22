@@ -587,6 +587,19 @@ pub enum ExprKind {
     Lend(Box<Expr>),
     /// `obj.method(args)`, or `Class.method(args)` for a static method.
     MethodCall { recv: Box<Expr>, name: Ident, args: Vec<Expr> },
+    /// A text literal in the format of `printf`, split by the parser.
+    Format(Vec<FmtPiece>),
+}
+
+/// A piece of a `printf` format: `"x = {x:t}, y = %d"`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FmtPiece {
+    Text(String),
+    /// `{expr}` or `{expr:t}` (`spec` is `t`, `v`, `c`, or `' '` for none);
+    /// `label` is how it is written, for messages.
+    Value { expr: Expr, spec: char, label: String, span: Span },
+    /// `%d`, `%f`...: prints the next argument.
+    Arg { spec: char, span: Span },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

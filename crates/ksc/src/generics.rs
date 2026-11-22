@@ -485,6 +485,13 @@ fn walk_expr(e: &mut Expr, f: &mut dyn FnMut(Site)) {
     match &mut e.kind {
         ExprKind::Num(_) | ExprKind::Real(_) | ExprKind::Char(_) | ExprKind::Str(_) | ExprKind::NaT | ExprKind::Bool(_) => {}
         ExprKind::Give(_) => {}
+        ExprKind::Format(pieces) => {
+            for p in pieces {
+                if let FmtPiece::Value { expr, .. } = p {
+                    walk_expr(expr, f);
+                }
+            }
+        }
         ExprKind::Var(n) => f(Site::Name(n, span)),
         ExprKind::Unary(_, a) | ExprKind::Claim(a) | ExprKind::GiveField(a) | ExprKind::Lend(a) => walk_expr(a, f),
         ExprKind::Cast(a, t) => {

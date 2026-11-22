@@ -2663,6 +2663,7 @@ impl Checker {
     fn expr(&mut self, e: &Expr, want: Option<Type>) -> R<HExpr> {
         let span = e.span;
         Ok(match &e.kind {
+            ExprKind::Format(_) => return Err(err("a format with `{...}` or `%` works only as the first argument of `printf`", span)),
             ExprKind::Num(w) => {
                 let s = match want {
                     Some(Type::Scalar(s)) if s.is_int() => s,
@@ -3287,118 +3288,36 @@ impl Checker {
         Ok(())
     }
 
-    /// Splits a `printf` format into pieces. `{name}` / `{name:t|v|c}` read a
-    /// variable; `%d/%i %f/%r %s %t %v %c` take the next argument; `{{ }} %%` are literal.
-    fn format(&mut self, f: &str, fspan: Span, args: &mut std::slice::Iter<Expr>) -> R<Vec<(Fmt, HExpr)>> {
+    /// The pieces of a `printf` format (split by the parser), each `%` with
+    /// the next of `args`.
+    fn format(&mut self, pieces: &[ast::FmtPiece], fspan: Span, args: &mut std::slice::Iter<Expr>) -> R<Vec<(Fmt, HExpr)>> {
         let mut out = Vec::new();
-        let mut lit = String::new();
-        // Source span of each character, so errors point inside the literal
-        // (skipping the opening quote; `\n` and `\t` take two source bytes).
-        let mut at = fspan.start + 1;
-        let located: Vec<(Span, char)> = f
-            .chars()
-            .map(|c| {
-                let w = if matches!(c, '\n' | '\t') { 2 } else { c.len_utf8() };
-                at += w;
-                (Span { start: at - w, end: at }, c)
-            })
-            .collect();
-        let mut chars = located.into_iter().peekable();
-        let flush = |lit: &mut String, out: &mut Vec<(Fmt, HExpr)>| -> R<()> {
-            if !lit.is_empty() {
-                out.push((Fmt::Plain, hx(HExprKind::Text(std::mem::take(lit)), Type::Text, fspan)));
-            }
-            Ok(())
-        };
-        while let Some((cspan, c)) = chars.next() {
-            if matches!(c, '{' | '}' | '%') && chars.peek().map(|p| p.1) == Some(c) {
-                chars.next();
-                lit.push(c);
-                continue;
-            }
-            match c {
-                '{' => {
-                    let mut inner = String::new();
-                    let mut pspan = cspan;
-                    loop {
-                        match chars.next() {
-                            Some((sp, '}')) => {
-                                pspan = pspan.to(sp);
-                                break;
-                            }
-                            Some((sp, c)) => {
-                                pspan = pspan.to(sp);
-                                inner.push(c);
-                            }
-                            None => {
-                                return Err(err("`{` is never closed in this format", cspan)
-                                    .with_note("write `{{` to print a `{`"));
-                            }
-                        }
-                    }
-                    flush(&mut lit, &mut out)?;
-                    let label = format!("{{{inner}}}");
-                    // `{expr}` or `{expr:t}`: any expression, like Python's f-strings.
-                    let (code, spec) = match inner.rsplit_once(':') {
-                        Some((code, spec)) if spec.chars().all(|c| c.is_ascii_alphabetic()) => (code, spec),
-                        _ => (inner.as_str(), ""),
-                    };
-                    let spec = match spec {
-                        "" => ' ',
-                        "t" | "v" | "c" => spec.chars().next().unwrap_or(' '),
-                        _ => {
-                            return Err(err(format!("unknown format `:{spec}` in `{label}`"), pspan)
-                                .with_note("use `:t` (ternary), `:v` (heptavintimal) or `:c` (character)"));
-                        }
-                    };
-                    if code.trim().is_empty() {
-                        return Err(err(format!("`{label}` must hold a value"), pspan)
-                            .with_note("e.g. `{x}`, `{p.nome}` or `{a + b}`; write `{{` to print a `{`"));
-                    }
-                    // Lex just the code, then move every position to where it sits in the
-                    // file, so errors point inside the text.
-                    let at = cspan.end;
-                    let shift = |sp: Span| Span::new(sp.start + at, sp.end + at);
-                    let mut tokens = crate::lexer::lex(code).map_err(|d| Diagnostic { span: shift(d.span), ..d })?;
-                    for t in &mut tokens {
-                        t.span = shift(t.span);
-                    }
-                    let mut e = crate::parser::parse_expr(tokens)?;
-                    crate::resolve::format_expr(&mut e)?;
-                    let h = self.shown(&e, None)?;
-                    let (f, h) = piece(spec, &label, h)?;
+        for p in pieces {
+            match p {
+                ast::FmtPiece::Text(t) => out.push((Fmt::Plain, hx(HExprKind::Text(t.clone()), Type::Text, fspan))),
+                ast::FmtPiece::Value { expr, spec, label, .. } => {
+                    let h = self.shown(expr, None)?;
+                    let (f, h) = piece(*spec, label, h)?;
                     out.push((f, self.displayed(h)));
                 }
-                '}' => return Err(err("`}` without a matching `{` in this format", cspan).with_note("write `}}` to print a `}`")),
-                '%' => {
-                    let (pspan, spec) = match chars.next() {
-                        Some((sp, c)) => (cspan.to(sp), c),
-                        None => (cspan, ' '),
-                    };
+                ast::FmtPiece::Arg { spec, span } => {
                     let want = match spec {
                         'd' | 'i' | 't' | 'v' => Type::Scalar(Scalar::Int),
                         'f' | 'r' => Type::Scalar(Scalar::Real),
                         's' => Type::Text,
-                        'c' => Type::Scalar(Scalar::Tryte),
-                        _ => {
-                            return Err(err(format!("unknown format `%{}`", spec.to_string().trim()), pspan)
-                                .with_note("use %d or %i (integer), %f or %r (real), %s (text), %t (ternary), %v (heptavintimal), %c (character); `%%` prints `%`"));
-                        }
+                        _ => Type::Scalar(Scalar::Tryte),
                     };
                     let label = format!("%{spec}");
                     let Some(a) = args.next() else {
-                        return Err(err(format!("`{label}` has no argument to print"), pspan)
+                        return Err(err(format!("`{label}` has no argument to print"), *span)
                             .with_note(format!("every `%` takes the next argument, and none is left; to print `{label}` as text, write `%{label}`")));
                     };
-                    flush(&mut lit, &mut out)?;
                     let h = self.shown(a, Some(want))?;
-                    let (f, h) = piece(spec, &label, h)?;
+                    let (f, h) = piece(*spec, &label, h)?;
                     out.push((f, self.displayed(h)));
                 }
-                _ => lit.push(c),
             }
         }
-        flush(&mut lit, &mut out)?;
         Ok(out)
     }
 
@@ -3454,7 +3373,7 @@ impl Checker {
                 let mut rest = rest.iter();
                 let mut pieces = Vec::new();
                 for part in parts {
-                    if let ExprKind::Str(f) = &part.kind {
+                    if let ExprKind::Format(f) = &part.kind {
                         pieces.extend(self.format(f, part.span, &mut rest)?);
                         continue;
                     }
@@ -4012,6 +3931,13 @@ fn visit_stmt(s: &ast::Stmt, f: &mut dyn FnMut(&Expr)) {
 fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     f(e);
     match &e.kind {
+        ExprKind::Format(pieces) => {
+            for p in pieces {
+                if let ast::FmtPiece::Value { expr, .. } = p {
+                    visit_expr(expr, f);
+                }
+            }
+        }
         ExprKind::Unary(_, a) | ExprKind::Cast(a, _) | ExprKind::Claim(a) | ExprKind::Member(a, _) => visit_expr(a, f),
         ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b) => {
             visit_expr(a, f);
@@ -4098,8 +4024,10 @@ mod tests {
     use super::*;
     use crate::{lexer::lex, parser::parse};
 
+    /// Parses and checks `src` (a parse error is returned too: `printf`
+    /// formats are split by the parser).
     fn check_src(src: &str) -> R<Hir> {
-        check(&parse(lex(src).expect("lexes")).expect("parses"))
+        check(&parse(lex(src).expect("lexes"))?)
     }
 
     /// Checks `body` inside `proc main() { ... }` and returns the error message.

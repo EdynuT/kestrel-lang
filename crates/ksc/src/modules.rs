@@ -277,12 +277,6 @@ fn capitalize(s: &str) -> String {
     c.next().map(|f| f.to_ascii_uppercase().to_string() + c.as_str()).unwrap_or_default()
 }
 
-/// Each file's base and scope, for [`resolve::set_format_scopes`].
-pub fn scopes(units: &[Unit]) -> Vec<(usize, Scope)> {
-    let infos: Vec<Rc<ModuleInfo>> = units.iter().map(|u| u.info.clone()).collect();
-    units.iter().enumerate().map(|(k, u)| (u.base, scope_of(&infos, k, &u.program, &u.uses))).collect()
-}
-
 /// The files `k` reaches through `use` (itself first): what compiling it reads.
 pub fn closure(units: &[Unit], k: usize) -> Vec<usize> {
     let mut out = vec![k];
@@ -325,27 +319,16 @@ pub fn fnv(bytes: &[u8]) -> u64 {
     h
 }
 
-/// A hash of what other files see of this one (its [`header`]), without
-/// positions: editing a body, a comment or the layout leaves it the same,
-/// so the files that use this one need not be compiled again.
-pub fn interface_hash(program: &Program) -> u64 {
-    let h = header(program);
-    let mut public: Vec<&String> = h.public.iter().collect();
-    public.sort();
-    let text = format!("{:?}{public:?}", h.items);
-    fnv(strip_spans(&text).as_bytes())
-}
-
-/// `text` without its `Span { start: 1, end: 5 }`s.
-fn strip_spans(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(i) = rest.find("Span { start: ") {
-        out.push_str(&rest[..i]);
-        rest = &rest[i..];
-        let end = rest.find(" }").map_or(rest.len(), |j| j + 2);
-        rest = &rest[end..];
+/// A hash of what other files see of this one: the tokens of its
+/// [`declarations`]. Editing a plain body, a comment or the layout leaves it
+/// the same.
+pub fn interface_hash(src: &str, base: usize, program: &Program) -> u64 {
+    let decls = declarations(src, base, program);
+    let mut bytes = Vec::with_capacity(decls.len());
+    // The file was lexed already, so its declarations lex too.
+    for t in crate::lexer::lex(&decls).unwrap_or_default() {
+        bytes.extend_from_slice(&decls.as_bytes()[t.span.start..t.span.end]);
+        bytes.push(0);
     }
-    out.push_str(rest);
-    out
+    fnv(&bytes)
 }

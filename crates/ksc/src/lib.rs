@@ -97,9 +97,9 @@ fn compile_here(
     map: &mut diag::SourceMap,
 ) -> Result<Output, diag::Diagnostic> {
     let units = modules::load(root_path, root_src, files, map)?;
-    resolve::set_format_scopes(modules::scopes(&units));
     let headers: Vec<ast::Program> = units.iter().map(|u| modules::header(&u.program)).collect();
-    let hashes: Vec<u64> = units.iter().map(|u| modules::interface_hash(&u.program)).collect();
+    let source = |u: &modules::Unit| &map.files.iter().find(|f| f.base == u.base).expect("every unit's file is in the map").src;
+    let hashes: Vec<u64> = units.iter().map(|u| modules::interface_hash(source(u), u.base, &u.program)).collect();
     let mut objects = Vec::new();
     let mut warnings = Vec::new();
     let mut tests = Vec::new();
@@ -113,7 +113,7 @@ fn compile_here(
         let mine = matches!(units[k].origin, modules::Origin::Root | modules::Origin::Src);
         // What the object is made from: the compiler, the file's text and the
         // public part of every file it reaches.
-        let src = &map.files.iter().find(|f| f.base == units[k].base).expect("every unit's file is in the map").src;
+        let src = source(&units[k]);
         let mut stamp = vec![("$source".to_string(), modules::fnv(src.as_bytes())), ("$main".to_string(), u64::from(k == 0))];
         for u in modules::closure(&units, k).into_iter().skip(1) {
             stamp.push((units[u].info.path.clone(), hashes[u]));

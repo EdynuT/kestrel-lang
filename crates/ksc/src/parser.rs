@@ -61,6 +61,119 @@ pub fn parse_expr(tokens: Vec<Token>) -> Result<Expr, Diagnostic> {
     Ok(e)
 }
 
+/// Splits each text literal of a `printf` format (`a + b + ...`) into pieces.
+fn format_chain(e: &mut Expr) -> Result<(), Diagnostic> {
+    match &mut e.kind {
+        ExprKind::Binary(BinOp::Add, a, b) => {
+            format_chain(a)?;
+            format_chain(b)
+        }
+        ExprKind::Str(f) => {
+            let pieces = format_pieces(f, e.span)?;
+            e.kind = ExprKind::Format(pieces);
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `{expr}` / `{expr:t|v|c}` read a value, like Python's f-strings;
+/// `%d/%i %f/%r %s %t %v %c` take the next argument; `{{ }} %%` are literal.
+fn format_pieces(f: &str, fspan: Span) -> Result<Vec<FmtPiece>, Diagnostic> {
+    let err = |msg: String, span: Span, note: &str| Diagnostic::new(msg, span).with_note(note);
+    let mut out = Vec::new();
+    let mut lit = String::new();
+    // Source span of each character, so errors point inside the literal
+    // (skipping the opening quote; `\n` and `\t` take two source bytes).
+    let mut at = fspan.start + 1;
+    let located: Vec<(Span, char)> = f
+        .chars()
+        .map(|c| {
+            let w = if matches!(c, '\n' | '\t') { 2 } else { c.len_utf8() };
+            at += w;
+            (Span { start: at - w, end: at }, c)
+        })
+        .collect();
+    let mut chars = located.into_iter().peekable();
+    let flush = |lit: &mut String, out: &mut Vec<FmtPiece>| {
+        if !lit.is_empty() {
+            out.push(FmtPiece::Text(std::mem::take(lit)));
+        }
+    };
+    while let Some((cspan, c)) = chars.next() {
+        if matches!(c, '{' | '}' | '%') && chars.peek().map(|p| p.1) == Some(c) {
+            chars.next();
+            lit.push(c);
+            continue;
+        }
+        match c {
+            '{' => {
+                let mut inner = String::new();
+                let mut pspan = cspan;
+                loop {
+                    match chars.next() {
+                        Some((sp, '}')) => {
+                            pspan = pspan.to(sp);
+                            break;
+                        }
+                        Some((sp, c)) => {
+                            pspan = pspan.to(sp);
+                            inner.push(c);
+                        }
+                        None => return Err(err("`{` is never closed in this format".into(), cspan, "write `{{` to print a `{`")),
+                    }
+                }
+                flush(&mut lit, &mut out);
+                let label = format!("{{{inner}}}");
+                let (code, spec) = match inner.rsplit_once(':') {
+                    Some((code, spec)) if spec.chars().all(|c| c.is_ascii_alphabetic()) => (code, spec),
+                    _ => (inner.as_str(), ""),
+                };
+                let spec = match spec {
+                    "" => ' ',
+                    "t" | "v" | "c" => spec.chars().next().unwrap_or(' '),
+                    _ => {
+                        return Err(err(
+                            format!("unknown format `:{spec}` in `{label}`"),
+                            pspan,
+                            "use `:t` (ternary), `:v` (heptavintimal) or `:c` (character)",
+                        ));
+                    }
+                };
+                if code.trim().is_empty() {
+                    return Err(err(
+                        format!("`{label}` must hold a value"),
+                        pspan,
+                        "e.g. `{x}`, `{p.nome}` or `{a + b}`; write `{{` to print a `{`",
+                    ));
+                }
+                // Lexed where it sits in the file, so errors point inside the text.
+                let expr = parse_expr(crate::lexer::lex_at(code, cspan.end)?)?;
+                out.push(FmtPiece::Value { expr, spec, label, span: pspan });
+            }
+            '}' => return Err(err("`}` without a matching `{` in this format".into(), cspan, "write `}}` to print a `}`")),
+            '%' => {
+                let (pspan, spec) = match chars.next() {
+                    Some((sp, c)) => (cspan.to(sp), c),
+                    None => (cspan, ' '),
+                };
+                if !matches!(spec, 'd' | 'i' | 't' | 'v' | 'f' | 'r' | 's' | 'c') {
+                    return Err(err(
+                        format!("unknown format `%{}`", spec.to_string().trim()),
+                        pspan,
+                        "use %d or %i (integer), %f or %r (real), %s (text), %t (ternary), %v (heptavintimal), %c (character); `%%` prints `%`",
+                    ));
+                }
+                flush(&mut lit, &mut out);
+                out.push(FmtPiece::Arg { spec, span: pspan });
+            }
+            _ => lit.push(c),
+        }
+    }
+    flush(&mut lit, &mut out);
+    Ok(out)
+}
+
 struct Parser {
     tokens: Vec<Token>,
     /// The source text (empty when unknown), for `assert` messages.
@@ -1433,7 +1546,13 @@ impl Parser {
                     name = Ident { name: g.to_string(), span: start.to(self.tokens[self.pos - 1].span) };
                 }
                 if self.eat(&Tok::LParen) {
-                    let (args, close) = self.call_args()?;
+                    let (mut args, close) = self.call_args()?;
+                    // The format may join texts with `+`: its literals are read as format.
+                    if name.name == "printf"
+                        && let Some(first) = args.first_mut()
+                    {
+                        format_chain(first)?;
+                    }
                     return Ok(Expr { kind: ExprKind::Call { name, args }, span: start.to(close) });
                 }
                 // `Name { field: ...`: a struct value (never in a head, where `{` opens the body).
@@ -1479,6 +1598,17 @@ mod tests {
             ExprKind::Real(r) => r.to_string(),
             ExprKind::Char(c) => format!("'{c}"),
             ExprKind::Str(s) => format!("{s:?}"),
+            ExprKind::Format(ps) => {
+                let p: Vec<String> = ps
+                    .iter()
+                    .map(|p| match p {
+                        FmtPiece::Text(t) => format!("{t:?}"),
+                        FmtPiece::Value { expr, spec, .. } => format!("{{{} {spec}}}", sx(expr)),
+                        FmtPiece::Arg { spec, .. } => format!("%{spec}"),
+                    })
+                    .collect();
+                format!("(format {})", p.join(" "))
+            }
             ExprKind::NaT => "NaT".into(),
             ExprKind::Var(v) => v.clone(),
             ExprKind::Unary(UnOp::Neg, a) => format!("(neg {})", sx(a)),

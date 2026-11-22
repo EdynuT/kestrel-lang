@@ -52,6 +52,11 @@ impl Real {
         (self.m, self.e)
     }
 
+    /// The real with these [`Real::parts`] (from memory, so already normalized).
+    pub fn from_parts(m: i64, e: i16) -> Real {
+        Real { m, e }
+    }
+
     #[inline]
     pub fn is_zero(self) -> bool {
         self.m == 0

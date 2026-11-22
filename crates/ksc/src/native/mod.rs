@@ -43,7 +43,7 @@ use x86::{Alu, Asm, Cond, Label, Reg};
 /// `ksvm::native::PRESENT`
 const PRESENT: u64 = u64::from_le_bytes(*b"KRT-PROG");
 /// `ksvm::native::ABI`: the runtime this backend is written for.
-const ABI: u64 = 5;
+const ABI: u64 = 6;
 /// The size of a `ksvm::Value`; its value starts at byte 8.
 const V: i32 = 24;
 /// The size of a frame (`ksvm`'s `Frame`), and where its fields are.
@@ -66,6 +66,23 @@ const B_LIVE: i32 = 36;
 const REAL: i32 = 1;
 const TEXT: i32 = 2;
 const PTR: i32 = 3;
+/// `ksvm::native::math`: what `krt_math` does, by number.
+mod math {
+    pub const FADD: u32 = 0;
+    pub const FSUB: u32 = 1;
+    pub const FMUL: u32 = 2;
+    pub const FDIV: u32 = 3;
+    pub const FNEG: u32 = 4;
+    pub const FCMP: u32 = 5;
+    pub const ITOF: u32 = 6;
+    pub const FTOI: u32 = 7;
+    pub const TEQ: u32 = 8;
+    pub const TCMP: u32 = 9;
+    pub const TLEN: u32 = 10;
+    pub const TIDX: u32 = 11;
+}
+/// The kind number of an `int` (`Value::Word`).
+const INT: i32 = 0;
 /// A call writes the zeros of at most this many variables itself.
 const MAX_ZEROED: usize = 32;
 
@@ -73,6 +90,7 @@ const MAX_ZEROED: usize = 32;
 struct Runtime {
     grow: u64,
     op: u64,
+    math: u64,
     unwind: u64,
     locals: u64,
     sp: u64,
@@ -103,6 +121,7 @@ pub fn build(module: &Module, runtime: &[u8]) -> Result<Vec<u8>, String> {
     let rt = Runtime {
         grow: sym("krt_grow")?,
         op: sym("krt_op")?,
+        math: sym("krt_math")?,
         unwind: sym("krt_unwind")?,
         locals: sym("krt_locals")?,
         sp: sym("KRT_SP")?,
@@ -269,6 +288,7 @@ impl Gen<'_> {
             let result = matches!(
                 op,
                 Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Cmp3 | Op::Neg | Op::Test(_) | Op::LdIdx | Op::TLen | Op::LdElem { n: 1, .. }
+                    | Op::FAdd | Op::FSub | Op::FMul | Op::FDiv | Op::FCmp3 | Op::FNeg | Op::IToF | Op::FToI | Op::TEq | Op::TCmp | Op::TIdx
             );
             if !result {
                 if !matches!(op, Op::Br3 { .. }) {
@@ -528,6 +548,43 @@ impl Gen<'_> {
             a.store(Reg::Rbx, 8 + 8 * k as i32, Reg::R11);
         }
         a.alu_imm(Alu::Add, Reg::Rbx, V);
+    }
+
+    /// `krt_math(code, ...)` on the top values (of these kinds, the first
+    /// deepest; an `int` must not be NaT), its result (of kind `kind`) kept
+    /// back; the runtime does the rest (`slow`) when they are not of these
+    /// kinds or the result has no value.
+    fn math(&mut self, idx: usize, op: Op, next: Label, code: u32, kinds: &[i32], kind: i32) {
+        // On the real stack: the call keeps no register.
+        self.flush();
+        let slow = self.prepare(idx, op, next, 0);
+        let n = kinds.len() as i32;
+        let args = [Reg::Rsi, Reg::Rdx, Reg::Rcx, Reg::R8];
+        for (k, &want) in kinds.iter().enumerate() {
+            let at = (k as i32 - n) * V;
+            self.a.cmp_mem(Reg::Rbx, at, want);
+            self.a.jcc(Cond::Ne, slow);
+            if want == INT {
+                self.a.load(Reg::Rax, Reg::Rbx, at + 8);
+                self.not_nat(Reg::Rax, slow);
+            }
+        }
+        let a = &mut *self.a;
+        for (k, _) in kinds.iter().enumerate() {
+            let at = (k as i32 - n) * V;
+            a.load(args[2 * k], Reg::Rbx, at + 8);
+            a.load(args[2 * k + 1], Reg::Rbx, at + 16);
+        }
+        a.mov_imm(Reg::Rdi, code);
+        a.call_addr(self.rt.math);
+        a.mov_imm64(Reg::R11, i64::MIN);
+        a.alu(Alu::Cmp, Reg::Rax, Reg::R11);
+        a.jcc(Cond::E, slow);
+        a.alu_imm(Alu::Sub, Reg::Rbx, n * V);
+        a.mov_imm(Reg::R8, kind as u32);
+        a.mov(Reg::R9, Reg::Rax);
+        a.mov(Reg::R10, Reg::Rdx);
+        self.pending.push(Opnd::Tmp);
     }
 
     /// The values taken from the real stack are gone (the instruction succeeded).
@@ -856,13 +913,38 @@ impl Gen<'_> {
                 self.drop_taken();
             }
             Op::TLen => {
-                // An array's length; a text's goes to the runtime.
-                let slow = self.prepare(idx, op, next, 1);
+                // An array's length here; a text's from `krt_math`.
+                self.flush();
+                let (text, done) = (self.a.label(), self.a.label());
+                self.a.cmp_mem(Reg::Rbx, -V, TEXT);
+                self.a.jcc(Cond::E, text);
+                let slow = self.prepare(idx, op, next, 0);
                 self.take_ptr(slow);
                 self.block(slow);
                 self.a.load(Reg::Rax, Reg::Rsi, B_LEN);
                 self.result();
+                self.pending.clear();
+                self.a.jmp(done);
+                self.a.bind(text);
+                self.math(idx, op, next, math::TLEN, &[TEXT], INT);
+                self.a.bind(done);
             }
+            Op::FAdd | Op::FSub | Op::FMul | Op::FDiv | Op::FCmp3 => {
+                let (code, kind) = match op {
+                    Op::FAdd => (math::FADD, REAL),
+                    Op::FSub => (math::FSUB, REAL),
+                    Op::FMul => (math::FMUL, REAL),
+                    Op::FDiv => (math::FDIV, REAL),
+                    _ => (math::FCMP, INT),
+                };
+                self.math(idx, op, next, code, &[REAL, REAL], kind);
+            }
+            Op::FNeg => self.math(idx, op, next, math::FNEG, &[REAL], REAL),
+            Op::IToF => self.math(idx, op, next, math::ITOF, &[INT], REAL),
+            Op::FToI => self.math(idx, op, next, math::FTOI, &[REAL], INT),
+            Op::TEq => self.math(idx, op, next, math::TEQ, &[TEXT, TEXT], INT),
+            Op::TCmp => self.math(idx, op, next, math::TCMP, &[TEXT, TEXT], INT),
+            Op::TIdx => self.math(idx, op, next, math::TIDX, &[TEXT, INT], INT),
             Op::Pop => {
                 if self.pending.pop().is_none() {
                     self.a.alu_imm(Alu::Sub, Reg::Rbx, V);

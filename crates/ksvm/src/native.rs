@@ -79,14 +79,15 @@ pub static KRT_ABI: [u64; 6] = [
     std::mem::size_of::<crate::Block>() as u64,
 ];
 /// Bumped when the native code's view of the runtime changes.
-pub const ABI: u64 = 5;
+pub const ABI: u64 = 6;
 /// Room kept free on the stack past its top, for native pushes.
 const SLACK: usize = 64;
 
 /// The functions the native code calls, kept by the linker through this table.
 #[used]
-static KEEP: [extern "C" fn(); 4] = unsafe {
+static KEEP: [extern "C" fn(); 5] = unsafe {
     [
+        std::mem::transmute::<extern "C" fn(u32, i64, i64, i64, i64) -> Pair, extern "C" fn()>(krt_math),
         std::mem::transmute::<extern "C" fn(u32), extern "C" fn()>(krt_grow),
         std::mem::transmute::<extern "C" fn(u32, u32) -> u64, extern "C" fn()>(krt_op),
         std::mem::transmute::<extern "C" fn() -> Landing, extern "C" fn()>(krt_unwind),
@@ -311,4 +312,70 @@ extern "C" fn krt_unwind() -> Landing {
     let landing = Landing { addr: rt.landings[&(f.func, f.pc)], sp: f.native_sp };
     sync_out(&mut rt.vm);
     landing
+}
+
+/// Two 8-byte results (in `rax` and `rdx`).
+#[repr(C)]
+pub struct Pair {
+    a: i64,
+    b: i64,
+}
+
+/// What [`krt_math`] does, by number (`ksc` uses the same numbers).
+pub mod math {
+    pub const FADD: u32 = 0;
+    pub const FSUB: u32 = 1;
+    pub const FMUL: u32 = 2;
+    pub const FDIV: u32 = 3;
+    pub const FNEG: u32 = 4;
+    pub const FCMP: u32 = 5;
+    pub const ITOF: u32 = 6;
+    pub const FTOI: u32 = 7;
+    pub const TEQ: u32 = 8;
+    pub const TCMP: u32 = 9;
+    pub const TLEN: u32 = 10;
+    pub const TIDX: u32 = 11;
+}
+
+/// The operations on reals and texts that need no more than their values:
+/// `op` (see [`math`]) on `a` (its two 8-byte parts after the kind) and `b`.
+/// Gives the result's parts, or `i64::MIN` first when the interpreter must
+/// do it (a NaT, an overflow, an index out of bounds: it has the message).
+/// Never makes a text, so nothing is collected.
+#[unsafe(no_mangle)]
+extern "C" fn krt_math(op: u32, a0: i64, a1: i64, b0: i64, b1: i64) -> Pair {
+    use kestrel_core::{Real, Word};
+    const NO: Pair = Pair { a: i64::MIN, b: 0 };
+    let real = |m: i64, e: i64| Real::from_parts(m, e as i16);
+    let out = |r: Real| {
+        let (m, e) = r.parts();
+        if r.is_nat() { NO } else { Pair { a: m, b: i64::from(e) } }
+    };
+    let int = |w: Word| match w.get() {
+        Some(v) => Pair { a: v, b: 0 },
+        None => NO,
+    };
+    let texts = &rt().vm.texts;
+    let text = |t: i64| &texts[t as u32 as usize];
+    match op {
+        math::FADD => out(real(a0, a1) + real(b0, b1)),
+        math::FSUB => out(real(a0, a1) - real(b0, b1)),
+        math::FMUL => out(real(a0, a1) * real(b0, b1)),
+        math::FDIV => out(real(a0, a1) / real(b0, b1)),
+        math::FNEG => out(-real(a0, a1)),
+        math::FCMP => int(real(a0, a1).cmp3(real(b0, b1))),
+        math::ITOF => out(Real::from_word(Word::new(a0))),
+        math::FTOI => int(real(a0, a1).to_word()),
+        math::TEQ => Pair { a: if text(a0) == text(b0) { 1 } else { -1 }, b: 0 },
+        math::TCMP => Pair { a: text(a0).cmp(text(b0)) as i64, b: 0 },
+        math::TLEN => Pair { a: text(a0).len() as i64, b: 0 },
+        math::TIDX => {
+            let c = usize::try_from(b0).ok().and_then(|i| text(a0).get(i));
+            match c.and_then(|c| kestrel_core::charset::char_to_tryte(*c)) {
+                Some(v) => Pair { a: v, b: 0 },
+                None => NO,
+            }
+        }
+        _ => NO,
+    }
 }

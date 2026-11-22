@@ -228,3 +228,36 @@ fn objects_natively() {
     assert_eq!(vm, native);
     assert_eq!(native.0, "30\n15\n419\n54321\nfalse\n");
 }
+
+/// Reals and texts: done by `krt_math` straight from machine code, or by
+/// the interpreter when it has to (NaT, division by zero, a bad index).
+const REALS_TEXTS: &str = r#"
+proc inv(x: real) -> real { r: real = 1.0 / x on NaT { return -1.0; }; return r; }
+proc main() {
+    x: real = 2.5;
+    y: real = x * x - x / 2.0 + -x;
+    printl(y);
+    printl(y < x);
+    printl(y >= 2.5);
+    printl((int) (y * 4.0) + 1);
+    printl((real) 7 / 2.0);
+    printl(inv(4.0) + inv(0.0));
+    a: text = "kestrel";
+    b: text = "kest" + "rel";
+    printl(a == b);
+    printl(a != "x");
+    printl(len(a) + len(b));
+    printl(a[0] == 'k');
+    printl(a < "zeta");
+    n: real? = null;
+    printl(n ?: 1.5);
+    printl(a[7]);
+}
+"#;
+
+#[test]
+fn reals_and_texts_natively() {
+    let (vm, native) = both("reals", REALS_TEXTS);
+    assert_eq!(vm, native);
+    assert_eq!(native.1, 101, "{}", native.0); // the last line is out of bounds
+}

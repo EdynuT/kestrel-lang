@@ -185,3 +185,46 @@ fn arrays_natively() {
     assert_eq!(native.1, 101, "{}", native.0); // the last line is out of bounds
     assert!(native.0.starts_with("8\n10100\n100\nac2\n5\n6\n"), "{}", native.0);
 }
+
+/// Fields of objects and structs, read and written by machine code.
+const OBJECTS: &str = r#"
+struct P { x: int; y: int; }
+interface Shape { proc area(&self) -> int; }
+@impl(Shape)
+class Rect {
+    public w: int;
+    public h: int;
+    public corner: P;
+    public proc Rect(w: int, h: int) -> Rect { return Rect { w: w, h: h, corner: P { x: w, y: h } }; }
+    @override public proc area(&self) -> int { return self.w * self.h; }
+    public proc grow(&self) { self.w = self.w + 1; self.corner = P { x: self.corner.x * 2, y: self.corner.y + 1 }; }
+}
+class Node { public v: int; public next: Node?; public proc Node(v: int) -> Node { return Node { v: v, next: null }; } }
+proc main() {
+    r: Rect = Rect(2, 3);
+    walk i in 1..3 { r.grow(); }
+    printl(r.w + r.h + r.corner.x + r.corner.y);
+    s: Shape = give r;
+    printl(s.area());
+    ps[]: P = {P { x: 1, y: 2 }, P { x: 3, y: 4 }};
+    ps[0] = P { x: ps[1].y, y: ps[0].x };
+    ps[1].x = 9;
+    printl(ps[0].x * 100 + ps[0].y * 10 + ps[1].x);
+    head: Node? = null;
+    walk i in 1..5 { n: Node = Node(i); n.next = give head; head = give n; }
+    total: int = 0;
+    cur: &Node? = &head;
+    while cur != null { total = total * 10 + cur.v; cur = &cur.next; }
+    printl(total);
+    x: real? = null;
+    printl(head == null || x != null);
+    burn s; burn ps; burn head;
+}
+"#;
+
+#[test]
+fn objects_natively() {
+    let (vm, native) = both("objects", OBJECTS);
+    assert_eq!(vm, native);
+    assert_eq!(native.0, "30\n15\n419\n54321\nfalse\n");
+}

@@ -303,6 +303,13 @@ impl Asm {
         self.code.extend_from_slice(&[0xf7, 0xf8 | r.low()]);
     }
 
+    /// `imul dst, [base + disp]`
+    pub fn imul_load(&mut self, dst: Reg, base: Reg, disp: i32) {
+        self.rex(dst as u8, base);
+        self.code.extend_from_slice(&[0x0f, 0xaf]);
+        self.mem(dst as u8, base, disp);
+    }
+
     /// `neg r`
     pub fn neg(&mut self, r: Reg) {
         self.rex(0, r);
@@ -409,6 +416,7 @@ mod tests {
         assert_eq!(bytes(|a| a.mov(Reg::Rax, Reg::R9)), [0x4c, 0x89, 0xc8]);
         assert_eq!(bytes(|a| a.load(Reg::R10, Reg::Rbx, -8)), [0x4c, 0x8b, 0x93, 0xf8, 0xff, 0xff, 0xff]);
         assert_eq!(bytes(|a| a.cqo()), [0x48, 0x99]);
+        assert_eq!(bytes(|a| a.imul_load(Reg::Rcx, Reg::Rsi, 16)), [0x48, 0x0f, 0xaf, 0x8e, 16, 0, 0, 0]);
         assert_eq!(bytes(|a| a.cmp_mem(Reg::R12, 0, 3)), [0x49, 0x81, 0xbc, 0x24, 0, 0, 0, 0, 3, 0, 0, 0]);
         assert_eq!(bytes(|a| a.cmp32_mem(Reg::Rsi, 32, Reg::Rax)), [0x39, 0x86, 32, 0, 0, 0]);
         assert_eq!(bytes(|a| a.cmp8_mem(Reg::Rsi, 36, 0)), [0x80, 0xbe, 36, 0, 0, 0, 0]);

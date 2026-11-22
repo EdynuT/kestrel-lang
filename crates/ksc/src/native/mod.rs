@@ -62,7 +62,9 @@ const B_W: i32 = 16;
 const B_LO: i32 = 24;
 const B_GEN: i32 = 32;
 const B_LIVE: i32 = 36;
-/// The kind number of a pointer (`Value::Ptr`).
+/// The kind numbers of `ksvm::Value`: a real, a text, a pointer.
+const REAL: i32 = 1;
+const TEXT: i32 = 2;
 const PTR: i32 = 3;
 /// A call writes the zeros of at most this many variables itself.
 const MAX_ZEROED: usize = 32;
@@ -264,7 +266,10 @@ impl Gen<'_> {
             self.pending = kept;
             self.flush();
             self.generic(idx, op, fail, &|t| at[&(t as usize)]);
-            let result = matches!(op, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Cmp3 | Op::Neg | Op::Test(_) | Op::LdIdx | Op::TLen);
+            let result = matches!(
+                op,
+                Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Cmp3 | Op::Neg | Op::Test(_) | Op::LdIdx | Op::TLen | Op::LdElem { n: 1, .. }
+            );
             if !result {
                 if !matches!(op, Op::Br3 { .. }) {
                     self.a.jmp(next);
@@ -387,14 +392,20 @@ impl Gen<'_> {
     /// that takes `n` values sees only those), and gives the label of the
     /// instruction's slow path.
     fn prepare(&mut self, idx: usize, op: Op, next: Label, n: usize) -> Label {
+        self.keep_top(n);
+        let l = self.a.label();
+        self.slow.push((l, idx, op, next, self.pending.clone()));
+        l
+    }
+
+    /// Pushes what is kept back below the top `n` values. (So a result kept
+    /// in registers after them is the only one there.)
+    fn keep_top(&mut self, n: usize) {
         if self.pending.len() > n {
             let top = self.pending.split_off(self.pending.len() - n);
             self.flush();
             self.pending = top;
         }
-        let l = self.a.label();
-        self.slow.push((l, idx, op, next, self.pending.clone()));
-        l
     }
 
     /// Goes to `slow` if `r` is NaT (`i64::MIN`: the only value whose `- 1` overflows).
@@ -468,6 +479,13 @@ impl Gen<'_> {
     /// The block of the pointer in `rax`, into `rsi`, if it is alive, has one cell per
     /// element and the generation matches; otherwise `slow`.
     fn block(&mut self, slow: Label) {
+        self.any_block(slow);
+        self.a.cmp_mem(Reg::Rsi, B_W, 1);
+        self.a.jcc(Cond::Ne, slow);
+    }
+
+    /// Like [`Gen::block`], with elements of any width.
+    fn any_block(&mut self, slow: Label) {
         let (a, rt) = (&mut *self.a, self.rt);
         a.mov32(Reg::Rsi, Reg::Rax);
         a.shr(Reg::Rax, 32);
@@ -479,18 +497,37 @@ impl Gen<'_> {
         a.jcc(Cond::Ne, slow);
         a.cmp8_mem(Reg::Rsi, B_LIVE, 0);
         a.jcc(Cond::E, slow);
-        a.cmp_mem(Reg::Rsi, B_W, 1);
-        a.jcc(Cond::Ne, slow);
     }
 
-    /// The address of cell `rcx` (an index) of the block in `rsi`, into `rcx`, or `slow`.
-    fn cell(&mut self, slow: Label) {
+    /// The address of cell `off` of element `rcx` (an index) of the block in
+    /// `rsi`, into `rcx`, if the element and its cells `off..off + n` are there.
+    fn elem(&mut self, off: u8, n: u8, slow: Label) {
         let a = &mut *self.a;
         a.alu_load(Alu::Sub, Reg::Rcx, Reg::Rsi, B_LO);
         a.alu_load(Alu::Cmp, Reg::Rcx, Reg::Rsi, B_LEN);
-        a.jcc(Cond::Ae, slow); // also a negative one: unsigned, it is huge
+        a.jcc(Cond::Ae, slow);
+        // The element's first cell is before the end (the length is a multiple of the width).
+        a.imul_load(Reg::Rcx, Reg::Rsi, B_W);
+        a.alu_load(Alu::Cmp, Reg::Rcx, Reg::Rsi, B_LEN);
+        a.jcc(Cond::Ae, slow);
+        a.cmp_mem(Reg::Rsi, B_W, i32::from(off) + i32::from(n));
+        a.jcc(Cond::B, slow);
+        a.alu_imm(Alu::Add, Reg::Rcx, i32::from(off));
         a.imul_imm(Reg::Rcx, Reg::Rcx, V);
         a.alu_load(Alu::Add, Reg::Rcx, Reg::Rsi, B_AT);
+    }
+
+    /// Pushes a value of kind `kind` whose 8-byte parts after the kind are `parts`.
+    fn push_value(&mut self, kind: i32, parts: [i64; 2]) {
+        self.flush();
+        self.room(1);
+        let a = &mut *self.a;
+        a.store_imm(Reg::Rbx, 0, kind);
+        for (k, v) in parts.into_iter().enumerate() {
+            a.mov_imm64(Reg::R11, v);
+            a.store(Reg::Rbx, 8 + 8 * k as i32, Reg::R11);
+        }
+        a.alu_imm(Alu::Add, Reg::Rbx, V);
     }
 
     /// The values taken from the real stack are gone (the instruction succeeded).
@@ -676,11 +713,12 @@ impl Gen<'_> {
                 a.ret();
             }
             Op::LdIdx => {
+                // Cell 0 of the element (of any width: an object's first field too).
                 let slow = self.prepare(idx, op, next, 2);
                 self.take_int(Reg::Rcx, slow);
                 self.take_ptr(slow);
-                self.block(slow);
-                self.cell(slow);
+                self.any_block(slow);
+                self.elem(0, 1, slow);
                 self.drop_taken();
                 let a = &mut *self.a;
                 a.load(Reg::R8, Reg::Rcx, 0);
@@ -693,8 +731,8 @@ impl Gen<'_> {
                 let value = self.take_any();
                 self.take_int(Reg::Rcx, slow);
                 self.take_ptr(slow);
-                self.block(slow);
-                self.cell(slow);
+                self.any_block(slow);
+                self.elem(0, 1, slow);
                 let a = &mut *self.a;
                 match value {
                     Loc::Const(v) => {
@@ -712,6 +750,107 @@ impl Gen<'_> {
                         a.store(Reg::Rcx, 0, Reg::R8);
                         a.store(Reg::Rcx, 8, Reg::R9);
                         a.store(Reg::Rcx, 16, Reg::R10);
+                    }
+                }
+                self.drop_taken();
+            }
+            Op::PushS(k) => self.push_value(TEXT, [i64::from(k), 0]),
+            Op::PushR(k) => {
+                let (m, e) = kestrel_core::Real::from(self.module.consts[k as usize]).parts();
+                self.push_value(REAL, [m, i64::from(e)]);
+            }
+            Op::IsNaT => {
+                // `+` for an `int` or a real without a value, `-` for anything else.
+                self.keep_top(1);
+                let (yes, no, done) = (self.a.label(), self.a.label(), self.a.label());
+                let v = self.take_any();
+                let a = &mut *self.a;
+                match v {
+                    Loc::Const(_) => a.jmp(no),
+                    Loc::Mem(base, at) => {
+                        a.load(Reg::Rax, base, at);
+                        a.load(Reg::Rcx, base, at + 8);
+                    }
+                    Loc::Tmp => {
+                        a.mov(Reg::Rax, Reg::R8);
+                        a.mov(Reg::Rcx, Reg::R9);
+                    }
+                }
+                a.alu_imm(Alu::Cmp, Reg::Rax, REAL);
+                a.jcc(Cond::A, no); // a text or a pointer
+                a.alu_imm(Alu::Sub, Reg::Rcx, 1);
+                a.jcc(Cond::O, yes);
+                a.bind(no);
+                a.mov_imm64(Reg::Rax, -1);
+                a.jmp(done);
+                a.bind(yes);
+                a.mov_imm64(Reg::Rax, 1);
+                a.bind(done);
+                self.result();
+            }
+            Op::LdElem { off, n } => {
+                let slow = self.prepare(idx, op, next, 2);
+                self.take_int(Reg::Rcx, slow);
+                self.take_ptr(slow);
+                self.any_block(slow);
+                self.elem(off, n, slow);
+                self.drop_taken();
+                if n == 1 {
+                    let a = &mut *self.a;
+                    a.load(Reg::R8, Reg::Rcx, 0);
+                    a.load(Reg::R9, Reg::Rcx, 8);
+                    a.load(Reg::R10, Reg::Rcx, 16);
+                    self.pending.push(Opnd::Tmp);
+                } else {
+                    // A struct: its cells go on the stack.
+                    self.room(usize::from(n));
+                    let a = &mut *self.a;
+                    for i in 0..i32::from(n) * 3 {
+                        a.load(Reg::R11, Reg::Rcx, i * 8);
+                        a.store(Reg::Rbx, i * 8, Reg::R11);
+                    }
+                    a.alu_imm(Alu::Add, Reg::Rbx, i32::from(n) * V);
+                }
+            }
+            Op::StElem { off, n } => {
+                let slow;
+                let value = if n == 1 {
+                    slow = self.prepare(idx, op, next, 3);
+                    Some(self.take_any())
+                } else {
+                    // A struct: its cells are on the stack, on top.
+                    self.flush();
+                    slow = self.prepare(idx, op, next, 0);
+                    self.real = i32::from(n);
+                    None
+                };
+                self.take_int(Reg::Rcx, slow);
+                self.take_ptr(slow);
+                self.any_block(slow);
+                self.elem(off, n, slow);
+                let a = &mut *self.a;
+                match value {
+                    Some(Loc::Const(v)) => {
+                        a.store_imm(Reg::Rcx, 0, 0);
+                        a.mov_imm64(Reg::R11, v);
+                        a.store(Reg::Rcx, 8, Reg::R11);
+                    }
+                    Some(Loc::Mem(base, at)) => {
+                        for q in [0, 8, 16] {
+                            a.load(Reg::R11, base, at + q);
+                            a.store(Reg::Rcx, q, Reg::R11);
+                        }
+                    }
+                    Some(Loc::Tmp) => {
+                        a.store(Reg::Rcx, 0, Reg::R8);
+                        a.store(Reg::Rcx, 8, Reg::R9);
+                        a.store(Reg::Rcx, 16, Reg::R10);
+                    }
+                    None => {
+                        for i in 0..i32::from(n) * 3 {
+                            a.load(Reg::R11, Reg::Rbx, -i32::from(n) * V + i * 8);
+                            a.store(Reg::Rcx, i * 8, Reg::R11);
+                        }
                     }
                 }
                 self.drop_taken();

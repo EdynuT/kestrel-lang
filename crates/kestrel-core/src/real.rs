@@ -30,6 +30,7 @@ const EXP_WEIGHT: i64 = POW3[21];
 
 /// A ternary floating-point number, or NaT.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(C)]
 pub struct Real {
     m: i64,
     e: i16,
@@ -44,6 +45,11 @@ impl Real {
     #[inline]
     pub fn is_nat(self) -> bool {
         self.m == i64::MIN
+    }
+
+    /// Mantissa and exponent, as they are in memory (native code writes them).
+    pub fn parts(self) -> (i64, i16) {
+        (self.m, self.e)
     }
 
     #[inline]

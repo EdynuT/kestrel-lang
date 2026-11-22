@@ -74,13 +74,13 @@ valor = (mantissa / 3²⁰) × 3^expoente
 - É um literal imutável guardado no pool de strings do `.ksb`, como o `const char*` do C. É copiável e **não precisa de `burn`**.
 - `s[i]` devolve o `tryte` da posição `i`. **O índice começa em 0**, como em C (como os arrays sem `sym`). Índice fora de `0 .. len(s)-1` dispara **Trap**.
 - `len(s)` devolve o tamanho como `int`.
-- `a + b` cria um texto novo: `saudacao: text = "Olá, " + nome + "!";`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo** (use `toText(5)`).
+- `a + b` cria um texto novo: `saudacao: text = "Olá, " + nome + "!";`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo** (use `Texts.toText(5)`).
 - `a == b` e `a != b` comparam caractere por caractere. `<` e `>` não valem para textos.
-- `sub(s, início, fim)` devolve os caracteres de `início` até `fim - 1`, como o `substring` do Java: `sub("Kestrel", 0, 3)` é `"Kes"`. Fora de `0 ≤ início ≤ fim ≤ len(s)` dispara **Trap**.
-- `toInt(s)` e `toReal(s)` leem um número (`"123"`, `"-7"`, `"0t+0-"`, `"2.5"`). Texto inválido é uma conta que falha (§1.3): use `on NaT` para tratar.
-- `isDigit(c)`, `isLetter(c)`, `isUpper(c)`, `isLower(c)` e `isSpace(c)` dizem (`+`/`-`) se um `tryte` é dígito, letra (com acentos), maiúscula, minúscula ou espaço (`' '`, `\n`, `\t`).
+- `Texts.sub(s, início, fim)` devolve os caracteres de `início` até `fim - 1`, como o `substring` do Java: `Texts.sub("Kestrel", 0, 3)` é `"Kes"`. Fora de `0 ≤ início ≤ fim ≤ len(s)` dispara **Trap**.
+- `Texts.toInt(s)` e `Texts.toReal(s)` leem um número (`"123"`, `"-7"`, `"0t+0-"`, `"2.5"`). Texto inválido é uma conta que falha (§1.3): use `on NaT` para tratar.
+- `Chars.isDigit(c)`, `Chars.isLetter(c)`, `Chars.isUpper(c)`, `Chars.isLower(c)` e `Chars.isSpace(c)` dizem (`+`/`-`) se um `tryte` é dígito, letra (com acentos), maiúscula, minúscula ou espaço (`' '`, `\n`, `\t`).
 - Cada caractere precisa existir na tabela §4. Um caractere fora dela, como `&` ou `ñ`, é **erro de compilação**.
-- `toText(x)` cria um texto novo a partir de um número (§8.6). Um texto criado com o programa rodando (`+`, `sub`, `toText`, `readLine`...) é liberado sozinho quando nenhuma variável, array ou valor em uso aponta mais para ele (coleta de lixo só para textos, sem pausas perceptíveis). O limite é de 2²⁴ caracteres em textos **vivos ao mesmo tempo**. Para montar texto caractere por caractere, use um array de `tryte`, como um array de `char` em C, e no fim `toText(arr, 'c')`.
+- `Texts.toText(x)` cria um texto novo a partir de um número (§8.6). Um texto criado com o programa rodando (`+`, `sub`, `toText`, `readLine`...) é liberado sozinho quando nenhuma variável, array ou valor em uso aponta mais para ele (coleta de lixo só para textos, sem pausas perceptíveis). O limite é de 2²⁴ caracteres em textos **vivos ao mesmo tempo**. Para montar texto caractere por caractere, use um array de `tryte`, como um array de `char` em C, e no fim `Texts.toText(arr, 'c')`.
 
 ---
 
@@ -184,7 +184,7 @@ Há dois tipos de array, e o tipo decide como os índices funcionam:
 - `T` é qualquer tipo que não seja array: `trit`, `tryte`, `int`, `real`, `text`, um enum ou um struct. Os colchetes ficam no **nome**, como em `int x[]` do C. `sym` vem antes, como o `final`: `final sym x[]: int = ...`.
 - `claim N` preenche com o zero do tipo: `0`, `0.0`, `""`, o número 0 num enum (que imprime `0` se não for um valor do enum) e, num struct, cada campo zerado.
 - Num array de struct, `v[i]` é uma cópia do elemento, `v[i].x` lê um campo e `v[i].x = 5` muda só esse campo.
-- `print(v)`, `{v}` e `toText(v)` mostram o array inteiro (`[1, 2, 3]`, `["Ana", "Bia"]`) só quando os elementos são números ou textos. Arrays de enum ou struct são impressos elemento por elemento.
+- `Console.print(v)`, `{v}` e `Texts.toText(v)` mostram o array inteiro (`[1, 2, 3]`, `["Ana", "Bia"]`) só quando os elementos são números ou textos. Arrays de enum ou struct são impressos elemento por elemento.
 - `{a, b, c}` cria um array já preenchido, como o inicializador do Java. Com `sym`, a quantidade de valores precisa ser ímpar.
 - `claim N` com `N` negativo, `N` NaT ou (com `sym`) `N` par dispara **Trap**. Índice fora dos limites também.
 - Quando o tamanho e o índice são conhecidos na compilação (array criado com `{...}` ou `claim 5`, índice literal), um índice fora dos limites é **erro de compilação**, como no Rust.
@@ -320,19 +320,19 @@ Cada declaração ocupa um slot próprio, então um `x` declarado num bloco inte
 #### 8.2.1 `null` e tipos `T?` (null-safety, como em Kotlin)
 
 ```
-idade: int? = toInt(texto);      // null se o texto não for um número
+idade: int? = Texts.toInt(texto);      // null se o texto não for um número
 if idade != null {
-    printl(idade + 1);           // aqui `idade` é int
+    Console.printl(idade + 1);           // aqui `idade` é int
 }
-n: int = toInt(texto);           // ERRO: pode ser null
-k: int = toInt(texto) on NaT { return; };   // ou trate o null na linha
+n: int = Texts.toInt(texto);           // ERRO: pode ser null
+k: int = Texts.toInt(texto) on NaT { return; };   // ou trate o null na linha
 
 proc metade(x: int) -> int? {
     if x % 2 != 0 { return null; }
     return x / 2;
 }
 
-printl(n?.proximo?.valor);       // `?.`: null se algo no caminho for null
+Console.printl(n?.proximo?.valor);       // `?.`: null se algo no caminho for null
 ```
 
 - **Um tipo sem `?` nunca é null.** `int`, `text`, `bool`, enums, objetos e interfaces ganham `?` para poder ser null: `int?`, `text?`, `Cor?`, `No?`. Arrays e structs não têm `?` (um struct pode ter campos `?`). Elementos de array também não.
@@ -348,23 +348,23 @@ printl(n?.proximo?.valor);       // `?.`: null se algo no caminho for null
 - A prova vale para variáveis e caminhos de campos de objetos (`n.proximo.valor`), não para elementos de arrays nem campos de structs.
 - **A prova se perde** quando algo pode ter mudado o valor: atribuir (`x = null`), atribuir dentro de um `if`/laço/`match` (depois dele, e no laço inteiro), `give` do campo, emprestar o dono numa chamada ou chamar um método do dono.
 - **`a?.b`** e **`a?.m()`**: se `a` for null, o resultado é null (e o método não é chamado); senão, lê `b` ou chama `m`. O resultado é `T?`. Encadeia: `a?.b?.c`. Usar `?.` em algo que nunca é null é erro (use `.`).
-- **Built-ins que podem não ter resultado devolvem `?`**: `toInt(s) -> int?`, `toReal(s) -> real?`, `input() -> int?`. Eles não disparam mais Trap: devolvem null.
+- **Built-ins que podem não ter resultado devolvem `?`**: `Texts.toInt(s) -> int?`, `Texts.toReal(s) -> real?`, `Console.input() -> int?`. Eles não disparam mais Trap: devolvem null.
 - **Imprimir** um `T?` mostra `null` ou o valor (`printl`, `{x}`, `%s`). Um objeto `T?` precisa ser conferido antes de imprimir.
-- **`on NaT`** também trata um null: `k: int = toInt(s) on NaT { return; };` dá a `k` o tipo `int`.
+- **`on NaT`** também trata um null: `k: int = Texts.toInt(s) on NaT { return; };` dá a `k` o tipo `int`.
 
 **`const` × `final`:**
 
 | | `const` | `final` |
 |---|---|---|
 | Onde | Fora dos `proc` | Dentro dos `proc` |
-| Valor | Fixo, conhecido na compilação (literais e contas com eles) | Qualquer expressão, até `input()` |
+| Valor | Fixo, conhecido na compilação (literais e contas com eles) | Qualquer expressão, até `Console.input()` |
 | Equivalente | `static final` do Java, `const` do Rust | `final` local do Java, `let` do Rust |
 
 ```
 const MAX: int = 100;
 
 proc main() {
-    final idade: int = input();
+    final idade: int = Console.input();
     idade = 5;            // erro: `idade` is final and cannot change
     idade: int = 6;       // erro: não pode ser declarada de novo no mesmo bloco
 }
@@ -377,9 +377,9 @@ proc main() {
 
 ```
 tri s <=> 10 {
-    - => print("less");
-    0 => print("equal");
-    + => { print("greater"); print(s); }
+    - => Console.print("less");
+    0 => Console.print("equal");
+    + => { Console.print("greater"); Console.print(s); }
 }
 ```
 
@@ -391,11 +391,11 @@ tri s <=> 10 {
 
 ```
 if x < 0 {
-    print("negativo");
+    Console.print("negativo");
 } else if x == 0 {
-    print("zero");
+    Console.print("zero");
 } else {
-    print("positivo");
+    Console.print("positivo");
 }
 ```
 
@@ -421,7 +421,7 @@ walk i in span k { ... }   // o mesmo que -k..+k
 ```
 i: int = 0;
 while i < 10 {
-    print(i);
+    Console.print(i);
     i = i + 1;
 }
 while + { ... }            // laço infinito; saia com `break` ou `return`
@@ -435,7 +435,7 @@ while + { ... }            // laço infinito; saia com `break` ou `return`
 
 ```
 for i: int = 0; i < len(arr); i++ {     // começo; condição; passo
-    print(arr[i]);
+    Console.print(arr[i]);
 }
 for i: int = -1; i <= 1; i++ { ... }     // array sym
 for i: int = 10; i > 0; i -= 2 { ... }   // passo de -2
@@ -458,32 +458,45 @@ s: int = sum(&b, 2) on NaT { burn b; return -1; };
 - Se a expressão não for NaT, `s` recebe o valor.
 - Caso contrário, executa o bloco, que precisa divergir (`return`, `break` ou `continue`).
 - Só as contas da própria linha são tratadas. Se um proc chamado nela falhar, o programa para; para avisar quem chamou, o proc devolve `T?` e usa `return null;`.
-- A expressão também pode ser um `T?` (`toInt(s)`, um proc `-> int?`): null vai para o bloco, e `s` fica com o tipo sem `?`.
+- A expressão também pode ser um `T?` (`Texts.toInt(s)`, um proc `-> int?`): null vai para o bloco, e `s` fica com o tipo sem `?`.
 - Depois do `;`, `s` com certeza não é null.
 
 ### 8.6 E/S
 
+Como no Java, quase tudo que o runtime faz está na **biblioteca padrão** (§8.16.2): para imprimir, `use std.io.Console;` e `Console.printl(...)`. Chamar pelo nome antigo (`printl(...)`) é erro, e a mensagem diz o `use` que falta. Os exemplos deste documento não repetem as linhas `use`.
+
+| Arquivo | Procs |
+|---|---|
+| `std.io.Console` | `print`, `printl`, `printf`, `readLine`, `eof`, `input`, `emit` |
+| `std.io.Files` | `read`, `write`, `writeBytes`, `exists` |
+| `std.os.Process` | `argCount`, `arg`, `exit` |
+| `std.text.Texts` | `sub`, `toInt`, `toReal`, `toText` (e os escritos em Kestrel: `trim`, `split`...) |
+| `std.text.Chars` | `isDigit`, `isLetter`, `isUpper`, `isLower`, `isSpace` |
+| `std.debug.Debug` | `dump`, `hashMix` |
+
+Continuam sem `use`, porque fazem parte da linguagem: `len`, as operações de array (`append`, `pop`, `insert`, `remove`, `resize`, `clear`, `replace`), `assert` e `isNaT`.
+
 | Comando | Efeito |
 |---|---|
-| `print(x)` | Imprime um número (em decimal), um `text`, um enum, um struct ou um array, sem quebra de linha. Aceita `+` entre textos: `print("Olá, " + nome)`. Com vários valores, separa por espaço, como no Python: `print("total:", n)` → `total: 3` |
-| `printl(x)` | Igual ao `print`, seguido de quebra de linha. `printl()` só quebra a linha |
-| `print(b)` com array | Imprime os elementos: `[-8, -1, 0, 1, 8]`, `["Ana", "Bia"]`, como o `Arrays.toString` do Java (textos entre aspas). O buffer é emprestado só durante a impressão, então continua precisando de `burn` |
-| `printf(fmt, args...)` | Imprime texto formatado (§8.6.1) |
+| `Console.print(x)` | Imprime um número (em decimal), um `text`, um enum, um struct ou um array, sem quebra de linha. Aceita `+` entre textos: `Console.print("Olá, " + nome)`. Com vários valores, separa por espaço, como no Python: `Console.print("total:", n)` → `total: 3` |
+| `Console.printl(x)` | Igual ao `print`, seguido de quebra de linha. `Console.printl()` só quebra a linha |
+| `Console.print(b)` com array | Imprime os elementos: `[-8, -1, 0, 1, 8]`, `["Ana", "Bia"]`, como o `Arrays.toString` do Java (textos entre aspas). O buffer é emprestado só durante a impressão, então continua precisando de `burn` |
+| `Console.printf(fmt, args...)` | Imprime texto formatado (§8.6.1) |
 | `len(s)` | Tamanho de um `text` |
-| `toText(x)` | Converte um número em `text`, em decimal: `toText(-5)` → `"-5"`, `toText(1.5)` → `"1.5"`. Com um array, gera `"[-8, -1, 0, 1, 8]"` |
-| `toText(x, 't')` / `toText(x, 'v')` | Converte um inteiro em `text` ternário (`"0t-++"`) ou heptavintimal (`"0ve"`), como o `Integer.toString(x, base)` do Java |
-| `toText(c, 'c')` | Um `tryte` ou um array de `tryte` vira o texto desses caracteres: `toText(letras, 'c')`, como o `new String(char[])` do Java. Um código fora da tabela dispara Trap |
-| `emit(c)` | Imprime um `tryte` como caractere (tabela §4) |
-| `input()` | Lê um `int` (decimal, `0t` ou `0v`). Entrada inválida é uma conta que falha |
-| `dump("label")` | Mostra os registradores e o heap |
-| `readFile(caminho)` | O arquivo inteiro como `text`. Se não puder ler, **Trap** |
-| `fileExists(caminho)` | `+` se o arquivo existe e pode ser lido |
-| `writeFile(caminho, texto)` | Grava o texto (UTF-8), substituindo o arquivo |
-| `writeBytes(caminho, arr)` | Grava cada célula de um array como um byte. Célula fora de `0..255` dispara **Trap** |
-| `readLine()` | Uma linha da entrada padrão, sem o `\n`. No fim da entrada, devolve `""` |
-| `eof()` | `+` se a entrada padrão acabou |
-| `argCount()` / `arg(i)` | Argumentos do programa: `ksvm prog.ksb a b c` dá `arg(0) == "a"` |
-| `exit(código)` | Encerra o programa com esse código de saída. É um comando que não volta, como `return`: um `proc` pode terminar nele |
+| `Texts.toText(x)` | Converte um número em `text`, em decimal: `Texts.toText(-5)` → `"-5"`, `Texts.toText(1.5)` → `"1.5"`. Com um array, gera `"[-8, -1, 0, 1, 8]"` |
+| `Texts.toText(x, 't')` / `Texts.toText(x, 'v')` | Converte um inteiro em `text` ternário (`"0t-++"`) ou heptavintimal (`"0ve"`), como o `Integer.toString(x, base)` do Java |
+| `Texts.toText(c, 'c')` | Um `tryte` ou um array de `tryte` vira o texto desses caracteres: `Texts.toText(letras, 'c')`, como o `new String(char[])` do Java. Um código fora da tabela dispara Trap |
+| `Console.emit(c)` | Imprime um `tryte` como caractere (tabela §4) |
+| `Console.input()` | Lê um `int` (decimal, `0t` ou `0v`). Entrada inválida é uma conta que falha |
+| `Debug.dump("label")` | Mostra os registradores e o heap |
+| `Files.read(caminho)` | O arquivo inteiro como `text`. Se não puder ler, **Trap** |
+| `Files.exists(caminho)` | `+` se o arquivo existe e pode ser lido |
+| `Files.write(caminho, texto)` | Grava o texto (UTF-8), substituindo o arquivo |
+| `Files.writeBytes(caminho, arr)` | Grava cada célula de um array como um byte. Célula fora de `0..255` dispara **Trap** |
+| `Console.readLine()` | Uma linha da entrada padrão, sem o `\n`. No fim da entrada, devolve `""` |
+| `Console.eof()` | `+` se a entrada padrão acabou |
+| `Process.argCount()` / `Process.arg(i)` | Argumentos do programa: `ksvm prog.ksb a b c` dá `Process.arg(0) == "a"` |
+| `Process.exit(código)` | Encerra o programa com esse código de saída. É um comando que não volta, como `return`: um `proc` pode terminar nele |
 
 #### 8.6.1 `printf`
 
@@ -491,13 +504,13 @@ O primeiro argumento é o **formato**: um texto literal, ou vários textos unido
 
 ```
 notacao: text = "%t";
-printf("exemplo de " + notacao + " = %t\n", v);   // exemplo de %t = 0t+--
+Console.printf("exemplo de " + notacao + " = %t\n", v);   // exemplo de %t = 0t+--
 ```
 
 O formato aceita duas formas de colocar valores, que podem ser misturadas:
 
 - **Chaves:** `{expr}` imprime o valor de qualquer expressão, como as f-strings do Python: `{nome}`, `{p.x}`, `{v[i].nome}`, `{media(a)}`, `{a + 1:t}`. O formato (`:t`, `:v`, `:c`) vem no fim. Dentro das chaves não pode haver outra `{` ou `}`.
-- **Porcentagem:** cada `%` consome o próximo argumento, em ordem: `printf("%d + %d = %d", a, b, a + b)`.
+- **Porcentagem:** cada `%` consome o próximo argumento, em ordem: `Console.printf("%d + %d = %d", a, b, a + b)`.
 
 | Forma | Imprime | Aceita |
 |---|---|---|
@@ -521,8 +534,8 @@ enum Cor { Vermelho, Verde, Azul }                 // 0, 1, 2
 enum Http { Ok = 200, NotFound = 404, Teapot }     // 200, 404, 405
 
 c: Cor = Cor.Verde;
-print(c);            // Verde
-print((int) c);      // 1
+Console.print(c);            // Verde
+Console.print((int) c);      // 1
 if c == Cor.Azul { ... }
 ```
 
@@ -530,21 +543,21 @@ if c == Cor.Azul { ... }
 - Os números começam em 0 e sobem de 1 em 1. Um valor explícito (`= 200`) reinicia a contagem a partir dele. Dois nomes com o mesmo número são erro.
 - Um valor de enum é guardado como o seu número: não ocupa heap e não precisa de `burn`.
 - Aceita só `==` e `!=` com outro valor do **mesmo** enum. Contas e `<`/`>` são erro de tipo. `(int) c` lê o número.
-- `print(c)`, `{c}`, `%s` e `toText(c)` mostram o **nome**. Por dentro, cada enum ganha uma função escondida que converte número em nome.
+- `Console.print(c)`, `{c}`, `%s` e `Texts.toText(c)` mostram o **nome**. Por dentro, cada enum ganha uma função escondida que converte número em nome.
 
 ### 8.8 `match`
 
 ```
 match c {
-    Cor.Vermelho => print("pare");
-    Cor.Verde => print("siga");
-    Cor.Azul => print("?");
+    Cor.Vermelho => Console.print("pare");
+    Cor.Verde => Console.print("siga");
+    Cor.Azul => Console.print("?");
 }
 
 match letra {
-    'a' | 'e' | 'i' | 'o' | 'u' => print("vogal");
-    '0' | '1' => { print("dígito"); }
-    else => print("outro");
+    'a' | 'e' | 'i' | 'o' | 'u' => Console.print("vogal");
+    '0' | '1' => { Console.print("dígito"); }
+    else => Console.print("outro");
 }
 ```
 
@@ -573,7 +586,7 @@ b: Ponto = a;              // cópia: mudar b não muda a
 b.x = 10;
 p: Pessoa = Pessoa { nome: "Ana", casa: Ponto { x: 3, y: 4 } };
 p.casa.y++;
-print(p);            // Pessoa { nome: "Ana", casa: Ponto { x: 3, y: 5 } }
+Console.print(p);            // Pessoa { nome: "Ana", casa: Ponto { x: 3, y: 5 } }
 ```
 
 - É declarado fora dos `proc`, como o `enum`. Cada campo termina com `;`, como uma variável.
@@ -610,7 +623,7 @@ class Conta {
 
 c: Conta = Conta("Ana");
 c.depositar(10.0);
-printl(c);           // Conta { nome: "Ana", saldo: 10.0, hist: [10.0] }
+Console.printl(c);           // Conta { nome: "Ana", saldo: 10.0, hist: [10.0] }
 total: real = c.fechar(); // depois disto, `c` não existe mais
 ```
 
@@ -624,7 +637,7 @@ total: real = c.fechar(); // depois disto, `c` não existe mais
 - Campos podem ser de qualquer tipo, inclusive arrays e outros objetos. Um campo que possui algo (array ou objeto) não pode ser trocado, só alterado por dentro (`append(self.hist, x)`, `self.hist[i] = ...`). Lido de fora, ele vem emprestado.
 - Uma classe não pode ter um campo **obrigatório** dela mesma (nem por outra classe), porque o primeiro objeto nunca poderia ser criado. Para árvores e listas ligadas, use um array (`filhos[]: No`, que pode começar vazio) ou um campo opcional (`proximo: No?`, veja abaixo). Um struct não pode conter objetos.
 - Emprestar o mesmo objeto (ou um campo dele) duas vezes na mesma chamada é erro: `c.f(&c.hist)`.
-- `print(c)`, `{c}` e `%s` mostram todos os campos, inclusive os privados (para depurar).
+- `Console.print(c)`, `{c}` e `%s` mostram todos os campos, inclusive os privados (para depurar).
 
 #### Arrays de objetos
 
@@ -662,7 +675,7 @@ proc soma(n: &No?) -> int {
 }
 
 if lista.proximo != null {
-    printl(lista.proximo.valor);             // só aqui dentro
+    Console.printl(lista.proximo.valor);             // só aqui dentro
 }
 resto: No? = give lista.proximo;             // tira o objeto; o campo fica vazio
 ```
@@ -716,7 +729,7 @@ class Circulo {
 }
 
 proc mostrar(f: &Forma) {          // aceita qualquer classe que implemente Forma
-    printf("{f.nome()}: {f.area()}\n");
+    Console.printf("{f.nome()}: {f.area()}\n");
 }
 
 c: Circulo = Circulo(1.0);
@@ -736,7 +749,7 @@ interface Forma {
     proc area(&self) -> real;
     proc nome(&self) -> text;
     proc descrever(&self) -> text {       // padrão: vale para quem não escrever o seu
-        return self.nome() + " de área " + toText(self.area());
+        return self.nome() + " de área " + Texts.toText(self.area());
     }
 }
 ```
@@ -771,15 +784,15 @@ proc criar(quadrado: bool) -> Forma { ... } // pode devolver classes diferentes
 ```
 proc descrever(f: &Forma) {
     if f is Circulo {
-        printl("raio", f.raio);       // aqui `f` é um Circulo
+        Console.printl("raio", f.raio);       // aqui `f` é um Circulo
     } else {
-        printl(f.nome());             // aqui continua sendo Forma
+        Console.printl(f.nome());             // aqui continua sendo Forma
     }
 }
 
 match f {
-    Circulo => printl(f.raio);
-    Quadrado | Triangulo => printl(f.nome());
+    Circulo => Console.printl(f.raio);
+    Quadrado | Triangulo => Console.printl(f.nome());
 }
 
 if f is Circulo {
@@ -830,38 +843,61 @@ m: real = maior<Quadrado>(&q, &p);
 
 ```
 c: Conta = Conta("Ana");
-printl(c);                      // Conta { dono: "Ana", saldo: 0.0 }  (toString)
-printl(c == outra);             // equals: campo a campo
+Console.printl(c);                      // Conta { dono: "Ana", saldo: 0.0 }  (toString)
+Console.printl(c == outra);             // equals: campo a campo
 h: int = c.hashCode();
-printl(42.toString(), "abc".hashCode(), Cor.Azul.equals(Cor.Verde));
+Console.printl(42.toString(), "abc".hashCode(), Cor.Azul.equals(Cor.Verde));
 
 @impl(Comparable)
 class Conta {
     ...
     @override public proc compareTo(&self, other: &Conta) -> int { ... }   // negativo, 0, positivo
 }
-printl(a < b, a <=> b);          // usam compareTo
+Console.printl(a < b, a <=> b);          // usam compareTo
 proc maior<T extends Comparable>(a: T, b: T) -> T { ... }
 ```
 
 - **Todo tipo tem `toString()`, `hashCode()` e `equals(&outro)`**, como se cumprisse uma interface `Object` (não há herança: é automático). Números, `text`, `bool`, enums e structs já vêm com eles (um `T?` null mostra `null`, tem hash 0, e dois null são iguais).
 - **Uma classe ganha as três versões padrão, campo a campo**: `toString` mostra todos os campos (inclusive arrays e objetos dentro), `equals` é verdadeiro se todos os campos forem iguais, e `hashCode` mistura os hashes dos campos. Para trocar, escreva o método com `@override` e a assinatura certa: `proc toString(&self) -> text`, `proc hashCode(&self) -> int`, `proc equals(&self, other: &Conta) -> bool`.
-- **`a == b` entre objetos, valores de interface e structs chama `equals`** (como o `==` do Kotlin, não o do Java). `print(c)`, `{c}` e `%s` usam `toString`, também para um valor de interface.
+- **`a == b` entre objetos, valores de interface e structs chama `equals`** (como o `==` do Kotlin, não o do Java). `Console.print(c)`, `{c}` e `%s` usam `toString`, também para um valor de interface.
 - Por uma interface, `f.equals(&g)` só é verdadeiro para objetos da mesma classe com campos iguais.
-- `hashMix(h, x)` combina hashes (`h * 31 + x`, sem estourar o `int`), para escrever um `hashCode` próprio.
+- `Debug.hashMix(h, x)` combina hashes (`h * 31 + x`, sem estourar o `int`), para escrever um `hashCode` próprio.
 - **`Comparable`** é a interface das coisas que têm ordem: `compareTo(&self, other: &T) -> int` devolve negativo, 0 ou positivo. Números, `text` (ordem alfabética, caractere por caractere) e enums (pela ordem em que foram escritos) já a cumprem; uma classe cumpre com `@impl(Comparable)` e seu próprio `compareTo`, que compara com a mesma classe (como o `Comparable` do Swift e o `Ord` do Rust, em vez do `Comparable<T>` do Java).
 - Com `Comparable`, `<`, `>`, `<=`, `>=` e `<=>` funcionam em objetos e textos, e `<T extends Comparable>` aceita números, textos, enums e essas classes. Por uma interface, comparar objetos de classes diferentes dispara Trap.
 
 ### 8.13.1 Valor padrão: `?:`
 
 ```
-n: int = toInt(texto) ?: 0;          // 0 se não for um número
+n: int = Texts.toInt(texto) ?: 0;          // 0 se não for um número
 nome: text = apelido ?: "anônimo";
 d: int = a ?: b ?: 0;                 // o primeiro que não é null
 ```
 
 - `a ?: b` é `a` se não for null, senão `b` (o "Elvis" do Kotlin). Vale para números, `bool`, `text` e enums; para um objeto, confira com `if`.
 - Fica entre as comparações e o `+`: `1 + x ?: 0` é `(1 + x) ?: 0`; escreva `1 + (x ?: 0)`.
+
+### 8.13.2 Sobrecarga
+
+Procs e métodos (de uma mesma classe) podem ter o mesmo nome com **parâmetros de tipos diferentes**, como no Java. A chamada escolhe pela quantidade e pelos tipos dos argumentos:
+
+```
+proc area(side: real) -> real { return side * side; }
+proc area(width: real, height: real) -> real { return width * height; }
+
+class Box {
+    public proc Box() -> Box { ... }
+    public proc Box(v: int) -> Box { ... }      // construtores também
+}
+
+area(3.0);         // a primeira
+area(2.0, 5.0);    // a segunda
+Box(7);            // o construtor com `int`
+```
+
+- **Como escolhe:** primeiro a versão cujos parâmetros têm **exatamente** os tipos dos argumentos (`5` é `int`, então `f(5)` prefere `f(int)` a `f(tryte)`). Se nenhuma for exata, a única em que os argumentos cabem (um `int` literal num `tryte`, um objeto na sua interface). Nenhuma, ou mais de uma: erro, listando as versões.
+- **Diferem nos parâmetros:** só o tipo de retorno diferente não basta (`f(int)` duas vezes é erro).
+- **Não pode:** sobrecarregar um proc genérico (`max<T>`), um método que cumpre um método de interface (`@override`: a interface chama pelo nome) e um `native`.
+- Por dentro, cada versão tem um nome com os tipos (`area(real, real)`), que é o que aparece no traceback e no `--disasm`. O hover e o F12 mostram todas as versões.
 
 ### 8.14 `assert`, `@test` e `@deprecated`
 
@@ -878,7 +914,7 @@ proc soma(a: int, b: int) -> int { return a + b; }
 
 - `assert(cond);` confere que `cond` é verdade. Se for falsa (ou 0/NaT), dispara Trap com a linha e a condição como foi escrita: `assert failed (line 3): somar(2, 3) == 5`. Com uma mensagem, `assert(cond, "texto");`, ela aparece no lugar da condição. A mensagem é um texto literal. `assert` é um comando, não um valor.
 - `@test` marca um proc **sem parâmetros e sem retorno** como teste. `ksc --test arquivo.ks` compila e roda cada teste numa VM separada, sem gravar o `.ksb`, e mostra `ok`/`FAILED` de cada um, o motivo e o que o teste imprimiu (só quando falha), e no fim `test result: N passed, M failed`. O comando sai com código 1 se algum teste falhou.
-- Um teste falha se der Trap (um `assert` que falhou, uma divisão por zero...) ou se chamar `exit(n)` com `n` diferente de 0.
+- Um teste falha se der Trap (um `assert` que falhou, uma divisão por zero...) ou se chamar `Process.exit(n)` com `n` diferente de 0.
 - Os testes são compilados junto com o programa (o compilador confere tipos e posse deles também), mas o `main` não os chama. Com `--test`, o arquivo pode nem ter `main`.
 - `@deprecated` (ou `@deprecated("use outra")`) marca um proc, um método ou uma classe como **obsoleto**. Continua funcionando, mas cada uso fora dele mostra um aviso (`warning:`) com a mensagem, e a compilação segue. Dentro da própria classe (ou do próprio proc) não há aviso.
 - Onde cada anotação vale: proc (`@test`, `@deprecated`), método (`@override`, `@deprecated`), classe (`@impl(...)`, `@deprecated`). Uma anotação desconhecida, ou no lugar errado, é erro.
@@ -917,7 +953,7 @@ use shapes.Circle;
 use std.collections.HashMap;
 
 proc main() {
-    printl(Geometry.area(2.0));
+    Console.printl(Geometry.area(2.0));
     p: Geometry.Point = Geometry.Point { x: 1, y: 2 };
     c: Circle = Circle(1.5);
     burn c;
@@ -955,6 +991,9 @@ ksc build           compila: build/obj/ e o executável build/Jogo (--ksb: build
 ksc run [args...]   compila e roda
 ksc test            roda os @test de todos os arquivos de src/
 ksc check X.ks      só mostra os erros de X.ks (para editores; sem `main`; `--stdin` lê o texto da entrada)
+ksc doc X.ks --at N a documentação do nome no byte N de X.ks (para o hover do editor)
+ksc std collections/List.ks   mostra um arquivo da biblioteca padrão (embutida no ksc)
+ksc nav X.ks --at N --what definition|implementations|supers   para onde ir (para o editor)
 ```
 
 - **Biblioteca:** um projeto sem `src/Main.ks` é uma biblioteca. `ksc build` compila todos os arquivos de `src/`, e os `.ksb` de `build/obj/` são o que se entrega: copiados para o `lib/` de outro projeto (mantendo as pastas), funcionam sem o `.ks`, porque cada `.ksb` guarda as declarações do seu arquivo (§10).
@@ -976,6 +1015,38 @@ lib/fisica/Corpo.ksb ───────────────────�
 
 Por dentro, cada item de outro arquivo ganha o nome completo (`Geometry.area`, `shapes.Circle`), que é o que aparece nas mensagens, nos testes e no `--disasm`. Cada classe recebe um número calculado do nome, igual em todos os arquivos; o ligador confere que duas classes nunca têm o mesmo.
 
+### 8.16.1 Documentação: `/* */`
+
+- `//` é comentário comum. Um `/* ... */` logo acima de um item, método ou campo é a **documentação** dele, como o Javadoc: o editor mostra o texto ao passar o mouse no nome, em qualquer arquivo que o use.
+- O primeiro `/* */` do arquivo, seguido de uma linha em branco, documenta o **arquivo** (aparece no `use`).
+- O texto é Markdown. As linhas podem começar com `*`, que não aparece. No fim vêm as tags: `@since`, `@author`, `@param nome texto`, `@return`, `@see Tipo.metodo` e `@deprecated`. O editor mostra cada tag numa seção, como o Javadoc, e o `@see` vira um link para a declaração (inclusive na biblioteca padrão, aberta só para leitura).
+- Um `/* */` não pode ter outro dentro, e um sem `*/` é erro.
+- Uma biblioteca compilada (`lib/x.ksb`) leva a sua documentação junto.
+
+```
+/*
+ * Funções de texto.
+ *
+ * @since 0.7
+ */
+
+/* Tira os espaços do começo e do fim. */
+public proc trim(value: text) -> text { ... }
+```
+
+### 8.16.2 Procs `native`
+
+Um proc `native` da biblioteca padrão não tem corpo: é o nome de algo que o runtime faz, como o `native` do Java.
+
+```
+/* Imprime os valores, separados por espaço, e quebra a linha. */
+public native proc printl(values: ...);
+```
+
+- Só a biblioteca padrão tem `native`, e só os da lista do compilador (`the runtime does nothing called x` para outro nome).
+- `values: ...` aceita quantos valores forem, de qualquer tipo. Um `native` não pode ser sobrecarregado (§8.13.2).
+- O resto da biblioteca é escrito em Kestrel (`Texts.trim`, `List`), e pode ser lido com `ksc std text/Texts.ks`.
+
 ### 8.17 Erros: `throw`, `try` e `catch`
 
 Como no Java: um erro sobe de um proc para quem o chamou até um `catch` pegá-lo.
@@ -990,7 +1061,7 @@ class NotFound {
 }
 
 proc load(p: text) -> Config throws NotFound, ParseError {
-    if !fileExists(p) {
+    if !Files.exists(p) {
         throw NotFound(p);
     }
     ...
@@ -1001,10 +1072,10 @@ proc main() {
         c: Config = load("app.cfg");
         ...
     } catch e: NotFound {
-        printl(e.message());
+        Console.printl(e.message());
         burn e;
     } catch e: Error {
-        printl("outro erro: " + e.message());
+        Console.printl("outro erro: " + e.message());
         burn e;
     }
 }
@@ -1185,9 +1256,9 @@ proc main() -> int {
     s = s << 1;                    // s = s * 3
 
     tri s <=> 10 {
-        - => print("less");
-        0 => print("equal");
-        + => print("greater");
+        - => Console.print("less");
+        0 => Console.print("equal");
+        + => Console.print("greater");
     }
     burn b;
     return 0;

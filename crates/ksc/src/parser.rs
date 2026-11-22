@@ -24,8 +24,9 @@ pub fn parse_source(tokens: Vec<Token>, src: &str) -> Result<Program, Diagnostic
 /// [`crate::lexer::lex_at`]).
 pub fn parse_source_at(tokens: Vec<Token>, src: &str, base: usize) -> Result<Program, Diagnostic> {
     let mut p =
-        Parser { tokens, pos: 0, in_head: false, depth: 0, class: None, src: src.to_string(), base, safe_vars: 0, splits: Vec::new() };
+        Parser { tokens, pos: 0, in_head: false, depth: 0, class: None, src: src.to_string(), base, safe_vars: 0, splits: Vec::new(), docs: Default::default(), file_doc: None, native: false };
     let mut program = Program::default();
+    p.file_doc();
     while p.peek() == &Tok::Use {
         program.uses.push(p.use_decl()?);
     }
@@ -36,6 +37,7 @@ pub fn parse_source_at(tokens: Vec<Token>, src: &str, base: usize) -> Result<Pro
         }
         program.items.push(item);
     }
+    program.docs = std::mem::take(&mut p.docs);
     Ok(program)
 }
 
@@ -53,12 +55,28 @@ pub fn item_name(item: &Item) -> &Ident {
 
 /// One expression and nothing else (the `{...}` of a `printf` format).
 pub fn parse_expr(tokens: Vec<Token>) -> Result<Expr, Diagnostic> {
-    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0, class: None, src: String::new(), base: 0, safe_vars: 0, splits: Vec::new() };
+    let mut p = Parser { tokens, pos: 0, in_head: false, depth: 0, class: None, src: String::new(), base: 0, safe_vars: 0, splits: Vec::new(), docs: Default::default(), file_doc: None, native: false };
     let e = p.expr()?;
     if p.peek() != &Tok::Eof {
         return Err(p.unexpected("the end of `{...}`"));
     }
     Ok(e)
+}
+
+/// The text of a `/* ... */`: without the marks and the `*` that start its lines.
+fn doc_text(raw: &str) -> String {
+    let inner = raw.trim_start_matches("/*").trim_end_matches("*/");
+    let lines: Vec<&str> = inner
+        .lines()
+        .map(|l| {
+            let l = l.trim_start();
+            let l = l.strip_prefix('*').unwrap_or(l);
+            l.strip_prefix(' ').unwrap_or(l).trim_end()
+        })
+        .collect();
+    let first = lines.iter().position(|l| !l.is_empty()).unwrap_or(lines.len());
+    let last = lines.iter().rposition(|l| !l.is_empty()).map_or(first, |k| k + 1);
+    lines[first..last].join("\n")
 }
 
 /// Splits each text literal of a `printf` format (`a + b + ...`) into pieces.
@@ -194,6 +212,12 @@ struct Parser {
     depth: u32,
     /// The class whose body is being parsed (methods may take `self`).
     class: Option<&'static str>,
+    /// The declarations found so far, with their documentation (see [`Program::docs`]).
+    docs: std::collections::HashMap<String, Doc>,
+    /// Where the file's own documentation ends: not an item's too.
+    file_doc: Option<usize>,
+    /// The proc being parsed is `native`.
+    native: bool,
 }
 
 /// Nesting limit, like rustc's `recursion_limit`.
@@ -255,6 +279,63 @@ impl Parser {
         Err(self.unexpected(&tok.to_string()))
     }
 
+    // ---- documentation ----
+
+    /// The `/* */` that ends just before byte `pos` (a span), with only
+    /// spaces between: where it starts (in `src`) and its text.
+    fn doc_before(&self, pos: usize) -> Option<(usize, &str)> {
+        let local = pos.checked_sub(self.base)?;
+        let before = self.src.get(..local)?.trim_end();
+        let body = before.strip_suffix("*/")?;
+        let start = body.rfind("/*")?;
+        Some((start, &before[start..]))
+    }
+
+    /// The file's own documentation: its first `/* */` (only `//` lines and
+    /// spaces before it), followed by an empty line (or by `use`).
+    fn file_doc(&mut self) {
+        let mut rest = self.src.as_str();
+        loop {
+            rest = rest.trim_start();
+            match rest.strip_prefix("//") {
+                Some(r) => rest = r.split_once('\n').map_or("", |(_, after)| after),
+                None => break,
+            }
+        }
+        let Some(body) = rest.strip_prefix("/*") else { return };
+        let Some(close) = body.find("*/") else { return };
+        let start = self.src.len() - rest.len();
+        let end = start + 2 + close + 2;
+        let after = &self.src[end..];
+        let gap = &after[..after.len() - after.trim_start().len()];
+        if gap.matches('\n').count() >= 2 || after.trim_start().starts_with("use") {
+            let text = doc_text(&self.src[start..end]);
+            self.docs.insert(String::new(), Doc { text, sig: String::new(), at: self.base });
+            self.file_doc = Some(end);
+        }
+    }
+
+    /// Keeps the documentation of the declaration that starts at token
+    /// `start` (and has just been parsed), under `key`.
+    fn note_doc(&mut self, key: String, start: usize) {
+        // Every declaration is kept (its signature and place), documented or not.
+        let text = match self.doc_before(self.tokens[start].span.start) {
+            Some((at, raw)) if self.file_doc != Some(at + raw.len()) => doc_text(raw),
+            _ => String::new(),
+        };
+        // The declaration up to its body (`{`) or its end (`;`).
+        let end = self.tokens[start..self.pos].iter().position(|t| matches!(t.tok, Tok::LBrace | Tok::Semi)).map_or(self.pos, |k| start + k);
+        let (from, to) = (self.tokens[start].span.start - self.base, self.tokens[end.max(start + 1) - 1].span.end - self.base);
+        let sig = self.src.get(from..to).unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ");
+        // An overload (a second `area`) is kept as `area~2`, `area~3`...
+        let key = if self.docs.contains_key(&key) {
+            (2..).map(|n| format!("{key}~{n}")).find(|k| !self.docs.contains_key(k)).expect("some number is free")
+        } else {
+            key
+        };
+        self.docs.insert(key, Doc { text, sig, at: self.tokens[start].span.start });
+    }
+
     fn ident(&mut self) -> PResult<Ident> {
         match self.peek().clone() {
             Tok::Ident(name) => Ok(Ident { name, span: self.bump().span }),
@@ -272,6 +353,15 @@ impl Parser {
     /// One top-level item, and whether it is `public`. Annotations come
     /// first: `@impl(Forma) public class Circulo { ... }`.
     fn item(&mut self) -> PResult<(Item, bool)> {
+        let start = self.pos;
+        let r = self.item_here();
+        if let Ok((item, _)) = &r {
+            self.note_doc(item_name(item).name.clone(), start);
+        }
+        r
+    }
+
+    fn item_here(&mut self) -> PResult<(Item, bool)> {
         let annotations = self.annotations()?;
         let public = self.eat(&Tok::Public);
         match self.peek() {
@@ -290,6 +380,41 @@ impl Parser {
         }
         let item = match self.peek() {
             Tok::Class => Item::Class(self.class_decl(annotations)?),
+            Tok::Native => {
+                let at = self.bump().span;
+                if self.peek() != &Tok::Proc {
+                    return Err(self.unexpected("`proc` after `native`"));
+                }
+                self.native = true;
+                let mut p = self.proc_decl()?;
+                // Its types are never checked further (it has no body): a
+                // type name starts with a capital letter.
+                for param in &p.params {
+                    let named = match param.ty.ty {
+                        Type::Named(n) | Type::LentNamed(n) => Some(n),
+                        Type::Own(b) | Type::Lent(b) => match b.elem {
+                            Elem::Named(n) => Some(n),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(n) = named
+                        && n.starts_with(|c: char| c.is_ascii_lowercase())
+                    {
+                        let note = if n == "any" {
+                            "a native proc that takes any values ends with `values: ...`".to_string()
+                        } else {
+                            "types are `int`, `text`, `bool`, `tryte`, `real`, or a class (`List<T>`)".to_string()
+                        };
+                        return Err(Diagnostic::new(format!("unknown type `{n}`"), param.ty.span).with_note(note));
+                    }
+                }
+                p.annotations = annotations;
+                if !public {
+                    return Err(Diagnostic::new("a native proc is public: write `public native proc`", at));
+                }
+                Item::Proc(p)
+            }
             Tok::Proc => {
                 let mut p = self.proc_decl()?;
                 p.annotations = annotations;
@@ -382,6 +507,7 @@ impl Parser {
         let (mut fields, mut methods) = (Vec::new(), Vec::new());
         let result = (|| {
             while self.peek() != &Tok::RBrace {
+                let start = self.pos;
                 let anns = self.annotations()?;
                 let public = if self.eat(&Tok::Public) {
                     true
@@ -390,7 +516,9 @@ impl Parser {
                     false
                 };
                 if self.peek() == &Tok::Proc {
-                    methods.push(MethodDecl { decl: self.proc_decl()?, public, annotations: anns });
+                    let decl = self.proc_decl()?;
+                    self.note_doc(format!("{}.{}", name.name, decl.name.name), start);
+                    methods.push(MethodDecl { decl, public, annotations: anns });
                     continue;
                 }
                 if let Some(a) = anns.first() {
@@ -400,6 +528,7 @@ impl Parser {
                 let sym = self.eat(&Tok::Sym);
                 let (fname, ty) = self.typed_name(sym, sym_span)?;
                 self.expect(Tok::Semi)?;
+                self.note_doc(format!("{}.{}", name.name, fname.name), start);
                 fields.push(FieldDecl { name: fname, ty, public });
             }
             Ok(())
@@ -523,6 +652,11 @@ impl Parser {
                     "a borrowed parameter is `c: &Conta` (array: `&v[]: int`, method: `&self`); one that takes it is `c: Conta` (method: `self`)",
                 ));
             }
+            // `values: ...` (a native proc): any values; it ends the list.
+            if self.native && matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon && self.peek_at(2) == &Tok::DotDot && self.peek_at(3) == &Tok::Dot {
+                self.pos += 4;
+                break;
+            }
             let sym_span = self.span();
             let sym = self.eat(&Tok::Sym);
             let amp_span = self.span();
@@ -593,8 +727,13 @@ impl Parser {
             }
         }
         // In an interface, a method ends with `;` (no body), unless it is a
-        // default method with a `{ ... }` body.
-        if self.class.is_some_and(|c| c.starts_with('@')) && self.peek() != &Tok::LBrace {
+        // default method with a `{ ... }` body. A native proc has none either.
+        let native = std::mem::take(&mut self.native);
+        if native || (self.class.is_some_and(|c| c.starts_with('@')) && self.peek() != &Tok::LBrace) {
+            if native && self.peek() == &Tok::LBrace {
+                return Err(Diagnostic::new("a native proc has no body: the runtime does its work", self.span())
+                    .with_note("end it with `;`"));
+            }
             let at = self.expect(Tok::Semi)?;
             return Ok(ProcDecl {
                 name,
@@ -606,10 +745,11 @@ impl Parser {
                 generics,
                 instance: false,
                 annotations: Vec::new(),
+                native,
             });
         }
         let body = self.block()?;
-        Ok(ProcDecl { name, this, params, ret, throws, body, generics, instance: false, annotations: Vec::new() })
+        Ok(ProcDecl { name, this, params, ret, throws, body, generics, instance: false, annotations: Vec::new(), native: false })
     }
 
     /// `interface Name { proc m(&self, ...) -> T; ... }`
@@ -629,9 +769,11 @@ impl Parser {
                 if self.peek() != &Tok::Proc {
                     return Err(self.unexpected("`proc`").with_note("an interface only lists methods: `proc area(&self) -> real;`"));
                 }
+                let start = self.pos;
                 let has_body = {
                     // Look past the signature for `{`: a default method.
                     let m = self.proc_decl()?;
+                    self.note_doc(format!("{}.{}", name.name, m.name.name), start);
                     let body = !m.body.stmts.is_empty() || self.tokens[self.pos - 1].tok == Tok::RBrace;
                     methods.push(m);
                     body
@@ -1393,7 +1535,13 @@ impl Parser {
                     (e.clone(), None)
                 };
                 let (kind, end) = if self.eat(&Tok::LParen) {
-                    let (args, close) = self.call_args()?;
+                    let (mut args, close) = self.call_args()?;
+                    // `Console.printf("x = {x}")`: the format is read here too.
+                    if field.name == "printf"
+                        && let Some(first) = args.first_mut()
+                    {
+                        format_chain(first)?;
+                    }
                     (ExprKind::MethodCall { recv: Box::new(recv), name: field, args }, close)
                 } else {
                     let end = field.span;
@@ -1678,6 +1826,23 @@ mod tests {
         assert_eq!(sx(value), "-1");
         let StmtKind::Expr(e) = &stmts[2] else { panic!() };
         assert_eq!(sx(e), "f(-1, 1)");
+    }
+
+    #[test]
+    fn documentation() {
+        let src = "// license\n/*\n * The file.\n */\n\n/* Adds. */\npublic proc add(a: int,\n    b: int) -> int { return a + b; }\n\n/*\n * A box.\n *\n * @see Box.get\n */\nclass Box {\n    /* What it holds. */\n    v: int;\n    /* The value. */\n    public proc get(&self) -> int { return self.v; }\n}\nproc bare() {}\n";
+        let p = parse_source(lex(src).unwrap(), src).unwrap();
+        let doc = |k: &str| p.docs.get(k).map(|d| (d.sig.as_str(), d.text.as_str()));
+        assert_eq!(doc(""), Some(("", "The file.")));
+        assert_eq!(doc("add"), Some(("public proc add(a: int, b: int) -> int", "Adds.")));
+        assert_eq!(doc("Box"), Some(("class Box", "A box.\n\n@see Box.get")));
+        assert_eq!(doc("Box.v"), Some(("v: int", "What it holds.")));
+        assert_eq!(doc("Box.get"), Some(("public proc get(&self) -> int", "The value.")));
+        assert_eq!(doc("bare"), Some(("proc bare()", "")));
+        // Without an empty line after it, the first `/* */` is the first item's.
+        let src = "/* Only. */\nproc one() {}\n";
+        let p = parse_source(lex(src).unwrap(), src).unwrap();
+        assert!(!p.docs.contains_key("") && p.docs["one"].text == "Only.");
     }
 
     #[test]

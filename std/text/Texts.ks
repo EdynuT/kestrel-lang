@@ -15,6 +15,19 @@
  */
 
 use std.collections.List;
+use std.text.Chars;
+
+/* Extracts a substring from `value` starting at `start` and ending before `end`. */
+public native proc sub(value: text, start: int, end: int) -> text;
+
+/* Converts `value` to an integer, if possible. */
+public native proc toInt(value: ...) -> int?;
+
+/* Converts `value` to a real number, if possible. */
+public native proc toReal(value: ...) -> real?;
+
+/* Converts `value` to text. */
+public native proc toText(value: ...) -> text;
 
 /* Searches for substrings and checks prefixes/suffixes. */
 public proc startsWith(value: text, prefix: text) -> bool {
@@ -63,10 +76,10 @@ public proc indexOf(value: text, sub: text) -> int {
 public proc trim(value: text) -> text {
     start: int = 0;
     end: int = len(value) - 1;
-    while start <= end && isSpace(value[start]) {
+    while start <= end && Chars.isSpace(value[start]) {
         start = start + 1;
     }
-    while end >= start && isSpace(value[end]) {
+    while end >= start && Chars.isSpace(value[end]) {
         end = end - 1;
     }
     return sub(value, start, end + 1);

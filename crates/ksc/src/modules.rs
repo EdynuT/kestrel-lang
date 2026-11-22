@@ -30,6 +30,11 @@ type R<T> = Result<T, Diagnostic>;
 // made by `build.rs` from the `.ks` files under the repository's `std/`.
 include!(concat!(env!("OUT_DIR"), "/std.rs"));
 
+/// The text of a file of the standard library: `collections.List`.
+pub fn std_source(key: &str) -> Option<&'static str> {
+    STD.iter().find(|(k, _)| *k == key).map(|(_, t)| *t)
+}
+
 /// A file found for a `use`.
 pub struct Found {
     /// The path shown in messages.
@@ -45,6 +50,12 @@ pub trait Files: Sync {
     /// The file for `use jogo.Mapa;` (`["jogo", "Mapa"]`); `Ok(None)` if
     /// there is no such file, `Err` if it cannot be used.
     fn read(&self, path: &[String]) -> Result<Option<Found>, String>;
+
+    /// A file of the standard library as an editor has it (being edited),
+    /// instead of the one built into `ksc`.
+    fn std_file(&self, _path: &[String]) -> Option<Found> {
+        None
+    }
 }
 
 /// Files on disk: `.ks` under `src`, libraries (`.ksb`) under `lib`.
@@ -173,7 +184,7 @@ pub fn load(root_path: &str, root_src: &str, files: &dyn Files, map: &mut Source
                         let key = path[1..].join(".");
                         let text = STD.iter().find(|(k, _)| *k == key).map(|(_, t)| t.to_string());
                         let found = text.map(|src| Found { shown: format!("<{}.ks>", path.join("/")), src, object: None });
-                        (found, Origin::Std)
+                        (files.std_file(&path).or(found), Origin::Std)
                     } else {
                         let found = files.read(&path).map_err(|e| Diagnostic::new(e, u.span))?;
                         let origin = if found.as_ref().is_some_and(|f| f.object.is_some()) { Origin::Lib } else { Origin::Src };
@@ -253,7 +264,7 @@ pub fn declarations(src: &str, base: usize, program: &Program) -> String {
     let mut cut: Vec<Span> = Vec::new();
     for item in &program.items {
         match item {
-            Item::Proc(p) if p.generics.is_empty() => cut.push(p.body.span),
+            Item::Proc(p) if p.generics.is_empty() && !p.native => cut.push(p.body.span),
             Item::Class(c) if c.generics.is_empty() => cut.extend(c.methods.iter().map(|m| m.decl.body.span)),
             Item::Interface(d) => cut.extend(d.methods.iter().zip(&d.bodies).filter(|(_, b)| **b).map(|(m, _)| m.body.span)),
             _ => {}

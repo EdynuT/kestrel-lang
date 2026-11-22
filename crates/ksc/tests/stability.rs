@@ -9,6 +9,36 @@ use kestrel_core::word::WORD_MAX;
 use kestrel_core::{Module, Word, Word27};
 use ksvm::Vm;
 
+/// `src` with a `use` for each file of the standard library it names
+/// (`Console.printl` needs `use std.io.Console;`), on its first line.
+fn with_uses(src: &str) -> String {
+    let files = [
+        ("Console", "std.io.Console"),
+        ("Files", "std.io.Files"),
+        ("Process", "std.os.Process"),
+        ("Texts", "std.text.Texts"),
+        ("Chars", "std.text.Chars"),
+        ("Debug", "std.debug.Debug"),
+    ];
+    let mut uses = String::new();
+    // The seeds are joined token by token: `Console . printl`.
+    let flat = src.replace(" .", ".").replace(". ", ".").replace(" ;", ";");
+    for (alias, path) in files {
+        let named = flat.match_indices(&format!("{alias}.")).any(|(at, _)| {
+            !flat[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
+        });
+        if named && !flat.contains(&format!("use {path};")) {
+            uses.push_str(&format!("use {path}; "));
+        }
+    }
+    uses + src
+}
+
+fn compile(src: &str) -> Result<kestrel_core::Module, ksc::diag::Diagnostic> {
+    ksc::compile(&with_uses(src))
+}
+
+
 /// xorshift64*: small, fast and good enough to drive tests.
 struct Rng(u64);
 
@@ -39,14 +69,14 @@ proc nome(c: Cor) -> text { match c { Cor.Vermelho => return "r"; Cor.Verde => r
 proc main() {
     a[]: int = {3, 1, 2};
     sym s[]: int = {-8, 0, 8};
-    for i: int = 0; i < len(a); i++ { if a[i] > 1 && s[0] == 0 { printf("%d ", a[i]); } else { continue; } }
+    for i: int = 0; i < len(a); i++ { if a[i] > 1 && s[0] == 0 { Console.printf("%d ", a[i]); } else { continue; } }
     walk i in span 1 { s[i] += i * 2; }
-    t: text = "Kes" + "trel"; printl(sub(t, 0, 3) + toText(len(t)));
+    t: text = "Kes" + "trel"; Console.printl(Texts.sub(t, 0, 3) + Texts.toText(len(t)));
     n: int = 0; while n < 5 { n++; if n == 4 { break; } }
-    printf("{n} %s %t %v\n", nome(Cor.Azul), n, n);
-    x: int = toInt("12") on NaT { burn a; burn s; return; };
+    Console.printf("{n} %s %t %v\n", nome(Cor.Azul), n, n);
+    x: int = Texts.toInt("12") on NaT { burn a; burn s; return; };
     r: real = (real) x / 3.0;
-    printl(r);
+    Console.printl(r);
     burn a; burn s;
 }"#,
     r#"proc fib(n: int) -> int { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
@@ -55,9 +85,9 @@ proc soma(&v[]: int) -> int { s: int = 0; walk i in 0..len(v) - 1 { s += v[i]; }
 proc main() -> int {
     b[]: int = claim 8;
     c[]: int = fill(give b);
-    tri soma(&c) <=> 33 { - => print("<"); 0 => print("="); + => print(">"); }
+    tri soma(&c) <=> 33 { - => Console.print("<"); 0 => Console.print("="); + => Console.print(">"); }
     final k: tryte = 'A';
-    match k { 'A' | 'B' => printl(-k); else => printl(k); }
+    match k { 'A' | 'B' => Console.printl(-k); else => Console.printl(k); }
     burn c;
     return 0;
 }"#,
@@ -67,12 +97,12 @@ proc meio(l: Linha) -> Ponto { return Ponto { x: (l.a.x + l.b.x) / 2, y: (l.a.y 
 proc main() {
     l: Linha = Linha { a: Ponto { x: 0, y: 0 }, b: Ponto { x: 4, y: 8 }, nome: "d" };
     m: Ponto = meio(l); l.b.y -= 2; k: Linha = l;
-    printl(m); printf("{l} %d %s\n", meio(k).y, l);
+    Console.printl(m); Console.printf("{l} %d %s\n", meio(k).y, l);
     ps[]: Ponto = {m, Ponto { x: 1, y: 2 }}; ps[1].y += ps[0].x;
     ns[]: text = claim 2; ns[0] = l.nome; rs[]: real = {1.5, 2.5};
-    printl(ps[1]); printl(ns); printl(rs);
+    Console.printl(ps[1]); Console.printl(ns); Console.printl(rs);
     append(ps, m); insert(rs, 1, 9.0); remove(ns, 0); replace(rs, 0..0, 2..2);
-    q: Ponto = pop(ps); resize(ns, 3); printl(q, len(ps), rs, ns); clear(ns);
+    q: Ponto = pop(ps); resize(ns, 3); Console.printl(q, len(ps), rs, ns); clear(ns);
     burn ps; burn ns; burn rs;
 }"#,
     r#"class Pilha {
@@ -90,8 +120,8 @@ class Dupla { a: Pilha; b: Pilha;
     public proc encher(&self, n: int) { for i: int = 0; i < n; i++ { self.a.por(i * 3); } }
 }
 proc main() {
-    d: Dupla = Dupla(); d.encher(4); d.mover(); printl(d);
-    p: Pilha = Pilha(); p.por(7); printf("{p.topo} %s\n", p.vazia()); k: int = p.fim(); printl(k);
+    d: Dupla = Dupla(); d.encher(4); d.mover(); Console.printl(d);
+    p: Pilha = Pilha(); p.por(7); Console.printf("{p.topo} %s\n", p.vazia()); k: int = p.fim(); Console.printl(k);
     burn d;
 }"#,
 ];
@@ -152,7 +182,7 @@ fn mutated_programs_never_crash() {
     let mut rng = Rng(cfg.next().flatten().unwrap_or(0x4b65_7374_7265_6c21));
     let bases: Vec<Vec<String>> = SEEDS.iter().map(|s| pieces(s)).collect();
     for (i, b) in bases.iter().enumerate() {
-        ksc::compile(&b.join(" ")).unwrap_or_else(|d| panic!("seed {i} does not compile once re-joined: {}", d.message));
+        compile(&b.join(" ")).unwrap_or_else(|d| panic!("seed {i} does not compile once re-joined: {}", d.message));
     }
     let (mut compiled, mut crashes) = (0, Vec::new());
     let default_hook = std::panic::take_hook();
@@ -160,7 +190,7 @@ fn mutated_programs_never_crash() {
     for _ in 0..count {
         let base = &bases[rng.below(bases.len())];
         let src = mutate(&mut rng, base);
-        let result = catch_unwind(AssertUnwindSafe(|| ksc::compile(&src)));
+        let result = catch_unwind(AssertUnwindSafe(|| compile(&src)));
         let module = match result {
             Err(_) => {
                 crashes.push(("compiler", src));
@@ -245,10 +275,10 @@ fn arithmetic_matches_reference() {
         // `continue` moves on to the next case instead of trapping.
         let body: String = cases
             .iter()
-            .map(|(e, _)| format!("walk k in 0..0 {{ x: int = {e} on NaT {{ printl(\"NaT\"); continue; }}; printl(x); }}\n"))
+            .map(|(e, _)| format!("walk k in 0..0 {{ x: int = {e} on NaT {{ Console.printl(\"NaT\"); continue; }}; Console.printl(x); }}\n"))
             .collect();
         let src = format!("proc main() {{\n{body}}}");
-        let module = ksc::compile(&src).unwrap_or_else(|d| panic!("batch {batch}: {}\n{src}", d.message));
+        let module = compile(&src).unwrap_or_else(|d| panic!("batch {batch}: {}\n{src}", d.message));
         let mut out = Vec::new();
         Vm::new(&module, "".as_bytes(), &mut out).run().unwrap_or_else(|t| panic!("batch {batch}: {t}"));
         let out = String::from_utf8(out).unwrap();

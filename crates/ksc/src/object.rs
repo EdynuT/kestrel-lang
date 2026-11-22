@@ -198,6 +198,7 @@ impl B {
             generics: Vec::new(),
             instance: false,
             annotations: Vec::new(),
+            native: false,
         };
         let annotations = vec![Annotation { name: self.id("override"), args: Vec::new(), text: None }];
         MethodDecl { decl, public: true, annotations }

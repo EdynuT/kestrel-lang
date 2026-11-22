@@ -5,6 +5,34 @@ use std::process::Command;
 
 use ksvm::Vm;
 
+/// `src` with a `use` for each file of the standard library it names
+/// (`Console.printl` needs `use std.io.Console;`), on its first line.
+fn with_uses(src: &str) -> String {
+    let files = [
+        ("Console", "std.io.Console"),
+        ("Files", "std.io.Files"),
+        ("Process", "std.os.Process"),
+        ("Texts", "std.text.Texts"),
+        ("Chars", "std.text.Chars"),
+        ("Debug", "std.debug.Debug"),
+    ];
+    let mut uses = String::new();
+    for (alias, path) in files {
+        let named = src.match_indices(&format!("{alias}.")).any(|(at, _)| {
+            !src[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
+        });
+        if named && !src.contains(&format!("use {path};")) {
+            uses.push_str(&format!("use {path}; "));
+        }
+    }
+    uses + src
+}
+
+fn compile(src: &str) -> Result<kestrel_core::Module, ksc::diag::Diagnostic> {
+    ksc::compile(&with_uses(src))
+}
+
+
 const TOUR: &str = include_str!("../../ksc/tests/tour.ks");
 
 const ERRORS: &str = r#"
@@ -24,19 +52,19 @@ proc load(p: text) -> int throws NotFound {
 proc divide(a: int, b: int) -> int { return a / b; }
 proc deep(n: int) -> int throws NotFound { if n == 0 { return load("x"); } return deep(n - 1) + 1; }
 proc main() -> int {
-    try { printl(deep(50)); } catch e: NotFound { printl(e.message()); burn e; }
-    try { printl(divide(1, 0)); } catch e: Trap { printl(e.message()); burn e; }
+    try { Console.printl(deep(50)); } catch e: NotFound { Console.printl(e.message()); burn e; }
+    try { Console.printl(divide(1, 0)); } catch e: Trap { Console.printl(e.message()); burn e; }
     walk i in 1..3 {
-        try { printl(load("ok") + i); printl(load("x")); } catch e: Error { printl("caught " + toText(i)); burn e; }
+        try { Console.printl(load("ok") + i); Console.printl(load("x")); } catch e: Error { Console.printl("caught " + Texts.toText(i)); burn e; }
     }
-    printl(argCount());
+    Console.printl(Process.argCount());
     return 42;
 }
 "#;
 
 /// Stdout and exit code: by the interpreter, then by the native executable.
 fn both(name: &str, src: &str) -> ((String, i32), (String, i32)) {
-    let module = ksc::compile(src).unwrap_or_else(|d| panic!("{}", d.render("test.ks", src)));
+    let module = compile(src).unwrap_or_else(|d| panic!("{}", d.render("test.ks", src)));
     let mut out = Vec::new();
     let r = Vm::new(&module, "".as_bytes(), &mut out).with_args(vec!["a".into(), "b".into()]).run();
     let vm = (String::from_utf8(out).unwrap(), i32::from(ksvm::exit_code(r)));
@@ -71,7 +99,7 @@ fn errors_and_traps_natively() {
     assert_eq!(native.1, 42);
     assert!(native.0.starts_with("not found: x\ndivision by zero"), "{}", native.0);
     // Uncaught, a trap stops the program with code 101.
-    let (vm, native) = both("trap", "proc f(a: int) -> int { return 10 / a; } proc main() { printl(1); printl(f(0)); }");
+    let (vm, native) = both("trap", "proc f(a: int) -> int { return 10 / a; } proc main() { Console.printl(1); Console.printl(f(0)); }");
     assert_eq!(vm, native);
     assert_eq!(native, ("1\n".to_string(), 101));
 }
@@ -85,28 +113,28 @@ proc add(x: int, y: int) -> int { r: int = x + y on NaT { return -1; }; return r
 proc mul(x: int, y: int) -> int { r: int = x * y on NaT { return -2; }; return r; }
 proc main() {
     big: int = 3812798742493;
-    printl(add(big, 1) + mul(big, big) + add(-big, -1) + add(2, 3) + mul(4, 5));
+    Console.printl(add(big, 1) + mul(big, big) + add(-big, -1) + add(2, 3) + mul(4, 5));
     walk i in -2..2 {
         walk j in -1..1 {
-            printf("{i < j}{i <= j}{i > j}{i >= j}{i == j}{i != j}{i <=> j} {-i} {i * j - i} ");
+            Console.printf("{i < j}{i <= j}{i > j}{i >= j}{i == j}{i != j}{i <=> j} {-i} {i * j - i} ");
         }
     }
-    printl();
+    Console.printl();
     x: real = 1.5;
     y: real = x * 2.0 - 0.5;
-    printl(y < x);
-    printl(-y);
+    Console.printl(y < x);
+    Console.printl(-y);
     t: text = "ab";
-    printl(t + "c" == "abc");
+    Console.printl(t + "c" == "abc");
     n: Node? = null;
-    printl(n == null);
+    Console.printl(n == null);
     n = Node(3);
-    printl(n.v);
+    Console.printl(n.v);
     burn n;
     m: int? = null;
-    printl(m ?: 7);
-    printl(depth(3000));
-    printl(big + 1);
+    Console.printl(m ?: 7);
+    Console.printl(depth(3000));
+    Console.printl(big + 1);
 }
 "#;
 
@@ -124,24 +152,24 @@ proc half(x: int) -> int { r: int = x / 0 on NaT { return x % 3; }; return r; }
 proc main() {
     a: int = 1; b: int = 2;
     t: int = a; a = b; b = t;
-    printl(a * 10 + b);
+    Console.printl(a * 10 + b);
     a = a;
     c: int = ((a + 1) * (b + 2) - (a - b) * 3) / 2 % 5 + (a + b + 1 + 2 + 3 + 4 + 5 + 6 + 7);
-    printl(c);
+    Console.printl(c);
     n: int? = null;
-    printl(n ?: a + b);
+    Console.printl(n ?: a + b);
     m: int? = 5;
-    printl((m ?: 0) + a);
-    printl(half(7) + half(-7));
-    printl(-7 / 2 + -7 % 2 * 10);
+    Console.printl((m ?: 0) + a);
+    Console.printl(half(7) + half(-7));
+    Console.printl(-7 / 2 + -7 % 2 * 10);
     v[]: int = {4, 5, 6};
     w[]: int = give v;
-    printl(len(w) + w[1] * a);
+    Console.printl(len(w) + w[1] * a);
     burn w;
     s: int = 0;
     walk i in 1..5 { if i % 2 == 0 { s = s + i * i; } else { s = s - i; } }
-    printl(s);
-    printl(1 / (a - 2));
+    Console.printl(s);
+    Console.printl(1 / (a - 2));
 }
 "#;
 
@@ -160,20 +188,20 @@ proc sum(&v[]: int) -> int { s: int = 0; walk i in 0..len(v) - 1 { s = s + v[i];
 proc main() {
     sym s[]: int = claim 5;
     walk i in -2..2 { s[i] = i * i; }
-    printl(s[-2] + s[2] + s[0]);
+    Console.printl(s[-2] + s[2] + s[0]);
     v[]: int = {};
     walk i in 1..100 { append(v, i); v[len(v) - 1] = v[len(v) - 1] * 2; }
-    printl(sum(&v));
-    printl(len(v));
+    Console.printl(sum(&v));
+    Console.printl(len(v));
     t[]: text = {"a", "b"};
     t[1] = t[0] + "c";
-    printl(t[1] + toText(len(t[1])));
+    Console.printl(t[1] + Texts.toText(len(t[1])));
     ps[]: P = {P { x: 1, y: 2 }, P { x: 3, y: 4 }};
-    printl(ps[1].x + ps[0].y);
+    Console.printl(ps[1].x + ps[0].y);
     q: int = remove(v, 0);
-    printl(q + v[0]);
+    Console.printl(q + v[0]);
     burn s; burn t; burn ps;
-    printl(v[100]);
+    Console.printl(v[100]);
     burn v;
 }
 "#;
@@ -203,21 +231,21 @@ class Node { public v: int; public next: Node?; public proc Node(v: int) -> Node
 proc main() {
     r: Rect = Rect(2, 3);
     walk i in 1..3 { r.grow(); }
-    printl(r.w + r.h + r.corner.x + r.corner.y);
+    Console.printl(r.w + r.h + r.corner.x + r.corner.y);
     s: Shape = give r;
-    printl(s.area());
+    Console.printl(s.area());
     ps[]: P = {P { x: 1, y: 2 }, P { x: 3, y: 4 }};
     ps[0] = P { x: ps[1].y, y: ps[0].x };
     ps[1].x = 9;
-    printl(ps[0].x * 100 + ps[0].y * 10 + ps[1].x);
+    Console.printl(ps[0].x * 100 + ps[0].y * 10 + ps[1].x);
     head: Node? = null;
     walk i in 1..5 { n: Node = Node(i); n.next = give head; head = give n; }
     total: int = 0;
     cur: &Node? = &head;
     while cur != null { total = total * 10 + cur.v; cur = &cur.next; }
-    printl(total);
+    Console.printl(total);
     x: real? = null;
-    printl(head == null || x != null);
+    Console.printl(head == null || x != null);
     burn s; burn ps; burn head;
 }
 "#;
@@ -236,22 +264,22 @@ proc inv(x: real) -> real { r: real = 1.0 / x on NaT { return -1.0; }; return r;
 proc main() {
     x: real = 2.5;
     y: real = x * x - x / 2.0 + -x;
-    printl(y);
-    printl(y < x);
-    printl(y >= 2.5);
-    printl((int) (y * 4.0) + 1);
-    printl((real) 7 / 2.0);
-    printl(inv(4.0) + inv(0.0));
+    Console.printl(y);
+    Console.printl(y < x);
+    Console.printl(y >= 2.5);
+    Console.printl((int) (y * 4.0) + 1);
+    Console.printl((real) 7 / 2.0);
+    Console.printl(inv(4.0) + inv(0.0));
     a: text = "kestrel";
     b: text = "kest" + "rel";
-    printl(a == b);
-    printl(a != "x");
-    printl(len(a) + len(b));
-    printl(a[0] == 'k');
-    printl(a < "zeta");
+    Console.printl(a == b);
+    Console.printl(a != "x");
+    Console.printl(len(a) + len(b));
+    Console.printl(a[0] == 'k');
+    Console.printl(a < "zeta");
     n: real? = null;
-    printl(n ?: 1.5);
-    printl(a[7]);
+    Console.printl(n ?: 1.5);
+    Console.printl(a[7]);
 }
 "#;
 

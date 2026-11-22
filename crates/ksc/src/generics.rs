@@ -27,8 +27,8 @@ const MAX_INSTANCES: usize = 729;
 pub fn expand(program: Program) -> R<Program> {
     let mut templates: HashMap<String, Item> = HashMap::new();
     let mut items = Vec::new();
-    let Program { items: program_items, uses, public, external } = program;
-    let program_rest = Program { items: Vec::new(), uses, public, external: external.clone() };
+    let Program { items: program_items, uses, public, external, docs, overloads } = program;
+    let program_rest = Program { items: Vec::new(), uses, public, external: external.clone(), docs, overloads };
     for item in program_items {
         let generic = match &item {
             Item::Class(c) => {

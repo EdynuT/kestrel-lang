@@ -61,6 +61,7 @@ public class List<T> {
         return len(self.items);
     }
 
+    /* Whether the list is empty. */
     public proc isEmpty(&self) -> bool {
         return len(self.items) == 0;
     }

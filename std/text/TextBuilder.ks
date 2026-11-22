@@ -14,6 +14,8 @@
  * @see TextBuilder.build
  */
 
+use std.text.Texts;
+
 public class TextBuilder {
     chars[]: tryte;
 
@@ -42,6 +44,6 @@ public class TextBuilder {
 
     /* Builds the final text from the accumulated characters. */
     public proc build(&self) -> text {
-        return toText(self.chars, 'c');
+        return Texts.toText(self.chars, 'c');
     }
 }

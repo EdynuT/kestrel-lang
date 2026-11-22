@@ -7,13 +7,16 @@
 pub mod ast;
 pub mod codegen;
 pub mod diag;
+pub mod docs;
 pub mod generics;
 pub mod hir;
 pub mod lexer;
 pub mod linear;
 pub mod modules;
+pub mod nav;
 pub mod native;
 pub mod object;
+pub mod overload;
 pub mod parser;
 pub mod resolve;
 pub mod sema;
@@ -202,11 +205,14 @@ pub struct Compiled {
 /// declarations (their [`modules::header`]s), as C reads `.h` files.
 pub fn compile_unit(units: &[modules::Unit], headers: &[ast::Program], k: usize, need_main: bool) -> Result<Compiled, diag::Diagnostic> {
     let mut program = ast::Program::default();
+    // A native proc is only a name for a built-in: calls to it were
+    // turned into the built-in already (see `resolve::NATIVES`).
+    let compiled = |item: &&ast::Item| !matches!(item, ast::Item::Proc(p) if p.native);
     for u in modules::closure(units, k) {
         if u == k {
-            program.items.extend(units[u].program.items.iter().cloned());
+            program.items.extend(units[u].program.items.iter().filter(compiled).cloned());
         } else {
-            for item in &headers[u].items {
+            for item in headers[u].items.iter().filter(compiled) {
                 program.external.insert(parser::item_name(item).name.clone());
                 program.items.push(item.clone());
             }
@@ -215,6 +221,7 @@ pub fn compile_unit(units: &[modules::Unit], headers: &[ast::Program], k: usize,
     let program = object::prelude(program)?;
     let program = generics::expand(program)?;
     let program = object::add_defaults(program)?;
+    let program = overload::rename(program)?;
     let hir = sema::check_with(&program, need_main)?;
     throws::check(&hir)?;
     linear::check(&hir)?;

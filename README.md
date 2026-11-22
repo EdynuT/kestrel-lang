@@ -9,6 +9,8 @@ Kestrel targets the BET-VM, a simulated 27-trit processor where every digit is `
 ## A taste
 
 ```
+use std.io.Console;
+
 proc sum(sym &v[]: int, k: int) -> int {
     acc: int = 0;
     walk i in span k {             // i goes from -k to +k
@@ -24,9 +26,9 @@ proc main() -> int {
     s: int = sum(&b, 2) on NaT { burn b; return -1; };
 
     tri s <=> 10 {                 // three-way branch
-        - => print("less");
-        0 => print("equal");
-        + => print("greater");
+        - => Console.print("less");
+        0 => Console.print("equal");
+        + => Console.print("greater");
     }
     burn b;                        // zero the memory and free it, exactly once
     return 0;
@@ -74,6 +76,7 @@ cd Game
 ksc run              # compiles src/ into build/obj/ and the executable build/Game, then runs it
 ksc test             # runs every @test proc in src/
 ksc check File.ks    # only reports errors (for editors; `--stdin` reads the text)
+ksc doc File.ks --at 120  # the /* */ documentation of the name at that byte (editor hover)
 ksc build --ksb      # writes build/Game.ksb instead, to run with ksvm
 ksc File.ks          # one file, gcc style: writes the executable File
 ksc File.ks --disasm # shows the bytecode

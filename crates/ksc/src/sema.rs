@@ -53,6 +53,7 @@ pub fn check_with(program: &Program, need_main: bool) -> R<Hir> {
         classes: HashMap::new(),
         ifaces: HashMap::new(),
         class_tags: HashMap::new(),
+        overloads: program.overloads.clone(),
         dispatchers: HashMap::new(),
         extra: Vec::new(),
         class: None,
@@ -356,6 +357,8 @@ struct Checker {
     ifaces: HashMap<String, IfaceInfo>,
     /// Each class's number, carried by interface values to pick the method.
     class_tags: HashMap<&'static str, i64>,
+    /// Overloaded procs and methods (see `Program::overloads`).
+    overloads: HashMap<String, Vec<String>>,
     /// `$dispatch.I.m` procs made so far, and their HIR (no body: the
     /// linker writes them, knowing every class of the program).
     dispatchers: HashMap<String, ProcId>,
@@ -525,6 +528,7 @@ impl Checker {
             params: vec![ast::Param { name: ast::Ident { name: "v".into(), span: sp }, ty: int, mode: None }],
             ret: Some(ast::TypeExpr { ty: Type::Text, span: sp }),
             throws: Vec::new(),
+            native: false,
             body: ast::Block { stmts, span: sp },
         };
         self.enums.insert(name.clone(), EnumInfo { name: ast::intern(name), variants, name_proc });
@@ -999,6 +1003,9 @@ impl Checker {
             && self.lookup(c).is_none()
             && self.classes.contains_key(c)
         {
+            if let Some(id) = self.pick_method(c, name, args, None, span)? {
+                return self.call_proc(id, &format!("{c}.{}", name.name), args, None, span);
+            }
             let m = self.method(c, name)?;
             if m.this.is_some() {
                 return Err(err(format!("`{}` needs an object", name.name), name.span)
@@ -1044,7 +1051,12 @@ impl Checker {
             let ty = self.expr(recv, None).map(|h| h.ty.to_string()).unwrap_or_else(|_| "this".into());
             return Err(err(format!("{ty} has no methods"), recv.span));
         };
-        let m = self.method(c, name)?;
+        let overloaded = self.overload_of(c, &name.name);
+        let m = match &overloaded {
+            // The versions take `self` the same way (`&self`, usually): the first says how.
+            Some(names) => self.classes[c].methods[&names[0]],
+            None => self.method(c, name)?,
+        };
         let this = match (m.this, &obj.kind) {
             (None, _) => {
                 return Err(err(format!("`{}` is static", name.name), name.span)
@@ -1065,7 +1077,11 @@ impl Checker {
             Some(i) => hx(HExprKind::ToIface(Box::new(this), self.class_tags[c]), Type::LentIface(i), recv.span),
             None => this,
         };
-        self.call_proc(m.id, &format!("{c}.{}", name.name), args, Some(this), span)
+        let id = match self.pick_method(c, name, args, Some(&this), span)? {
+            Some(id) => id,
+            None => m.id,
+        };
+        self.call_proc(id, &format!("{c}.{}", name.name), args, Some(this), span)
     }
 
     /// The receiver of `x.m()` when `x` is an interface value, lent to the
@@ -3566,6 +3582,11 @@ impl Checker {
         if let Some(info) = self.classes.get(&name.name) {
             let c = info.name;
             let base = ast::short_name(c);
+            if let Some(names) = self.overloads.get(&format!("{c}.{base}")).cloned() {
+                let ids: Vec<(String, ProcId)> = names.iter().filter_map(|n| self.classes[c].methods.get(n).map(|m| (n.clone(), m.id))).collect();
+                let id = self.pick(c, &ids, args, None, span)?;
+                return self.call_proc(id, c, args, None, span);
+            }
             if !info.methods.contains_key(base) {
                 return Err(err(format!("`{c}` has no constructor"), name.span)
                     .with_note(format!("declare one in the class: `public proc {base}(...) -> {c} {{ return {c} {{ ... }}; }}`")));
@@ -3576,6 +3597,11 @@ impl Checker {
         if self.ifaces.contains_key(&name.name) {
             return Err(err(format!("`{}` is an interface: it has no constructor", name.name), name.span)
                 .with_note("create an object of a class that implements it"));
+        }
+        if let Some(names) = self.overloads.get(&name.name).cloned() {
+            let ids: Vec<(String, ProcId)> = names.iter().map(|n| (n.clone(), self.proc_ids[n])).collect();
+            let id = self.pick(&name.name, &ids, args, None, span)?;
+            return self.call_proc(id, &name.name, args, None, span);
         }
         let Some(&id) = self.proc_ids.get(&name.name) else {
             return Err(if self.lookup(&name.name).is_some() {
@@ -3589,7 +3615,11 @@ impl Checker {
                     let mut c = p.chars();
                     acc + &c.next().map(|h| h.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
                 });
-                if camel != name.name && BUILTINS.contains(&camel.as_str()) {
+                let moved = crate::resolve::NATIVES.iter().find(|(_, _, builtin)| *builtin == camel);
+                if let (true, Some((file, item, _))) = (camel != name.name, moved) {
+                    let alias = file.rsplit('.').next().unwrap_or(file);
+                    d.with_note(format!("names are written in camelCase: `{alias}.{item}`, with `use {file};`"))
+                } else if camel != name.name && BUILTINS.contains(&camel.as_str()) {
                     d.with_note(format!("built-ins are written in camelCase: `{camel}`"))
                 } else {
                     d
@@ -3597,6 +3627,79 @@ impl Checker {
             });
         };
         self.call_proc(id, &name.name, args, None, span)
+    }
+
+    /// The versions of method `name` of class `c`, if it is overloaded.
+    fn overload_of(&self, c: &str, name: &str) -> Option<Vec<String>> {
+        if self.classes[c].methods.contains_key(name) {
+            return None;
+        }
+        self.overloads.get(&format!("{c}.{name}")).cloned()
+    }
+
+    /// For an overloaded method: the version the arguments pick (and that
+    /// the caller may use). `None` if `name` is not overloaded.
+    fn pick_method(&mut self, c: &str, name: &ast::Ident, args: &[Expr], this: Option<&HExpr>, span: Span) -> R<Option<ProcId>> {
+        let Some(names) = self.overload_of(c, &name.name) else { return Ok(None) };
+        let info = &self.classes[c];
+        let mut ids = Vec::new();
+        for n in &names {
+            let m = info.methods[n];
+            if !m.public && self.class != Some(info.name) {
+                continue;
+            }
+            ids.push((n.clone(), m.id));
+        }
+        if ids.is_empty() {
+            return Err(err(format!("method `{}` is private in `{c}`", name.name), name.span));
+        }
+        let shown = format!("{c}.{}", name.name);
+        self.pick(&shown, &ids, args, this, span).map(Some)
+    }
+
+    /// The version of an overloaded proc the arguments pick: the one whose
+    /// parameters have exactly the arguments' types; or else the only one
+    /// they fit (an `int` literal where a `tryte` is taken, an object where
+    /// its interface is). None, or more than one: an error that lists them.
+    fn pick(&mut self, shown: &str, versions: &[(String, ProcId)], args: &[Expr], this: Option<&HExpr>, span: Span) -> R<ProcId> {
+        let skip = usize::from(this.is_some());
+        let arity: Vec<&(String, ProcId)> = versions.iter().filter(|(_, id)| self.sigs[*id].params.len() == args.len() + skip).collect();
+        // The arguments' own types (`None` when one needs the parameter's to be checked).
+        let types: Vec<Option<Type>> = args.iter().map(|a| self.expr(a, None).ok().map(|h| h.ty)).collect();
+        let exact: Vec<ProcId> = arity
+            .iter()
+            .filter(|(_, id)| self.sigs[*id].params[skip..].iter().zip(&types).all(|((_, p), t)| *t == Some(*p)))
+            .map(|(_, id)| *id)
+            .collect();
+        if let [id] = exact[..] {
+            return Ok(id);
+        }
+        let mut fit = Vec::new();
+        for (_, id) in &arity {
+            if self.call_proc(*id, shown, args, this.cloned(), span).is_ok() {
+                fit.push(*id);
+            }
+        }
+        if let [id] = fit[..] {
+            return Ok(id);
+        }
+        let found: Vec<String> = args
+            .iter()
+            .zip(&types)
+            .map(|(a, t)| match (t, &a.kind) {
+                (Some(t), _) => t.to_string(),
+                (None, ExprKind::NaT) => "null".to_string(),
+                (None, _) => "?".to_string(),
+            })
+            .collect();
+        let list: Vec<String> = versions.iter().map(|(n, _)| format!("`{n}`")).collect();
+        let message = if fit.is_empty() {
+            format!("no `{shown}` takes ({})", found.join(", "))
+        } else {
+            format!("more than one `{shown}` takes ({}): it is not clear which one", found.join(", "))
+        };
+        let note = if fit.is_empty() { format!("there are {}", list.join(", ")) } else { format!("there are {}; make the argument's type clear (a variable with its type)", list.join(", ")) };
+        Err(err(message, span).with_note(note))
     }
 
     /// A call to a user proc or method. `this` is the method's `self`

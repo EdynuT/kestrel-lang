@@ -15,6 +15,26 @@ pub struct Program {
     /// Items that belong to another file of the program (their code is in
     /// that file's `.ksb`): they are declared here, never compiled.
     pub external: std::collections::HashSet<String>,
+    /// Every item, method and field, by its name as written (`trim`, `List`,
+    /// `List.add`), with its signature and documentation (`/* ... */` just
+    /// above; empty if none); `""` is the file's own documentation (its
+    /// first `/* */`, followed by an empty line).
+    pub docs: std::collections::HashMap<String, Doc>,
+    /// Overloaded procs and methods: the name a call writes (`area`,
+    /// `Box.put`) and the names of its versions (`area(real)`...); see
+    /// [`crate::overload`].
+    pub overloads: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// A documentation comment and the declaration it documents.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Doc {
+    /// The text, without `/*`, `*/` and the `*` that start its lines.
+    pub text: String,
+    /// The declaration as written, up to its body: `public proc trim(value: text) -> text`.
+    pub sig: String,
+    /// Where the declaration starts (a span position; the file's start for its own).
+    pub at: usize,
 }
 
 /// `use Shapes.Circle;`: the path of a file (`Shapes/Circle.ks`), whose
@@ -194,6 +214,11 @@ pub struct ProcDecl {
     /// `@test`, `@deprecated(...)` before a top-level proc (a method keeps
     /// its own in `MethodDecl`).
     pub annotations: Vec<Annotation>,
+    /// `public native proc read(path: text) -> text;` (only in the standard
+    /// library): no body, the work is done by the runtime (see
+    /// `resolve::NATIVES`). `values: ...` as its last parameter takes any
+    /// number of values of any type (`print`); it is not in `params`.
+    pub native: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

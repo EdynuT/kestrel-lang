@@ -22,10 +22,42 @@ type R<T> = Result<T, Diagnostic>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Proc,
+    /// A native proc: the built-in that does its work.
+    Native(&'static str),
     Const,
     /// An enum, struct, class or interface.
     Type,
 }
+
+/// The native procs of the standard library: file, proc, and the built-in
+/// (an instruction of the runtime) that does its work.
+pub const NATIVES: &[(&str, &str, &str)] = &[
+    ("std.io.Console", "print", "print"),
+    ("std.io.Console", "printl", "printl"),
+    ("std.io.Console", "printf", "printf"),
+    ("std.io.Console", "readLine", "readLine"),
+    ("std.io.Console", "eof", "eof"),
+    ("std.io.Console", "input", "input"),
+    ("std.io.Console", "emit", "emit"),
+    ("std.io.Files", "read", "readFile"),
+    ("std.io.Files", "write", "writeFile"),
+    ("std.io.Files", "writeBytes", "writeBytes"),
+    ("std.io.Files", "exists", "fileExists"),
+    ("std.os.Process", "argCount", "argCount"),
+    ("std.os.Process", "arg", "arg"),
+    ("std.os.Process", "exit", "exit"),
+    ("std.text.Texts", "sub", "sub"),
+    ("std.text.Texts", "toInt", "toInt"),
+    ("std.text.Texts", "toReal", "toReal"),
+    ("std.text.Texts", "toText", "toText"),
+    ("std.text.Chars", "isDigit", "isDigit"),
+    ("std.text.Chars", "isLetter", "isLetter"),
+    ("std.text.Chars", "isUpper", "isUpper"),
+    ("std.text.Chars", "isLower", "isLower"),
+    ("std.text.Chars", "isSpace", "isSpace"),
+    ("std.debug.Debug", "dump", "dump"),
+    ("std.debug.Debug", "hashMix", "hashMix"),
+];
 
 /// The top-level names of one file.
 #[derive(Clone, Debug)]
@@ -41,14 +73,50 @@ pub struct ModuleInfo {
 impl ModuleInfo {
     pub fn new(path: String, root: bool, program: &Program) -> R<ModuleInfo> {
         let mut items = HashMap::new();
+        let mut generic_procs = HashSet::new();
         for item in &program.items {
             let kind = match item {
+                Item::Proc(p) if p.native => {
+                    let found = NATIVES.iter().find(|(file, name, _)| *file == path && *name == p.name.name);
+                    match found {
+                        Some((_, _, builtin)) => Kind::Native(builtin),
+                        None if !path.starts_with("std.") => {
+                            return Err(Diagnostic::new("only the standard library has native procs", p.name.span)
+                                .with_note("write the proc's body in Kestrel"));
+                        }
+                        None => {
+                            let known: Vec<String> = NATIVES.iter().filter(|(file, _, _)| *file == path).map(|(_, n, _)| format!("`{n}`")).collect();
+                            let note = if known.is_empty() {
+                                format!("`{path}` has no native procs: write the proc's body in Kestrel")
+                            } else {
+                                format!("the native procs of `{path}` are {}; anything else is written in Kestrel", known.join(", "))
+                            };
+                            return Err(Diagnostic::new(format!("the runtime does nothing called `{}` in `{path}`", p.name.name), p.name.span)
+                                .with_note(note));
+                        }
+                    }
+                }
                 Item::Proc(_) => Kind::Proc,
                 Item::Const(_) => Kind::Const,
                 _ => Kind::Type,
             };
             let name = crate::parser::item_name(item);
-            if items.insert(name.name.clone(), kind).is_some() {
+            // Procs may share a name (overloads); anything else may not, and
+            // neither may a generic proc (`max<int>(...)` names one already).
+            let generic = matches!(item, Item::Proc(p) if !p.generics.is_empty());
+            let twice = items.get(&name.name).is_some_and(|&before| before == Kind::Proc && kind == Kind::Proc);
+            if twice && (generic || generic_procs.contains(&name.name)) {
+                return Err(Diagnostic::new(format!("generic proc `{}` cannot be overloaded", name.name), name.span)
+                    .with_note("give the other procs another name"));
+            }
+            if generic {
+                generic_procs.insert(name.name.clone());
+            }
+            if matches!(kind, Kind::Native(_)) && items.contains_key(&name.name) {
+                return Err(Diagnostic::new(format!("native proc `{}` cannot be overloaded", name.name), name.span)
+                    .with_note("each native proc is one thing the runtime does; one that takes any type ends with `values: ...`"));
+            }
+            if items.insert(name.name.clone(), kind).is_some_and(|before| !(before == Kind::Proc && kind == Kind::Proc)) {
                 return Err(Diagnostic::new(format!("`{}` is defined twice in this file", name.name), name.span));
             }
         }
@@ -148,6 +216,18 @@ impl Resolver<'_> {
         self.scope.uses.get(alias)
     }
 
+    /// A built-in that lives in the standard library now (`printl` is
+    /// `Console.printl`), called by its old name.
+    fn moved(&self, name: &Ident) -> R<()> {
+        if self.locals.contains(&name.name) || self.scope.me.items.contains_key(&name.name) {
+            return Ok(());
+        }
+        let Some((file, item, _)) = NATIVES.iter().find(|(_, _, builtin)| *builtin == name.name) else { return Ok(()) };
+        let alias = file.rsplit('.').next().unwrap_or(file);
+        Err(Diagnostic::new(format!("`{}` is in `{file}`", name.name), name.span)
+            .with_note(format!("add `use {file};` at the top of the file and write `{alias}.{item}(...)`")))
+    }
+
     /// `item` of the used file `m`, which must be public.
     fn qualified(&self, m: &ModuleInfo, item: &str, span: Span) -> R<String> {
         if !m.items.contains_key(item) {
@@ -157,7 +237,10 @@ impl Resolver<'_> {
             return Err(Diagnostic::new(format!("`{item}` is private to `{}`", m.path), span)
                 .with_note(format!("mark it `public` in {}.ks to use it here", m.path.replace('.', "/"))));
         }
-        Ok(m.mangle(item))
+        Ok(match m.items[item] {
+            Kind::Native(builtin) => builtin.to_string(),
+            _ => m.mangle(item),
+        })
     }
 
     /// A name that can only be an item (a type, a called proc, a class in
@@ -181,8 +264,10 @@ impl Resolver<'_> {
         if self.type_params.iter().any(|t| t == n) {
             return Ok(n.to_string());
         }
-        if self.scope.me.items.contains_key(n) {
-            return Ok(self.scope.me.mangle(n));
+        match self.scope.me.items.get(n) {
+            Some(Kind::Native(builtin)) => return Ok(builtin.to_string()),
+            Some(_) => return Ok(self.scope.me.mangle(n)),
+            None => {}
         }
         if let Some(m) = self.used(n).filter(|m| m.items.contains_key(m.alias())) {
             return self.qualified(m, m.alias(), span);
@@ -405,7 +490,7 @@ impl Resolver<'_> {
                 // with a proc's name is a variable.
                 match self.scope.me.items.get(n.as_str()) {
                     Some(Kind::Const | Kind::Type) => *n = self.scope.me.mangle(n),
-                    Some(Kind::Proc) => {}
+                    Some(Kind::Proc | Kind::Native(_)) => {}
                     None => {
                         if let Some(m) = self.used(n) {
                             let main = m.alias().to_string();
@@ -463,6 +548,7 @@ impl Resolver<'_> {
                 self.expr(recv)?;
             }
             ExprKind::Call { name, args } => {
+                self.moved(name)?;
                 self.ident(name)?;
                 args.iter_mut().try_for_each(|a| self.expr(a))?;
             }

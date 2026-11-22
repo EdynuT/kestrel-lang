@@ -37,6 +37,9 @@ const USAGE: &str = "usage: ksc new <Name>          create a project
        ksc run [args...]         build and run it
        ksc test                  run its @test procs
        ksc check <File.ks> [--stdin]  only report errors (for editors)
+       ksc doc <File.ks> --at <byte> [--stdin]  the documentation of the name there
+       ksc std <collections/List.ks>  print a file of the standard library
+       ksc nav <File.ks> (--at <byte> | --id <id>) --what <definition|implementations|supers> [--stdin]
        ksc <File.ks> [-o out] [--ksb] [--disasm] [--tokens] [--ast] [--test]";
 
 fn main() -> ExitCode {
@@ -47,6 +50,9 @@ fn main() -> ExitCode {
         Some("run") => project(&args[1..], Action::Run),
         Some("test") => project(&args[1..], Action::Test),
         Some("check") => check(&args[1..]),
+        Some("doc") => doc(&args[1..]),
+        Some("std") => std_file(&args[1..]),
+        Some("nav") => nav(&args[1..]),
         Some(_) => file(&args),
         None => {
             eprintln!("{USAGE}");
@@ -74,7 +80,7 @@ fn new_project(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     }
     let made = std::fs::create_dir_all(root.join("src"))
-        .and_then(|()| std::fs::write(root.join("src/Main.ks"), "proc main() {\n    printl(\"Hello, Kestrel!\");\n}\n"))
+        .and_then(|()| std::fs::write(root.join("src/Main.ks"), "use std.io.Console;\n\nproc main() {\n    Console.printl(\"Hello, Kestrel!\");\n}\n"))
         .and_then(|()| std::fs::write(root.join(".gitignore"), "build/\n"));
     if let Err(e) = made {
         eprintln!("ksc: cannot create {name}: {e}");
@@ -223,44 +229,10 @@ fn file(args: &[String]) -> ExitCode {
 /// from where the file is. A file under a project's `src/` is checked with
 /// the whole project, so files that use each other work.
 fn check(args: &[String]) -> ExitCode {
-    let Some(path) = args.iter().find(|a| !a.starts_with('-')) else {
-        eprintln!("usage: ksc check <File.ks> [--stdin]");
+    let Some(target) = editor_target(args, "usage: ksc check <File.ks> [--stdin]") else {
         return ExitCode::from(2);
     };
-    let text = if args.iter().any(|a| a == "--stdin") {
-        let mut s = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).map(|_| s)
-    } else {
-        std::fs::read_to_string(path)
-    };
-    let text = match text {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("ksc: {path}: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    let file = PathBuf::from(path);
-    // In a project: the folder holding the `src/` the file is under.
-    let project = file.ancestors().skip(1).find(|d| d.file_name().is_some_and(|n| n == "src")).map(|src| {
-        let rel = file.strip_prefix(src).expect("under src/").with_extension("");
-        let module: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-        (src.parent().map(Path::to_path_buf).unwrap_or_default(), module)
-    });
-    let (map, result) = match project {
-        Some((root, module)) => {
-            let files = Edited { disk: Disk::project(&root), module, text };
-            let mut all = Vec::new();
-            sources(&files.disk.src, &files.disk.src, &mut all);
-            all.sort();
-            let uses: String = all.iter().map(|f| format!("use {f};\n")).collect();
-            ksc::build("$all.ks", &uses, &files, false, None)
-        }
-        None => {
-            let dir = file.parent().map(PathBuf::from).unwrap_or_default();
-            ksc::build(path, &text, &Disk { src: dir.clone(), lib: Some(dir.join("lib")) }, false, None)
-        }
-    };
+    let (map, result) = ksc::build(&target.root_path, &target.root_src, target.files.as_ref(), false, None);
     match result {
         Ok(o) => {
             for w in &o.warnings {
@@ -275,14 +247,189 @@ fn check(args: &[String]) -> ExitCode {
     }
 }
 
+/// `ksc doc File.ks --at N [--stdin]`: the documentation (Markdown) of the
+/// name at byte `N` of the file, for an editor's hover. Nothing if none.
+fn doc(args: &[String]) -> ExitCode {
+    let Some(target) = editor_target(args, "usage: ksc doc <File.ks> --at <byte> [--stdin]") else {
+        return ExitCode::from(2);
+    };
+    let at = args.iter().position(|a| a == "--at").and_then(|i| args.get(i + 1)).and_then(|n| n.parse::<usize>().ok());
+    let Some(at) = at else {
+        eprintln!("usage: ksc doc <File.ks> --at <byte> [--stdin]");
+        return ExitCode::from(2);
+    };
+    let mut map = ksc::diag::SourceMap::default();
+    let Ok(units) = ksc::modules::load(&target.root_path, &target.root_src, target.files.as_ref(), &mut map) else {
+        return ExitCode::FAILURE;
+    };
+    let me = match &target.module {
+        Some(m) => units.iter().position(|u| u.info.path == m.join(".")),
+        None => Some(0),
+    };
+    match me.and_then(|me| ksc::docs::hover(&units, &map, me, at)) {
+        Some(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        None => ExitCode::FAILURE,
+    }
+}
+
+/// `ksc nav File.ks --at N --what definition [--stdin]`: places for an
+/// editor, one per line: `kind<TAB>name<TAB>file<TAB>line<TAB>column<TAB>id`.
+/// `--what` is `definition`, `implementations` (of an interface or its
+/// method) or `supers` (the interfaces of a class, or the interface method
+/// a method fills in). `--id` (from an earlier answer) names the item
+/// instead of a position.
+fn nav(args: &[String]) -> ExitCode {
+    const USAGE: &str = "usage: ksc nav <File.ks> (--at <byte> | --id <id>) --what <definition|implementations|supers> [--stdin]";
+    let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    let rest: Vec<String> = {
+        let mut out = Vec::new();
+        let mut skip = false;
+        for a in args {
+            if skip {
+                skip = false;
+            } else if matches!(a.as_str(), "--what" | "--id") {
+                skip = true;
+            } else {
+                out.push(a.clone());
+            }
+        }
+        out
+    };
+    let Some(target) = editor_target(&rest, USAGE) else {
+        return ExitCode::from(2);
+    };
+    let mut map = ksc::diag::SourceMap::default();
+    let Ok(units) = ksc::modules::load(&target.root_path, &target.root_src, target.files.as_ref(), &mut map) else {
+        return ExitCode::FAILURE;
+    };
+    let found: Vec<ksc::docs::Target> = match (value("--id"), value("--at").and_then(|n| n.parse::<usize>().ok())) {
+        (Some(id), _) => ksc::nav::by_id(&units, &id).into_iter().collect(),
+        (None, Some(at)) => {
+            let me = match &target.module {
+                Some(m) => units.iter().position(|u| u.info.path == m.join(".")),
+                None => Some(0),
+            };
+            me.map(|me| ksc::docs::targets(&units, &map, me, at)).unwrap_or_default()
+        }
+        (None, None) => {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let places: Vec<ksc::docs::Target> = match value("--what").as_deref() {
+        Some("definition") => found,
+        Some("implementations") => found.iter().flat_map(|t| ksc::nav::implementations(&units, t)).collect(),
+        Some("supers") => found.iter().flat_map(|t| ksc::nav::supers(&units, t)).collect(),
+        _ => {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut seen = std::collections::HashSet::new();
+    for p in places.iter().filter_map(|t| ksc::nav::place(&units, &map, t)).filter(|p| seen.insert(p.id.clone())) {
+        println!("{}\t{}\t{}\t{}\t{}\t{}", p.kind.word(), p.name, p.file, p.line, p.column, p.id);
+    }
+    ExitCode::SUCCESS
+}
+
+/// `ksc std collections/List.ks`: a file of the standard library (built
+/// into `ksc`), for an editor to show.
+fn std_file(args: &[String]) -> ExitCode {
+    let key = args.first().map(|a| a.trim_start_matches("std/").trim_end_matches(".ks").replace('/', "."));
+    match key.as_deref().and_then(ksc::modules::std_source) {
+        Some(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("usage: ksc std <collections/List.ks> (a file of the standard library)");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// What an editor command works on: the program to load (a whole project
+/// when the file is under `src/`), and which file of it is the edited one.
+struct EditorTarget {
+    root_path: String,
+    root_src: String,
+    files: Box<dyn ksc::modules::Files>,
+    /// The edited file's `use` path, in a project (`None`: it is the root).
+    module: Option<Vec<String>>,
+}
+
+fn editor_target(args: &[String], usage: &str) -> Option<EditorTarget> {
+    let Some(path) = args.iter().enumerate().find(|(i, a)| !a.starts_with('-') && (*i == 0 || args[i - 1] != "--at")).map(|(_, a)| a)
+    else {
+        eprintln!("{usage}");
+        return None;
+    };
+    let text = if args.iter().any(|a| a == "--stdin") {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).map(|_| s)
+    } else {
+        std::fs::read_to_string(path)
+    };
+    let text = match text {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("ksc: {path}: {e}");
+            return None;
+        }
+    };
+    let file = PathBuf::from(path);
+    // A file of the standard library (`.../std/io/Console.ks`): checked as
+    // `use std.io.Console;` with this text, so its native procs are known.
+    let canonical = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
+    let in_std = canonical.ancestors().skip(1).find(|d| d.file_name().is_some_and(|n| n == "std")).map(|std| {
+        let rel = canonical.strip_prefix(std).expect("under std/").with_extension("");
+        std::iter::once("std".to_string()).chain(rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned())).collect::<Vec<_>>()
+    });
+    if let Some(module) = in_std.filter(|m| ksc::modules::std_source(&m[1..].join(".")).is_some() || m.len() > 2) {
+        let files = Edited { disk: Disk { src: PathBuf::new(), lib: None }, module: module.clone(), text, shown: path.clone() };
+        let root_src = format!("use {};\n", module.join("."));
+        return Some(EditorTarget { root_path: "$all.ks".into(), root_src, files: Box::new(files), module: Some(module) });
+    }
+    // In a project: the folder holding the `src/` the file is under.
+    let project = file.ancestors().skip(1).find(|d| d.file_name().is_some_and(|n| n == "src")).map(|src| {
+        let rel = file.strip_prefix(src).expect("under src/").with_extension("");
+        let module: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+        (src.parent().map(Path::to_path_buf).unwrap_or_default(), module)
+    });
+    Some(match project {
+        Some((root, module)) => {
+            let files = Edited { disk: Disk::project(&root), module: module.clone(), text, shown: path.clone() };
+            let mut all = Vec::new();
+            sources(&files.disk.src, &files.disk.src, &mut all);
+            all.sort();
+            let uses: String = all.iter().map(|f| format!("use {f};\n")).collect();
+            EditorTarget { root_path: "$all.ks".into(), root_src: uses, files: Box::new(files), module: Some(module) }
+        }
+        None => {
+            let dir = file.parent().map(PathBuf::from).unwrap_or_default();
+            let files = Disk { src: dir.clone(), lib: Some(dir.join("lib")) };
+            EditorTarget { root_path: path.clone(), root_src: text, files: Box::new(files), module: None }
+        }
+    })
+}
+
 /// A project's files, with one of them (`module`) as the editor has it.
 struct Edited {
     disk: Disk,
     module: Vec<String>,
     text: String,
+    /// How the edited file is shown in messages (its path).
+    shown: String,
 }
 
 impl ksc::modules::Files for Edited {
+    fn std_file(&self, path: &[String]) -> Option<ksc::modules::Found> {
+        (path == self.module.as_slice()).then(|| ksc::modules::Found { shown: self.shown.clone(), src: self.text.clone(), object: None })
+    }
+
     fn read(&self, path: &[String]) -> Result<Option<ksc::modules::Found>, String> {
         let found = self.disk.read(path)?;
         if path != self.module.as_slice() {

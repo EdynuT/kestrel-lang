@@ -258,7 +258,12 @@ impl Parser {
     fn ident(&mut self) -> PResult<Ident> {
         match self.peek().clone() {
             Tok::Ident(name) => Ok(Ident { name, span: self.bump().span }),
-            _ => Err(self.unexpected("a name")),
+            tok => match crate::lexer::keyword_text(&tok) {
+                // `text: text`: a word of the language cannot be a name.
+                Some(word) => Err(Diagnostic::new(format!("`{word}` is a word of the language and cannot be a name"), self.span())
+                    .with_note("pick a name that says what it holds, like `value` or `line`")),
+                None => Err(self.unexpected("a name")),
+            },
         }
     }
 

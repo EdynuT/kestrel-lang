@@ -6,12 +6,12 @@
  *
  * @since 0.7
  * @author Edynu
- * @see startsWith
- * @see endsWith
- * @see indexOf
- * @see trim
- * @see split
- * @see strip
+ * @see Texts.startsWith
+ * @see Texts.endsWith
+ * @see Texts.indexOf
+ * @see Texts.trim
+ * @see Texts.split
+ * @see Texts.strip
  */
 
 use std.collections.List;

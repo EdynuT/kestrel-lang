@@ -12,6 +12,12 @@
  * @see List.add
  * @see List.get
  * @see List.remove
+ * @see List.pop
+ * @see List.len
+ * @see List.isEmpty
+ * @see List.indexOf
+ * @see List.contains
+ * @see List.clear
  */
 
 public class List<T> {

@@ -19,7 +19,7 @@ hoje:  programa.ks ──[ksc em Rust]──────────────
 | 0.4 | **Textos, E/S e erros:** comparar, cortar, montar e converter textos, classificar caracteres, ler arquivo e stdin, escrever bytes, argumentos de linha de comando, `exit`, contas que falham disparam Trap e `on NaT` trata | ✅ |
 | 0.5 | **Dados:** `struct` (só dados), arrays de qualquer tipo (inclusive structs), arrays que mudam de tamanho (`append`, `pop`, `insert`, `remove`, `resize`, `clear`, `replace`) | ✅ |
 | 0.6 | **Classes:** `class` com métodos, `private`/`public`, interfaces (sem herança), arrays de objetos, interfaces com dono, árvores e objetos opcionais (`T?`), anotações (`@impl`, `@override`, `@test`, `@deprecated`), `assert` e `ksc --test` | ✅ |
-| 0.7 | **Ferramentas:** módulos (`use`), seção de símbolos e tabela de linhas no `.ksb`, documentação `/* */`, executável único, traceback com linha do `.ks`, biblioteca padrão mínima escrita em Kestrel (hash map, hash set, funções de texto) | |
+| 0.7 | **Ferramentas:** módulos (`use`), seção de símbolos e tabela de linhas no `.ksb`, documentação `/* */`, executável único, traceback com linha do `.ks`, biblioteca padrão mínima escrita em Kestrel (hash map, hash set, funções de texto) | ✅ |
 | 0.8 | `ksc.ks`: lexer e parser | |
 | 0.9 | `ksc.ks`: verificação de tipos e de posse, gerador de código e escrita do `.ksb` | |
 | **1.0** | Bootstrap: o teste abaixo passa | |

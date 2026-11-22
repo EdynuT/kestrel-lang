@@ -73,6 +73,7 @@ ksc new Game         # creates Game/ with src/Main.ks
 cd Game
 ksc run              # compiles src/ into build/obj/ and the executable build/Game, then runs it
 ksc test             # runs every @test proc in src/
+ksc check File.ks    # only reports errors (for editors; `--stdin` reads the text)
 ksc build --ksb      # writes build/Game.ksb instead, to run with ksvm
 ksc File.ks          # one file, gcc style: writes the executable File
 ksc File.ks --disasm # shows the bytecode

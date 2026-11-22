@@ -319,6 +319,28 @@ impl Lexer<'_> {
                 '/' if self.peek_at(1) == Some('/') => {
                     self.take_while(|c| c != '\n');
                 }
+                // `/* ... */`: documentation (for now skipped like a comment;
+                // it does not nest, as in Java).
+                '/' if self.peek_at(1) == Some('*') => {
+                    self.bump();
+                    self.bump();
+                    loop {
+                        match self.peek() {
+                            Some('*') if self.peek_at(1) == Some('/') => {
+                                self.bump();
+                                self.bump();
+                                break;
+                            }
+                            Some(_) => {
+                                self.bump();
+                            }
+                            None => {
+                                self.pos = start + 2;
+                                return Err(self.err("`/*` is never closed", start).with_note("end the comment with `*/`"));
+                            }
+                        }
+                    }
+                }
                 '0'..='9' => self.number()?,
                 'A'..='Z' | 'a'..='z' | '_' => {
                     let word = self.take_while(|c| c.is_ascii_alphanumeric() || c == '_');
@@ -483,6 +505,13 @@ mod tests {
             vec![id("acc"), Tok::Colon, Tok::Int, Tok::Eq, n(0), Tok::Semi, Tok::Eof]
         );
         assert_eq!(toks("i++; x += 2;"), vec![id("i"), Tok::PlusPlus, Tok::Semi, id("x"), Tok::PlusEq, n(2), Tok::Semi, Tok::Eof]);
+    }
+
+    #[test]
+    fn block_comments() {
+        assert_eq!(toks("a /* b\n * c */ d"), vec![id("a"), id("d"), Tok::Eof]);
+        assert_eq!(toks("/**/x/* * / */"), vec![id("x"), Tok::Eof]);
+        assert!(err("x /* never").contains("never closed"));
     }
 
     #[test]

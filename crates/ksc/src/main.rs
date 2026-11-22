@@ -36,6 +36,7 @@ const USAGE: &str = "usage: ksc new <Name>          create a project
        ksc build [--ksb]         build the project in this folder
        ksc run [args...]         build and run it
        ksc test                  run its @test procs
+       ksc check <File.ks> [--stdin]  only report errors (for editors)
        ksc <File.ks> [-o out] [--ksb] [--disasm] [--tokens] [--ast] [--test]";
 
 fn main() -> ExitCode {
@@ -45,6 +46,7 @@ fn main() -> ExitCode {
         Some("build") => project(&args[1..], Action::Build),
         Some("run") => project(&args[1..], Action::Run),
         Some("test") => project(&args[1..], Action::Test),
+        Some("check") => check(&args[1..]),
         Some(_) => file(&args),
         None => {
             eprintln!("{USAGE}");
@@ -213,6 +215,82 @@ fn file(args: &[String]) -> ExitCode {
         None => PathBuf::from(path).with_extension(std::env::consts::EXE_EXTENSION),
     };
     if write_program(&out, &output, ksb) { ExitCode::SUCCESS } else { ExitCode::from(2) }
+}
+
+/// `ksc check File.ks [--stdin]`: the errors of a file, for an editor.
+/// Nothing is written and `main` is not needed. With `--stdin` the file's
+/// text (maybe not saved) comes from standard input; its `use`s are read
+/// from where the file is. A file under a project's `src/` is checked with
+/// the whole project, so files that use each other work.
+fn check(args: &[String]) -> ExitCode {
+    let Some(path) = args.iter().find(|a| !a.starts_with('-')) else {
+        eprintln!("usage: ksc check <File.ks> [--stdin]");
+        return ExitCode::from(2);
+    };
+    let text = if args.iter().any(|a| a == "--stdin") {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).map(|_| s)
+    } else {
+        std::fs::read_to_string(path)
+    };
+    let text = match text {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("ksc: {path}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let file = PathBuf::from(path);
+    // In a project: the folder holding the `src/` the file is under.
+    let project = file.ancestors().skip(1).find(|d| d.file_name().is_some_and(|n| n == "src")).map(|src| {
+        let rel = file.strip_prefix(src).expect("under src/").with_extension("");
+        let module: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+        (src.parent().map(Path::to_path_buf).unwrap_or_default(), module)
+    });
+    let (map, result) = match project {
+        Some((root, module)) => {
+            let files = Edited { disk: Disk::project(&root), module, text };
+            let mut all = Vec::new();
+            sources(&files.disk.src, &files.disk.src, &mut all);
+            all.sort();
+            let uses: String = all.iter().map(|f| format!("use {f};\n")).collect();
+            ksc::build("$all.ks", &uses, &files, false, None)
+        }
+        None => {
+            let dir = file.parent().map(PathBuf::from).unwrap_or_default();
+            ksc::build(path, &text, &Disk { src: dir.clone(), lib: Some(dir.join("lib")) }, false, None)
+        }
+    };
+    match result {
+        Ok(o) => {
+            for w in &o.warnings {
+                eprint!("{}", map.render(w));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(d) => {
+            eprint!("{}", map.render(&d));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// A project's files, with one of them (`module`) as the editor has it.
+struct Edited {
+    disk: Disk,
+    module: Vec<String>,
+    text: String,
+}
+
+impl ksc::modules::Files for Edited {
+    fn read(&self, path: &[String]) -> Result<Option<ksc::modules::Found>, String> {
+        let found = self.disk.read(path)?;
+        if path != self.module.as_slice() {
+            return Ok(found);
+        }
+        let shown = found.map_or_else(|| self.disk.src.join(self.module.join("/")).with_extension("ks").display().to_string(), |f| f.shown);
+        Ok(Some(ksc::modules::Found { shown, src: self.text.clone(), object: None }))
+    }
 }
 
 /// `build/obj/` under `dir`.

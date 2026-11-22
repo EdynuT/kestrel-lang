@@ -363,7 +363,8 @@ impl Checker<'_> {
                         && is_lent_ty(self.p.ret)
                     {
                         let from = lent_root(e).map(|d| self.root(d));
-                        if from != Some(k) {
+                        // `return null;` (from `-> &T?`) lends nothing.
+                        if from != Some(k) && !is_null(e) {
                             let src = &ps[k].name;
                             return Err(Diagnostic::new(format!("the result must be borrowed from `{src}`"), e.span).with_note(
                                 format!("a `-> &T` proc lends part of its first `&` parameter (`{src}`), so the caller knows what stays borrowed"),
@@ -643,6 +644,15 @@ impl Checker<'_> {
 
 /// The local a lent argument borrows from (`&c`, or `c.items` read
 /// through an object), if it is one.
+/// The `null` literal (NaT; for an interface value, both of its parts).
+fn is_null(e: &HExpr) -> bool {
+    match &e.kind {
+        HExprKind::Word(w) => w.is_nat(),
+        HExprKind::StructLit(parts) => !parts.is_empty() && parts.iter().all(is_null),
+        _ => false,
+    }
+}
+
 fn lent_root(e: &HExpr) -> Option<LocalId> {
     if !matches!(e.ty, Type::Lent(_) | Type::LentClass(_) | Type::LentIface(_) | Type::LentOptClass(_) | Type::LentOptIface(_)) {
         return None;

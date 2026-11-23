@@ -18,7 +18,7 @@ use lexer.TokenKind;
 public class Lexer {
     source: text;
     position: int;
-    tokens[]: Token;
+    public tokens[]: Token;
 
     public proc Lexer(source: text) -> Lexer {
         empty[]: Token = {};

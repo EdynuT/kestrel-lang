@@ -4,12 +4,11 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 fn compile_lexer_program(source: &str) -> kestrel_core::Module {
-    let lexer = include_str!("../../../compiler/src/lexer/Lexer.ks");
-    // Expose the token array only in this test: the lexer has no token accessor yet.
-    let instrumented = lexer.replacen("    tokens[]: Token;", "    public tokens[]: Token;", 1);
-    assert_ne!(instrumented, lexer, "lexer token field was not found");
     let files = HashMap::from([
-        ("lexer.Lexer".to_string(), instrumented),
+        (
+            "lexer.Lexer".to_string(),
+            include_str!("../../../compiler/src/lexer/Lexer.ks").to_string(),
+        ),
         (
             "lexer.Token".to_string(),
             include_str!("../../../compiler/src/lexer/Token.ks").to_string(),

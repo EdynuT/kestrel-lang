@@ -1,14 +1,14 @@
 //! The files of a program: the main file and every file it reaches through
 //! `use`, each parsed and resolved (see [`crate::resolve`]).
 //!
-//! `use jogo.Mapa;` is the file `jogo/Mapa.ks`: folders are lowercase and
+//! `use jogo.Mapa;` is the file `jogo/Mapa.kstl`: folders are lowercase and
 //! files PascalCase, like Java's packages and classes. It is looked up in
 //! three places:
 //!
 //! - `std.*`: the standard library, inside `ksc` ([`STD`]);
-//! - the source folder (`src/` of a project): `jogo/Mapa.ks`;
-//! - the library folder (`lib/`): `jogo/Mapa.ksb`, a file compiled
-//!   elsewhere, which keeps its declarations so it works without the `.ks`.
+//! - the source folder (`src/` of a project): `jogo/Mapa.kstl`;
+//! - the library folder (`lib/`): `jogo/Mapa.kstb`, a file compiled
+//!   elsewhere, which keeps its declarations so it works without the `.kstl`.
 //!
 //! Two files may use each other (a cycle): each one only needs the
 //! other's declarations.
@@ -27,7 +27,7 @@ use crate::{lexer, parser, resolve};
 type R<T> = Result<T, Diagnostic>;
 
 // The standard library: `STD`, a list of (`collections.HashMap`, text),
-// made by `build.rs` from the `.ks` files under the repository's `std/`.
+// made by `build.rs` from the `.kstl` files under the repository's `std/`.
 include!(concat!(env!("OUT_DIR"), "/std.rs"));
 
 /// The text of a file of the standard library: `collections.List`.
@@ -47,7 +47,7 @@ pub struct Found {
     pub shown: String,
     /// Kestrel text: the file, or the declarations a library keeps.
     pub src: String,
-    /// A library (from `lib/`): its compiled code. `None` for a `.ks`.
+    /// A library (from `lib/`): its compiled code. `None` for a `.kstl`.
     pub object: Option<Module>,
 }
 
@@ -64,7 +64,7 @@ pub trait Files: Sync {
     }
 }
 
-/// Files on disk: `.ks` under `src`, libraries (`.ksb`) under `lib`.
+/// Files on disk: `.kstl` under `src`, libraries (`.kstb`) under `lib`.
 pub struct Disk {
     pub src: PathBuf,
     pub lib: Option<PathBuf>,
@@ -88,8 +88,8 @@ fn file_of(dir: &std::path::Path, path: &[String], ext: &str) -> PathBuf {
 
 impl Files for Disk {
     fn read(&self, path: &[String]) -> Result<Option<Found>, String> {
-        let ks = file_of(&self.src, path, "ks");
-        let ksb = self.lib.as_ref().map(|lib| file_of(lib, path, "ksb")).filter(|f| f.is_file());
+        let ks = file_of(&self.src, path, "kstl");
+        let ksb = self.lib.as_ref().map(|lib| file_of(lib, path, "kstb")).filter(|f| f.is_file());
         if ks.is_file() {
             if let Some(ksb) = ksb {
                 return Err(format!("both {} and {} exist; keep one", ks.display(), ksb.display()));
@@ -119,7 +119,7 @@ impl Files for NoFiles {
 /// Files held in memory, by dotted path (`"jogo.Mapa"`); for tests.
 impl Files for HashMap<String, String> {
     fn read(&self, path: &[String]) -> Result<Option<Found>, String> {
-        let found = self.get(&path.join(".")).map(|src| Found { shown: format!("{}.ks", path.join("/")), src: src.clone(), object: None });
+        let found = self.get(&path.join(".")).map(|src| Found { shown: format!("{}.kstl", path.join("/")), src: src.clone(), object: None });
         Ok(found)
     }
 }
@@ -189,7 +189,7 @@ pub fn load(root_path: &str, root_src: &str, files: &dyn Files, map: &mut Source
                     let (found, origin) = if path[0] == "std" {
                         let key = path[1..].join(".");
                         let text = STD.iter().find(|(k, _)| *k == key).map(|(_, t)| t.to_string());
-                        let found = text.map(|src| Found { shown: format!("<{}.ks>", path.join("/")), src, object: None });
+                        let found = text.map(|src| Found { shown: format!("<{}.kstl>", path.join("/")), src, object: None });
                         (files.std_file(&path).or(found), Origin::Std)
                     } else {
                         let found = files.read(&path).map_err(|e| Diagnostic::new(e, u.span))?;
@@ -235,7 +235,7 @@ fn check_path(u: &crate::ast::UseDecl) -> R<()> {
     if !file.name.starts_with(|c: char| c.is_ascii_uppercase()) {
         let fixed = capitalize(&file.name);
         return Err(Diagnostic::new("file names are PascalCase, like types", file.span)
-            .with_note(format!("name the file `{fixed}.ks` and write `{fixed}` here")));
+            .with_note(format!("name the file `{fixed}.kstl` and write `{fixed}` here")));
     }
     Ok(())
 }
@@ -248,8 +248,8 @@ fn missing(path: &[String], span: Span) -> Diagnostic {
         let note = if have.is_empty() { "the standard library is still empty".to_string() } else { format!("it has {}", have.join(", ")) };
         return Diagnostic::new(format!("the standard library has no `{}`", path.join(".")), span).with_note(note);
     }
-    Diagnostic::new(format!("cannot find `{file}.ks` (or `lib/{file}.ksb`)"), span)
-        .with_note("`use jogo.Mapa;` reads `jogo/Mapa.ks` from the source folder, or the library `lib/jogo/Mapa.ksb`")
+    Diagnostic::new(format!("cannot find `{file}.kstl` (or `lib/{file}.kstb`)"), span)
+        .with_note("`use jogo.Mapa;` reads `jogo/Mapa.kstl` from the source folder, or the library `lib/jogo/Mapa.kstb`")
 }
 
 /// What file `k` sees.

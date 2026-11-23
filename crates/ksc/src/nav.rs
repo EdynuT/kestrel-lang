@@ -113,7 +113,7 @@ pub fn by_id(units: &[Unit], id: &str) -> Option<Target> {
     Some((u, key.to_string()))
 }
 
-/// A file stands for its main item (`Shape` for `Shape.ks`), when it has one.
+/// A file stands for its main item (`Shape` for `Shape.kstl`), when it has one.
 fn main_item(units: &[Unit], (u, key): &Target) -> Target {
     let alias = units[*u].info.alias();
     if key.is_empty() && units[*u].program.docs.contains_key(alias) {
@@ -192,7 +192,7 @@ mod tests {
         .into();
         let main = "use Shape;\n@impl(Shape)\nclass Circle {\n    r: real;\n    @override\n    public proc area(&self) -> real { return self.r; }\n}\nproc main() {}\n";
         let mut map = SourceMap::default();
-        let units = load("main.ks", main, &files, &mut map).unwrap();
+        let units = load("main.kstl", main, &files, &mut map).unwrap();
         let names = |ts: Vec<crate::docs::Target>| ts.into_iter().map(|(_, k)| k).collect::<Vec<_>>();
         let shape = (units.iter().position(|u| u.info.path == "Shape").unwrap(), "Shape".to_string());
         assert_eq!(names(super::implementations(&units, &shape)), ["Circle"]);

@@ -430,7 +430,7 @@ impl Parser {
         Ok((item, public))
     }
 
-    /// `use Geometry;` or `use Shapes.Circle;` (the file `Shapes/Circle.ks`).
+    /// `use Geometry;` or `use Shapes.Circle;` (the file `Shapes/Circle.kstl`).
     fn use_decl(&mut self) -> PResult<UseDecl> {
         let start = self.expect(Tok::Use)?;
         let mut path = vec![self.path_part()?];

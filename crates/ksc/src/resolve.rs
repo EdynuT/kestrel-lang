@@ -2,10 +2,10 @@
 //!
 //! Runs on each file right after it is parsed. Every top-level item of a
 //! file that is not the program's main file gets its full name: `area` in
-//! `Geometry.ks` becomes `Geometry.area`, in its own file and in every file
+//! `Geometry.kstl` becomes `Geometry.area`, in its own file and in every file
 //! that uses it, so names from different files never clash and the later
 //! passes see one flat program. The item named like its file (`List` in
-//! `List.ks`) is the file's main item and is just `List`. Items of the main
+//! `List.kstl`) is the file's main item and is just `List`. Items of the main
 //! file keep their names (no file can use it, as with Go's `package main`).
 //!
 //! An item another file reads must be `public`.
@@ -62,7 +62,7 @@ pub const NATIVES: &[(&str, &str, &str)] = &[
 /// The top-level names of one file.
 #[derive(Clone, Debug)]
 pub struct ModuleInfo {
-    /// `Shapes.Circle` (for `Shapes/Circle.ks`); the file name for the main file.
+    /// `Shapes.Circle` (for `Shapes/Circle.kstl`); the file name for the main file.
     pub path: String,
     /// The program's main file: its names stay as written.
     pub root: bool,
@@ -141,7 +141,7 @@ impl ModuleInfo {
         }
     }
 
-    /// The item named like the file, if any (`class List` in `List.ks`).
+    /// The item named like the file, if any (`class List` in `List.kstl`).
     fn main_item(&self) -> Option<&str> {
         (!self.root && self.items.contains_key(self.alias())).then(|| self.alias())
     }
@@ -178,7 +178,7 @@ impl ModuleInfo {
 #[derive(Clone, Debug)]
 pub struct Scope {
     pub me: Rc<ModuleInfo>,
-    /// `Circle` -> the file `Shapes/Circle.ks`.
+    /// `Circle` -> the file `Shapes/Circle.kstl`.
     pub uses: HashMap<String, Rc<ModuleInfo>>,
 }
 
@@ -235,7 +235,7 @@ impl Resolver<'_> {
         }
         if !m.public.contains(item) {
             return Err(Diagnostic::new(format!("`{item}` is private to `{}`", m.path), span)
-                .with_note(format!("mark it `public` in {}.ks to use it here", m.path.replace('.', "/"))));
+                .with_note(format!("mark it `public` in {}.kstl to use it here", m.path.replace('.', "/"))));
         }
         Ok(match m.items[item] {
             Kind::Native(builtin) => builtin.to_string(),

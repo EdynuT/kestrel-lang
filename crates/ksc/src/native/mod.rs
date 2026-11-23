@@ -1,10 +1,10 @@
-//! The native backend: a linked program (`.ksb`) -> an x86-64 ELF
+//! The native backend: a linked program (`.kstb`) -> an x86-64 ELF
 //! executable, written here with no assembler or linker.
 //!
 //! The executable is a copy of the runtime (`ksvm`, which has the heap,
 //! texts, real numbers and printing) with one more segment: the program's
-//! machine code, its `.ksb` and a table of addresses ([`elf`]). Each
-//! instruction of the `.ksb` becomes machine code ([`x86`]).
+//! machine code, its `.kstb` and a table of addresses ([`elf`]). Each
+//! instruction of the `.kstb` becomes machine code ([`x86`]).
 //!
 //! The VM's stack and variables are used as they are, in memory: `rbx`
 //! points just past the top of the stack and `r12` at the variables of the
@@ -217,7 +217,7 @@ struct Gen<'a> {
 }
 
 impl Gen<'_> {
-    /// Gives the handlers' landings: their offset in the `.ksb` code and label.
+    /// Gives the handlers' landings: their offset in the `.kstb` code and label.
     fn function(mut self) -> Result<Vec<(u32, Label)>, String> {
         let f = &self.module.functions[self.k];
         let mut ops = Vec::new();

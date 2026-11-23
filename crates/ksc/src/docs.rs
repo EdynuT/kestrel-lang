@@ -104,7 +104,7 @@ fn found(units: &[Unit], map: &SourceMap, me: usize, offset: usize) -> Vec<Targe
     if has(me, &last) {
         return one(me, last);
     }
-    // `List` (the main item of `List.ks`) or `Texts` (a file).
+    // `List` (the main item of `List.kstl`) or `Texts` (a file).
     if let Some(u) = used(&last) {
         return if has(u, &last) { one(u, last) } else { one(u, String::new()) };
     }

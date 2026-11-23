@@ -1,4 +1,4 @@
-//! Builds the standard library into `ksc`: every `.ks` file under the
+//! Builds the standard library into `ksc`: every `.kstl` file under the
 //! repository's `std/` becomes an entry of `STD` (see `modules.rs`).
 
 use std::path::{Path, PathBuf};
@@ -29,7 +29,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let p = e.path();
         if p.is_dir() {
             walk(&p, out);
-        } else if p.extension().is_some_and(|x| x == "ks") {
+        } else if p.extension().is_some_and(|x| x == "kstl") {
             out.push(p);
         }
     }

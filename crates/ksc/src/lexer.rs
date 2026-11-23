@@ -1,4 +1,4 @@
-//! Lexer: turns `.ks` source text into tokens (SPEC §2, §11).
+//! Lexer: turns `.kstl` source text into tokens (SPEC §2, §11).
 //!
 //! Instruction mnemonics (`add`, `mov`, ...) and built-ins (`print`, `show`,
 //! ...) are plain identifiers; the parser recognizes them by context, so they

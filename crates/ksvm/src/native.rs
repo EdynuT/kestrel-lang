@@ -17,7 +17,7 @@ use kestrel_core::Module;
 use crate::{Trap, Value, Vm};
 
 /// What `ksc` writes into [`KRT_PROGRAM`]: where its code, the program's
-/// `.ksb` and the table of addresses are, as distances from `KRT_PROGRAM`.
+/// `.kstb` and the table of addresses are, as distances from `KRT_PROGRAM`.
 #[repr(C)]
 pub struct Program {
     pub present: u64,
@@ -195,7 +195,7 @@ pub fn run_if_present(args: Vec<String>) -> Option<u8> {
 }
 
 /// The table `ksc` writes: for each function, its address and the
-/// addresses of its handlers (by offset in the `.ksb` code).
+/// addresses of its handlers (by offset in the `.kstb` code).
 fn read_table(t: &[u8], at: impl Fn(i64) -> usize) -> (Vec<usize>, HashMap<(usize, usize), usize>) {
     let mut pos = 0;
     let mut take = |n: usize| {

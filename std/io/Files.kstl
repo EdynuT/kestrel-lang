@@ -4,7 +4,7 @@
 /*
  * Files: reading, writing and checking that they exist.
  *
- * Paths are as the system writes them (`notes.txt`, `src/Main.ks`),
+ * Paths are as the system writes them (`notes.txt`, `src/Main.kstl`),
  * relative to the folder the program runs in. A file that cannot be read
  * or written is a failure (a `Trap`).
  *

@@ -33,7 +33,7 @@ fn compile(src: &str) -> Result<kestrel_core::Module, ksc::diag::Diagnostic> {
 }
 
 
-const TOUR: &str = include_str!("../../ksc/tests/tour.ks");
+const TOUR: &str = include_str!("../../ksc/tests/tour.kstl");
 
 const ERRORS: &str = r#"
 @impl(Error)
@@ -64,7 +64,7 @@ proc main() -> int {
 
 /// Stdout and exit code: by the interpreter, then by the native executable.
 fn both(name: &str, src: &str) -> ((String, i32), (String, i32)) {
-    let module = compile(src).unwrap_or_else(|d| panic!("{}", d.render("test.ks", src)));
+    let module = compile(src).unwrap_or_else(|d| panic!("{}", d.render("test.kstl", src)));
     let mut out = Vec::new();
     let r = Vm::new(&module, "".as_bytes(), &mut out).with_args(vec!["a".into(), "b".into()]).run();
     let vm = (String::from_utf8(out).unwrap(), i32::from(ksvm::exit_code(r)));

@@ -1,4 +1,4 @@
-//! Code generator: checked [`Hir`] -> `.ksb` [`Module`].
+//! Code generator: checked [`Hir`] -> `.kstb` [`Module`].
 //!
 //! The VM is a stack machine, so expressions compile to postfix order.
 //! Locals become frame slots (slot 0..8 is shown as R-4..R+4): parameters

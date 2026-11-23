@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /*
- * The compiler's entry point: `ksc run File.ks` reads the file and
+ * The compiler's entry point: `ksc run File.kstl` reads the file and
  * prints its tokens, one per line, in the same format as
- * `ksc File.ks --tokens`.
+ * `ksc File.kstl --tokens`.
  *
  * A `Diagnostic` from the lexer is printed as `error: ...` and the
  * program exits with status 1.

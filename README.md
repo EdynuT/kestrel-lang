@@ -4,7 +4,7 @@ An experimental programming language for a **balanced-ternary** virtual machine.
 
 Kestrel targets the BET-VM, a simulated 27-trit processor where every digit is `-1`, `0` or `+1`. The language has three-valued Kleene logic, a poison value (`NaT`) for invalid results instead of silent wrap-around, strict linear ownership with no garbage collector, and arrays that can be indexed from the center (`sym`).
 
-> **Status:** hobby project. The [specification](SPEC.md), the compiler (`ksc`) and the VM (`ksvm`) work end to end. See [`crates/ksc/tests/tour.ks`](crates/ksc/tests/tour.ks).
+> **Status:** hobby project. The [specification](SPEC.md), the compiler (`ksc`) and the VM (`ksvm`) work end to end. See [`crates/ksc/tests/tour.kstl`](crates/ksc/tests/tour.kstl).
 
 ## A taste
 
@@ -50,7 +50,7 @@ proc main() -> int {
 | Borrowing | `&v[]: int`, `c: &Conta`, caller writes `&x` | `&mut [T]`, `&mut T` |
 | Arrays | `a[]: int = {1, 2, 3}` (0-based) or `sym s[]: int = claim 5` (`-2..+2`) | `int[]`, or `malloc` with the pointer in the middle |
 | Errors | `proc f() throws NotFound`, `try { } catch e: NotFound { }`; checked by the compiler; VM failures are a catchable `Trap` | Java checked exceptions |
-| Files | `use shapes.Circle;` reads `src/shapes/Circle.ks`, then `Circle.area(2.0)`; only `public` items are visible; each file compiles to its own `.ksb`, linked into one executable | C `#include` + `ld`, without writing headers |
+| Files | `use shapes.Circle;` reads `src/shapes/Circle.kstl`, then `Circle.area(2.0)`; only `public` items are visible; each file compiles to its own `.kstb`, linked into one executable | C `#include` + `ld`, without writing headers |
 
 Negation is free in balanced ternary: flip every trit (`0t+0-` = 8, `0t-0+` = −8). There is no sign bit and no two's complement.
 
@@ -58,9 +58,9 @@ Negation is free in balanced ternary: flip every trit (`0t+0-` = 8, `0t-0+` = �
 
 ```
 crates/
-├── kestrel-core/   ternary int and real types, instruction set, .ksb format, linker
+├── kestrel-core/   ternary int and real types, instruction set, .kstb format, linker
 ├── ksc/            compiler: lexer, parser, modules, type checker, checked errors, ownership checker, codegen, native x86-64 backend (own assembler and ELF writer)
-└── ksvm/           virtual machine, runs .ksb; the runtime of native executables
+└── ksvm/           virtual machine, runs .kstb; the runtime of native executables
 std/                the standard library (Kestrel), built into ksc
 SPEC.md             language and VM specification (Portuguese)
 ```
@@ -71,22 +71,22 @@ Requires a recent stable Rust toolchain.
 
 ```
 cargo build --release   # ksc and ksvm in target/release (keep them together: ksvm is the runtime of every native executable)
-ksc new Game         # creates Game/ with src/Main.ks
+ksc new Game         # creates Game/ with src/Main.kstl
 cd Game
 ksc run              # compiles src/ into build/obj/ and the executable build/Game, then runs it
 ksc test             # runs every @test proc in src/
-ksc check File.ks    # only reports errors (for editors; `--stdin` reads the text)
-ksc doc File.ks --at 120  # the /* */ documentation of the name at that byte (editor hover)
-ksc build --ksb      # writes build/Game.ksb instead, to run with ksvm
-ksc File.ks          # one file, gcc style: writes the executable File
-ksc File.ks --disasm # shows the bytecode
+ksc check File.kstl    # only reports errors (for editors; `--stdin` reads the text)
+ksc doc File.kstl --at 120  # the /* */ documentation of the name at that byte (editor hover)
+ksc build --kstb      # writes build/Game.kstb instead, to run with ksvm
+ksc File.kstl          # one file, gcc style: writes the executable File
+ksc File.kstl --disasm # shows the bytecode
 ```
 
 The compiler rejects ownership mistakes before anything runs:
 
 ```
 error: the arms of this `tri` leave `data` in different states
- --> leak.ks:4:5
+ --> leak.kstl:4:5
   |
 4 |     tri t {
   |     ^^^^^^^

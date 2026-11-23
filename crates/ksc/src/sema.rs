@@ -1978,7 +1978,7 @@ impl Checker {
             err(format!("unknown name `{name}`"), span).with_note(format!("add `use std.{key};` at the top of the file"))
         } else if name.starts_with(|c: char| c.is_ascii_uppercase()) {
             err(format!("unknown name `{name}`"), span)
-                .with_note(format!("if it is another file (`{name}.ks`), add `use {name};` at the top of this one"))
+                .with_note(format!("if it is another file (`{name}.kstl`), add `use {name};` at the top of this one"))
         } else {
             err(format!("unknown name `{name}`"), span)
         }

@@ -2,7 +2,7 @@
 //!
 //! Each trit takes 2 bits (SPEC §1.1): `-` = 10, `0` = 00, `+` = 01, `?` = 11.
 //! Trit 0 (least significant) sits in bits 0..2, trit 26 in bits 52..54.
-//! This form is used only at the edges: `.ksb` files, `dump`, and the
+//! This form is used only at the edges: `.kstb` files, `dump`, and the
 //! `0t` / `0v` notations. Arithmetic happens on [`Word`].
 
 use crate::word::{Word, WORD_MAX, WORD_TRITS};
@@ -17,7 +17,7 @@ impl Word27 {
     /// The canonical NaT: every trit is `?` (11).
     pub const NAT: Word27 = Word27(MASK_54);
 
-    /// Raw 54-bit pattern, as written to `.ksb` files.
+    /// Raw 54-bit pattern, as written to `.kstb` files.
     pub fn bits(self) -> u64 {
         self.0
     }

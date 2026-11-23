@@ -1,4 +1,4 @@
-//! The BET virtual machine: runs a verified `.ksb` [`Module`].
+//! The BET virtual machine: runs a verified `.kstb` [`Module`].
 //!
 //! Values are tagged ([`Value`]), the heap hands out generation-checked
 //! pointers, and any Trap zeroes the whole heap and every register before
@@ -106,7 +106,7 @@ pub struct Trap {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Call {
     pub func: String,
-    /// The `.ks` file and line, when the program has them.
+    /// The `.kstl` file and line, when the program has them.
     pub file: String,
     pub line: Option<u32>,
     /// The byte in the function's code.
@@ -132,8 +132,8 @@ impl fmt::Display for Call {
 /// `TRAP: reason`, then one line per call, innermost first (like Java's):
 /// ```text
 /// TRAP: division by zero
-///   at divide (Main.ks:3)
-///   at main (Main.ks:9)
+///   at divide (Main.kstl:3)
+///   at main (Main.kstl:9)
 /// ```
 impl fmt::Display for Trap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -230,7 +230,7 @@ pub struct Vm<'m, R, W> {
     /// Slots of collected texts, reused by new ones; `text_free[i]` marks them.
     free_texts: Vec<u32>,
     text_free: Vec<bool>,
-    /// Program arguments (`ksvm prog.ksb a b c` gives `a`, `b`, `c`).
+    /// Program arguments (`ksvm prog.kstb a b c` gives `a`, `b`, `c`).
     args: Vec<String>,
     /// Instructions left before a Trap, if limited (see [`Vm::with_fuel`]).
     fuel: Option<u64>,

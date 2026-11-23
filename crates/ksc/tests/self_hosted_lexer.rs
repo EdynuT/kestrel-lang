@@ -7,22 +7,22 @@ fn compile_lexer_program(source: &str) -> kestrel_core::Module {
     let files = HashMap::from([
         (
             "lexer.Lexer".to_string(),
-            include_str!("../../../compiler/src/lexer/Lexer.ks").to_string(),
+            include_str!("../../../compiler/src/lexer/Lexer.kstl").to_string(),
         ),
         (
             "diag.Diagnostic".to_string(),
-            include_str!("../../../compiler/src/diag/Diagnostic.ks").to_string(),
+            include_str!("../../../compiler/src/diag/Diagnostic.kstl").to_string(),
         ),
         (
             "lexer.Token".to_string(),
-            include_str!("../../../compiler/src/lexer/Token.ks").to_string(),
+            include_str!("../../../compiler/src/lexer/Token.kstl").to_string(),
         ),
         (
             "lexer.TokenKind".to_string(),
-            include_str!("../../../compiler/src/lexer/TokenKind.ks").to_string(),
+            include_str!("../../../compiler/src/lexer/TokenKind.kstl").to_string(),
         ),
     ]);
-    let (map, result) = ksc::compile_program("Main.ks", source, &files, true);
+    let (map, result) = ksc::compile_program("Main.kstl", source, &files, true);
     result
         .unwrap_or_else(|d| panic!("{}", map.render(&d)))
         .module

@@ -1,4 +1,4 @@
-//! The linker: object files (one per `.ks` file) -> one program.
+//! The linker: object files (one per `.kstl` file) -> one program.
 //!
 //! Like `ld`: every function is found by name. A call to a function of
 //! another object (an [`Kind::Import`]) is pointed at its code, shared

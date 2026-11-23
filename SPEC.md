@@ -1,6 +1,6 @@
 # Kestrel — Especificação v0.1
 
-- Código-fonte: `.ks` · Bytecode: `.ksb`
+- Código-fonte: `.kstl` · Bytecode: `.kstb`
 - Alvo: BET-VM, processador ternário balanceado de 27 trits
 - Paradigma: imperativo estruturado, determinístico, sem GC, posse linear estrita
 - Lógica: Kleene K₃ com propagação de veneno (NaT)
@@ -71,7 +71,7 @@ valor = (mantissa / 3²⁰) × 3^expoente
 
 ### 1.6 `text` (string)
 
-- É um literal imutável guardado no pool de strings do `.ksb`, como o `const char*` do C. É copiável e **não precisa de `burn`**.
+- É um literal imutável guardado no pool de strings do `.kstb`, como o `const char*` do C. É copiável e **não precisa de `burn`**.
 - `s[i]` devolve o `tryte` da posição `i`. **O índice começa em 0**, como em C (como os arrays sem `sym`). Índice fora de `0 .. len(s)-1` dispara **Trap**.
 - `len(s)` devolve o tamanho como `int`.
 - `a + b` cria um texto novo: `saudacao: text = "Olá, " + nome + "!";`. Só vale **texto + texto**: `"x = " + 5` é **erro de tipo** (use `Texts.toText(5)`).
@@ -279,16 +279,16 @@ Toda falha da tabela vira o erro `Trap`, que um `catch e: Trap` (ou `catch e: Er
 
 ```
 ksvm: TRAP: division by zero (handle it with `on NaT`)
-  at calc.Math.divide (src/calc/Math.ks:3)
-  at deep (src/Main.ks:10) (30 times)
-  at main (src/Main.ks:15)
+  at calc.Math.divide (src/calc/Math.kstl:3)
+  at deep (src/Main.kstl:10) (30 times)
+  at main (src/Main.kstl:15)
 ```
 
 ## 8. Sintaxe
 
 A sintaxe segue o estilo C/Java/Rust. O que é próprio do Kestrel vem do ternário (`tri`, `<=>`, `walk` simétrico, `on NaT`) e da posse (`&`, `give`, `burn`).
 
-**Convenção de nomes** (a mesma do Java): procs, variáveis e campos em `camelCase` (`readFile`, `idadeMinima`); tipos (`struct`, `enum`) em `PascalCase` (`TokenKind`); `const` em `MAIÚSCULAS` (`MAX_SIZE`). Os built-ins seguem essa convenção. O compilador não obriga, mas a biblioteca padrão e o `ksc.ks` seguem.
+**Convenção de nomes** (a mesma do Java): procs, variáveis e campos em `camelCase` (`readFile`, `idadeMinima`); tipos (`struct`, `enum`) em `PascalCase` (`TokenKind`); `const` em `MAIÚSCULAS` (`MAX_SIZE`). Os built-ins seguem essa convenção. O compilador não obriga, mas a biblioteca padrão e o `ksc.kstl` seguem.
 
 ### 8.1 `proc` e `return`
 
@@ -495,7 +495,7 @@ Continuam sem `use`, porque fazem parte da linguagem: `len`, as operações de a
 | `Files.writeBytes(caminho, arr)` | Grava cada célula de um array como um byte. Célula fora de `0..255` dispara **Trap** |
 | `Console.readLine()` | Uma linha da entrada padrão, sem o `\n`. No fim da entrada, devolve `""` |
 | `Console.eof()` | `+` se a entrada padrão acabou |
-| `Process.argCount()` / `Process.arg(i)` | Argumentos do programa: `ksvm prog.ksb a b c` dá `Process.arg(0) == "a"` |
+| `Process.argCount()` / `Process.arg(i)` | Argumentos do programa: `ksvm prog.kstb a b c` dá `Process.arg(0) == "a"` |
 | `Process.exit(código)` | Encerra o programa com esse código de saída. É um comando que não volta, como `return`: um `proc` pode terminar nele |
 
 #### 8.6.1 `printf`
@@ -913,7 +913,7 @@ proc soma(a: int, b: int) -> int { return a + b; }
 ```
 
 - `assert(cond);` confere que `cond` é verdade. Se for falsa (ou 0/NaT), dispara Trap com a linha e a condição como foi escrita: `assert failed (line 3): somar(2, 3) == 5`. Com uma mensagem, `assert(cond, "texto");`, ela aparece no lugar da condição. A mensagem é um texto literal. `assert` é um comando, não um valor.
-- `@test` marca um proc **sem parâmetros e sem retorno** como teste. `ksc --test arquivo.ks` compila e roda cada teste numa VM separada, sem gravar o `.ksb`, e mostra `ok`/`FAILED` de cada um, o motivo e o que o teste imprimiu (só quando falha), e no fim `test result: N passed, M failed`. O comando sai com código 1 se algum teste falhou.
+- `@test` marca um proc **sem parâmetros e sem retorno** como teste. `ksc --test arquivo.kstl` compila e roda cada teste numa VM separada, sem gravar o `.kstb`, e mostra `ok`/`FAILED` de cada um, o motivo e o que o teste imprimiu (só quando falha), e no fim `test result: N passed, M failed`. O comando sai com código 1 se algum teste falhou.
 - Um teste falha se der Trap (um `assert` que falhou, uma divisão por zero...) ou se chamar `Process.exit(n)` com `n` diferente de 0.
 - Os testes são compilados junto com o programa (o compilador confere tipos e posse deles também), mas o `main` não os chama. Com `--test`, o arquivo pode nem ter `main`.
 - `@deprecated` (ou `@deprecated("use outra")`) marca um proc, um método ou uma classe como **obsoleto**. Continua funcionando, mas cada uso fora dele mostra um aviso (`warning:`) com a mensagem, e a compilação segue. Dentro da própria classe (ou do próprio proc) não há aviso.
@@ -930,24 +930,24 @@ proc soma(a: int, b: int) -> int { return a + b; }
 | Parâmetros por `proc` (valores: um struct conta um por campo) | 243 = 3⁵ | Erro de compilação |
 | Chamadas aninhadas na execução | 6.561 = 3⁸ | Trap: "call stack overflow" |
 
-Todos os limites são potências de 3. Os de parâmetros e variáveis também cabem nos campos de 8 e 16 bits do `.ksb`.
+Todos os limites são potências de 3. Os de parâmetros e variáveis também cabem nos campos de 8 e 16 bits do `.kstb`.
 
 ### 8.16 Arquivos: `use` e `public`
 
 Um programa pode ter vários arquivos. O arquivo principal tem o `main`; os outros entram com `use`, no topo do arquivo:
 
 ```
-// src/Geometry.ks
+// src/Geometry.kstl
 public const PI: real = 3.14;
 public struct Point { x: int; y: int; }
 public proc area(r: real) -> real { return PI * square(r); }
 proc square(x: real) -> real { return x * x; }   // só deste arquivo
 
-// src/shapes/Circle.ks
+// src/shapes/Circle.kstl
 use Geometry;
 @impl(Geometry.Shape) public class Circle { ... }
 
-// src/Main.ks
+// src/Main.kstl
 use Geometry;
 use shapes.Circle;
 use std.collections.HashMap;
@@ -960,13 +960,13 @@ proc main() {
 }
 ```
 
-- **Caminho:** como pacote e classe no Java, as pastas são minúsculas e o arquivo é PascalCase: `use shapes.Circle;` é o arquivo `shapes/Circle.ks`. Uma pasta pode ter o nome de uma palavra da linguagem (`std.text`).
+- **Caminho:** como pacote e classe no Java, as pastas são minúsculas e o arquivo é PascalCase: `use shapes.Circle;` é o arquivo `shapes/Circle.kstl`. Uma pasta pode ter o nome de uma palavra da linguagem (`std.text`).
 - **Onde se procura:**
   1. `std.…`: a biblioteca padrão, embutida no `ksc` e organizada por assunto (`std.text`, `std.collections`). Nada dela entra sem `use`.
-  2. A pasta do código (`src/` num projeto): `shapes/Circle.ks`.
-  3. A pasta de bibliotecas (`lib/`): `shapes/Circle.ksb`, um arquivo já compilado (veja abaixo). Ter o mesmo arquivo em `src/` e em `lib/` é erro.
+  2. A pasta do código (`src/` num projeto): `shapes/Circle.kstl`.
+  3. A pasta de bibliotecas (`lib/`): `shapes/Circle.kstb`, um arquivo já compilado (veja abaixo). Ter o mesmo arquivo em `src/` e em `lib/` é erro.
 - **Sempre com prefixo:** um item de outro arquivo é escrito com o nome do arquivo na frente: `Geometry.area(...)`, `Geometry.Point`, `Geometry.Color.Red`, `Geometry.PI`. Quem lê sabe sempre de onde cada nome vem. O prefixo é a última parte do caminho (`Circle` para `shapes.Circle`); dois `use` com a mesma última parte são erro.
-- **Item principal:** o item com o nome do arquivo (`class Circle` em `Circle.ks`, `class List<T>` em `List.ks`) é escrito só com o nome do arquivo: `Circle(1.5)`, `x: List<int>`, `List<int>()`. Os outros itens desse arquivo não podem ter o nome de um membro dele (`Circle.area` seria ambíguo).
+- **Item principal:** o item com o nome do arquivo (`class Circle` em `Circle.kstl`, `class List<T>` em `List.kstl`) é escrito só com o nome do arquivo: `Circle(1.5)`, `x: List<int>`, `List<int>()`. Os outros itens desse arquivo não podem ter o nome de um membro dele (`Circle.area` seria ambíguo).
 - **Visibilidade:** os itens do topo (`proc`, `const`, `struct`, `enum`, `class`, `interface`) são privados do arquivo, a menos que tenham `public`. As anotações vêm antes: `@impl(Forma) public class Circulo`. Usar um item privado de outro arquivo é erro ("`square` is private to `Geometry`"). Os membros de uma classe continuam com as regras de §8.10.
 - **Ciclos são permitidos:** `A` pode usar `B` e `B` usar `A`. Para compilar um arquivo, o compilador só precisa das *declarações* dos outros (veja abaixo).
 - **O arquivo principal não pode ser usado** por outro (como o `package main` do Go). O que dois arquivos precisam fica num terceiro.
@@ -977,41 +977,41 @@ Não há arquivo de projeto: a estrutura das pastas diz tudo, como no Java e no 
 
 ```
 Jogo/
-├── src/Main.ks          o principal; os `use` partem de src/
-├── src/mundo/Mapa.ks    use mundo.Mapa;
-├── lib/fisica/Corpo.ksb bibliotecas de terceiros (use fisica.Corpo;)
+├── src/Main.kstl          o principal; os `use` partem de src/
+├── src/mundo/Mapa.kstl    use mundo.Mapa;
+├── lib/fisica/Corpo.kstb bibliotecas de terceiros (use fisica.Corpo;)
 └── build/               feito pelo ksc (vai no .gitignore)
-    ├── obj/             um .ksb por arquivo (cache)
+    ├── obj/             um .kstb por arquivo (cache)
     └── Jogo             o executável
 ```
 
 ```
-ksc new Jogo        cria Jogo/ (src/Main.ks e .gitignore)
-ksc build           compila: build/obj/ e o executável build/Jogo (--ksb: build/Jogo.ksb)
+ksc new Jogo        cria Jogo/ (src/Main.kstl e .gitignore)
+ksc build           compila: build/obj/ e o executável build/Jogo (--kstb: build/Jogo.kstb)
 ksc run [args...]   compila e roda
 ksc test            roda os @test de todos os arquivos de src/
-ksc check X.ks      só mostra os erros de X.ks (para editores; sem `main`; `--stdin` lê o texto da entrada)
-ksc doc X.ks --at N a documentação do nome no byte N de X.ks (para o hover do editor)
-ksc std collections/List.ks   mostra um arquivo da biblioteca padrão (embutida no ksc)
-ksc nav X.ks --at N --what definition|implementations|supers   para onde ir (para o editor)
+ksc check X.kstl      só mostra os erros de X.kstl (para editores; sem `main`; `--stdin` lê o texto da entrada)
+ksc doc X.kstl --at N a documentação do nome no byte N de X.kstl (para o hover do editor)
+ksc std collections/List.kstl   mostra um arquivo da biblioteca padrão (embutida no ksc)
+ksc nav X.kstl --at N --what definition|implementations|supers   para onde ir (para o editor)
 ```
 
-- **Biblioteca:** um projeto sem `src/Main.ks` é uma biblioteca. `ksc build` compila todos os arquivos de `src/`, e os `.ksb` de `build/obj/` são o que se entrega: copiados para o `lib/` de outro projeto (mantendo as pastas), funcionam sem o `.ks`, porque cada `.ksb` guarda as declarações do seu arquivo (§10).
-- **Um arquivo avulso**, como no `gcc`: `ksc Prog.ks` lê os `use` a partir da pasta do arquivo (e `lib/` ali), guarda os objetos em `build/obj/` e escreve o executável `Prog` ao lado. Opções: `-o saida`, `--ksb` (um `.ksb` para `ksvm`), `--test`, `--disasm`, `--tokens`, `--ast`.
+- **Biblioteca:** um projeto sem `src/Main.kstl` é uma biblioteca. `ksc build` compila todos os arquivos de `src/`, e os `.kstb` de `build/obj/` são o que se entrega: copiados para o `lib/` de outro projeto (mantendo as pastas), funcionam sem o `.kstl`, porque cada `.kstb` guarda as declarações do seu arquivo (§10).
+- **Um arquivo avulso**, como no `gcc`: `ksc Prog.kstl` lê os `use` a partir da pasta do arquivo (e `lib/` ali), guarda os objetos em `build/obj/` e escreve o executável `Prog` ao lado. Opções: `-o saida`, `--kstb` (um `.kstb` para `ksvm`), `--test`, `--disasm`, `--tokens`, `--ast`.
 
 #### Compilação, como no `gcc`
 
 ```
-src/Main.ks ─────┐                        ┌─ build/obj/Main.ksb ──────┐
-src/Geometry.ks ─┼─ ksc (um por arquivo) ─┼─ build/obj/Geometry.ksb ──┼─ ligador ─ build/Jogo
-lib/fisica/Corpo.ksb ─────────────────────┴─ (já compilado) ──────────┘
+src/Main.kstl ─────┐                        ┌─ build/obj/Main.kstb ──────┐
+src/Geometry.kstl ─┼─ ksc (um por arquivo) ─┼─ build/obj/Geometry.kstb ──┼─ ligador ─ build/Jogo
+lib/fisica/Corpo.kstb ─────────────────────┴─ (já compilado) ──────────┘
 ```
 
 1. **Declarações (o `.h` gerado sozinho):** de cada arquivo o compilador tira o que os outros precisam: assinaturas, campos, constantes, enums e o código dos genéricos (cada arquivo que usa `List<int>` compila a sua cópia). Os corpos dos procs comuns ficam de fora.
-2. **Um objeto por arquivo:** cada `.ks` é checado e compilado sozinho, lendo só as declarações dos arquivos que alcança, e vira um `.ksb` em `build/obj/`.
-3. **Recompilação, como no `make`:** um objeto é refeito só se o seu `.ks` mudou, ou a parte pública de um arquivo que ele alcança, ou o `ksc`. Mudar só o corpo de um proc (ou um comentário) recompila só aquele arquivo. Apagar `build/` recompila tudo.
+2. **Um objeto por arquivo:** cada `.kstl` é checado e compilado sozinho, lendo só as declarações dos arquivos que alcança, e vira um `.kstb` em `build/obj/`.
+3. **Recompilação, como no `make`:** um objeto é refeito só se o seu `.kstl` mudou, ou a parte pública de um arquivo que ele alcança, ou o `ksc`. Mudar só o corpo de um proc (ou um comentário) recompila só aquele arquivo. Apagar `build/` recompila tudo.
 4. **Ligação:** o ligador junta os objetos pelo nome das funções, mantém uma cópia de cada genérico e escreve as funções que dependem do programa inteiro: cada chamada por interface (`$dispatch.Forma.area`) e cada `burn` de um valor de interface (`$burnI.Forma`) testam as classes de todos os arquivos. Por isso um arquivo pode receber, por uma interface, um objeto de uma classe que ele não conhece. Um `match` por classe sem `else` dispara Trap para uma classe que não lista.
-5. **Executável (código de máquina):** o `ksc` traduz o programa para x86-64 e escreve ele mesmo o ELF, sem `as` nem `ld`: uma cópia do `ksvm` (o *runtime*: heap, textos, reais, impressão) com um segmento a mais, que tem o código de máquina, o `.ksb` e uma tabela de endereços. Roda sem instalar nada. Por enquanto só Linux x86-64. Os saltos, as chamadas e os retornos (o código monta o frame sozinho), ler e escrever arrays e campos de objetos e structs (`v[i]`, `len(v)`, `obj.campo`, `ps[i].x`), as constantes de texto e de real, `== null`, mover valores entre variáveis e pilha, as contas (inclusive `/` e `%`) e comparações de `int` e os desvios são instruções x86 de verdade, e o compilador só empurra um valor na pilha da VM quando algo precisa dele lá (variáveis, constantes e resultados ficam guardados até serem usados); as contas com reais e as operações de texto que não criam texto (`==`, `<`, `len`, `s[i]`) chamam direto uma função pequena do runtime; o resto (criar textos, mudar o tamanho de arrays, criar e queimar objetos, E/S, e qualquer conta que dê NaT ou overflow, ou índice fora dos limites) chama o runtime, que faz o mesmo que a VM, mensagens inclusive.
+5. **Executável (código de máquina):** o `ksc` traduz o programa para x86-64 e escreve ele mesmo o ELF, sem `as` nem `ld`: uma cópia do `ksvm` (o *runtime*: heap, textos, reais, impressão) com um segmento a mais, que tem o código de máquina, o `.kstb` e uma tabela de endereços. Roda sem instalar nada. Por enquanto só Linux x86-64. Os saltos, as chamadas e os retornos (o código monta o frame sozinho), ler e escrever arrays e campos de objetos e structs (`v[i]`, `len(v)`, `obj.campo`, `ps[i].x`), as constantes de texto e de real, `== null`, mover valores entre variáveis e pilha, as contas (inclusive `/` e `%`) e comparações de `int` e os desvios são instruções x86 de verdade, e o compilador só empurra um valor na pilha da VM quando algo precisa dele lá (variáveis, constantes e resultados ficam guardados até serem usados); as contas com reais e as operações de texto que não criam texto (`==`, `<`, `len`, `s[i]`) chamam direto uma função pequena do runtime; o resto (criar textos, mudar o tamanho de arrays, criar e queimar objetos, E/S, e qualquer conta que dê NaT ou overflow, ou índice fora dos limites) chama o runtime, que faz o mesmo que a VM, mensagens inclusive.
 
 Por dentro, cada item de outro arquivo ganha o nome completo (`Geometry.area`, `shapes.Circle`), que é o que aparece nas mensagens, nos testes e no `--disasm`. Cada classe recebe um número calculado do nome, igual em todos os arquivos; o ligador confere que duas classes nunca têm o mesmo.
 
@@ -1021,7 +1021,7 @@ Por dentro, cada item de outro arquivo ganha o nome completo (`Geometry.area`, `
 - O primeiro `/* */` do arquivo, seguido de uma linha em branco, documenta o **arquivo** (aparece no `use`).
 - O texto é Markdown. As linhas podem começar com `*`, que não aparece. No fim vêm as tags: `@since`, `@author`, `@param nome texto`, `@return`, `@see Tipo.metodo` e `@deprecated`. O editor mostra cada tag numa seção, como o Javadoc, e o `@see` vira um link para a declaração (inclusive na biblioteca padrão, aberta só para leitura).
 - Um `/* */` não pode ter outro dentro, e um sem `*/` é erro.
-- Uma biblioteca compilada (`lib/x.ksb`) leva a sua documentação junto.
+- Uma biblioteca compilada (`lib/x.kstb`) leva a sua documentação junto.
 
 ```
 /*
@@ -1045,7 +1045,7 @@ public native proc printl(values: ...);
 
 - Só a biblioteca padrão tem `native`, e só os da lista do compilador (`the runtime does nothing called x` para outro nome).
 - `values: ...` aceita quantos valores forem, de qualquer tipo. Um `native` não pode ser sobrecarregado (§8.13.2).
-- O resto da biblioteca é escrito em Kestrel (`Texts.trim`, `List`), e pode ser lido com `ksc std text/Texts.ks`.
+- O resto da biblioteca é escrito em Kestrel (`Texts.trim`, `List`), e pode ser lido com `ksc std text/Texts.kstl`.
 
 ### 8.17 Erros: `throw`, `try` e `catch`
 
@@ -1090,11 +1090,11 @@ proc main() {
 - **Interfaces:** um método de interface pode ter `throws`. O método da classe só lança o que a interface lista, porque é isso que quem chama pela interface trata.
 - **Posse:** o erro pego tem dono como qualquer objeto: o `catch` precisa de `burn e;` ou `give e`. Quando um erro sai de um bloco, o compilador libera sozinho o que ainda tinha dono ali (as variáveis do proc, as do `try`, e o que ele recebeu). Por isso, no começo de cada `catch`, o que o `try` deu, queimou ou criou já não existe: usar é erro. Um `T?` fica vazio.
 
-Por dentro, cada função do `.ksb` tem uma **tabela de tratadores** (como a do `.class` do Java): faixas do código e para onde vai um erro que acontece nelas. A instrução `THROW` procura a faixa na função atual e depois em quem chamou. Cada função com variáveis que têm dono ganha um tratador que as libera e passa o erro adiante.
+Por dentro, cada função do `.kstb` tem uma **tabela de tratadores** (como a do `.class` do Java): faixas do código e para onde vai um erro que acontece nelas. A instrução `THROW` procura a faixa na função atual e depois em quem chamou. Cada função com variáveis que têm dono ganha um tratador que as libera e passa o erro adiante.
 
 ## 9. BET-VM
 
-- **Representação interna:** `i64`, com o NaT como sentinela `i64::MIN`. A forma `Word27` (BET em `u64`, 54 bits) só aparece no `.ksb`, no `dump` e na formatação `0t`/`0v`.
+- **Representação interna:** `i64`, com o NaT como sentinela `i64::MIN`. A forma `Word27` (BET em `u64`, 54 bits) só aparece no `.kstb`, no `dump` e na formatação `0t`/`0v`.
 - **Pilha de avaliação** compartilhada, mais um **frame** por chamada.
 - **Locais:** os índices 0..8 aparecem como os registradores simétricos `R-4 .. R+4`. Do índice 9 em diante, ficam na área de spill do frame, sem limite. Cada `let` recebe um slot próprio, então dois `x` em escopos diferentes não se sobrepõem.
 - **Ponteiro:** `(índice: u32, geração: u32)`. O `burn` zera o bloco, incrementa a geração e devolve o bloco à free-list. Um acesso com geração antiga dispara **Trap**.
@@ -1116,7 +1116,7 @@ Por dentro, cada função do `.ksb` tem uma **tabela de tratadores** (como a do 
 
 **Codificação:** cada instrução tem 1 byte de opcode seguido de operandos de tamanho fixo, em little-endian. Os tipos são `k`, `f` e `a` (`u32`), `s` (`u16`) e `n` (`u8`). As faixas são: pilha `0x0_`, ALU inteira `0x1_`, ALU real `0x2_`, texto e conversão `0x3_`, memória `0x4_`, fluxo `0x5_` e E/S `0x6_`. A tabela completa está em `crates/kestrel-core/src/isa.rs`.
 
-## 10. Formato `.ksb`
+## 10. Formato `.kstb`
 
 Todos os campos são little-endian.
 
@@ -1143,7 +1143,7 @@ Functions      fn_count ×
   handlers: handler_count × (início u32, fim u32, destino u32)
                             um erro em início..fim-1 vai ao destino,
                             com o erro na pilha (os mais internos primeiro)
-  file: u16 len + UTF-8     o `.ks` de onde a função veio (vazio se não se sabe)
+  file: u16 len + UTF-8     o `.kstl` de onde a função veio (vazio se não se sabe)
   line_count u32
   lines: line_count × (offset u32, linha u32)
                             o código a partir de `offset` vem desta linha
@@ -1159,8 +1159,8 @@ Functions      fn_count ×
 (cada nome: `u16 len` + UTF-8)
 
 - **Bit 0 de `flags`** indica que o arquivo traz os nomes das variáveis, para o `dump` mostrar `R0 (acc)`.
-- **Bit 1 de `flags`** marca um **objeto**: um arquivo `.ks` compilado sozinho, ainda não ligado. Funções de outros arquivos aparecem como importadas (sem código), e as de despacho são escritas pelo ligador. O `ksvm` só roda programas ligados.
-- **Executável:** uma cópia do `ksvm` com um segmento ELF a mais (código x86-64, o `.ksb` e a tabela de endereços das funções e dos tratadores); o `ksc` preenche a variável `KRT_PROGRAM` do runtime com onde eles estão. O `ksvm` também ainda roda o formato antigo: uma cópia dele seguida do `.ksb`, do tamanho dele (`u64`) e da marca `K3B-EXE1`.
+- **Bit 1 de `flags`** marca um **objeto**: um arquivo `.kstl` compilado sozinho, ainda não ligado. Funções de outros arquivos aparecem como importadas (sem código), e as de despacho são escritas pelo ligador. O `ksvm` só roda programas ligados.
+- **Executável:** uma cópia do `ksvm` com um segmento ELF a mais (código x86-64, o `.kstb` e a tabela de endereços das funções e dos tratadores); o `ksc` preenche a variável `KRT_PROGRAM` do runtime com onde eles estão. O `ksvm` também ainda roda o formato antigo: uma cópia dele seguida do `.kstb`, do tamanho dele (`u64`) e da marca `K3B-EXE1`.
 - **Verificação na leitura:** o arquivo é rejeitado se algum salto cair fora do início de uma instrução, se um índice de constante, string, função ou slot não existir, se o número de argumentos de uma chamada não bater com os parâmetros da função chamada, ou se um tratador não começar, terminar e apontar para o início de uma instrução.
 
 Os saltos usam um **offset absoluto em bytes** (`u32`) dentro do código da própria função.

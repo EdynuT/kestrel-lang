@@ -48,7 +48,7 @@ impl Diagnostic {
     ///
     /// ```text
     /// error: unexpected character `!`
-    ///  --> demo.ks:3:5
+    ///  --> demo.kstl:3:5
     ///   |
     /// 3 |     !x;
     ///   |     ^
@@ -88,7 +88,7 @@ impl Diagnostic {
 /// One file of a program.
 #[derive(Clone, Debug)]
 pub struct SourceFile {
-    /// The path shown in messages (`Shapes/Circle.ks`).
+    /// The path shown in messages (`Shapes/Circle.kstl`).
     pub path: String,
     pub src: String,
     /// Where the file's first byte sits in the spans.
@@ -142,8 +142,8 @@ mod tests {
         let at = src.find(';').unwrap();
         let d = Diagnostic::new("expected an expression", Span::new(at, at + 1)).with_note("try `1 + 2`");
         assert_eq!(
-            d.render("demo.ks", src),
-            "error: expected an expression\n --> demo.ks:2:18\n  |\n2 |     x: int = 1 + ;\n  |                  ^\n  = note: try `1 + 2`\n"
+            d.render("demo.kstl", src),
+            "error: expected an expression\n --> demo.kstl:2:18\n  |\n2 |     x: int = 1 + ;\n  |                  ^\n  = note: try `1 + 2`\n"
         );
     }
 }

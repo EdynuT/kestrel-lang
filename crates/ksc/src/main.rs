@@ -1,30 +1,30 @@
 //! ksc command line.
 //!
-//! A project is a folder with `src/` (the code; `src/Main.ks` has `main`),
-//! optionally `lib/` (libraries: `.ksb` files) and, made by `ksc`, `build/`:
+//! A project is a folder with `src/` (the code; `src/Main.kstl` has `main`),
+//! optionally `lib/` (libraries: `.kstb` files) and, made by `ksc`, `build/`:
 //!
 //! ```text
-//! ksc new Nome        create the project Nome/ (src/Main.ks, .gitignore)
-//! ksc build [--ksb]   build/obj/: one object per file; build/Nome: the executable
+//! ksc new Nome        create the project Nome/ (src/Main.kstl, .gitignore)
+//! ksc build [--kstb]   build/obj/: one object per file; build/Nome: the executable
 //! ksc run [args...]   build, then run it
 //! ksc test            run every @test proc of src/
 //! ```
 //!
-//! Without `src/Main.ks` the project is a library: `ksc build` compiles
+//! Without `src/Main.kstl` the project is a library: `ksc build` compiles
 //! every file of `src/`, and the objects in `build/obj/` go into another
 //! project's `lib/`.
 //!
 //! One file, gcc style (the files it uses are read from its folder):
 //!
 //! ```text
-//! ksc File.ks [-o out] [--ksb] [--disasm] [--tokens] [--ast] [--test]
+//! ksc File.kstl [-o out] [--kstb] [--disasm] [--tokens] [--ast] [--test]
 //! ```
 //!
-//! Each file becomes an object (`.ksb`) in `build/obj/`, compiled again
+//! Each file becomes an object (`.kstb`) in `build/obj/`, compiled again
 //! only when it or the public part of a file it uses changed; then the
 //! objects are linked into the executable, a copy of `ksvm` with the
-//! program inside (it runs without installing anything). `--ksb`, or `-o`
-//! with a name ending in `.ksb`, writes the program as a `.ksb` instead, to
+//! program inside (it runs without installing anything). `--kstb`, or `-o`
+//! with a name ending in `.kstb`, writes the program as a `.kstb` instead, to
 //! run with `ksvm`.
 
 use std::path::{Path, PathBuf};
@@ -33,14 +33,14 @@ use std::process::ExitCode;
 use ksc::modules::Disk;
 
 const USAGE: &str = "usage: ksc new <Name>          create a project
-       ksc build [--ksb]         build the project in this folder
+       ksc build [--kstb]         build the project in this folder
        ksc run [args...]         build and run it
        ksc test                  run its @test procs
-       ksc check <File.ks> [--stdin]  only report errors (for editors)
-       ksc doc <File.ks> --at <byte> [--stdin]  the documentation of the name there
-       ksc std <collections/List.ks>  print a file of the standard library
-       ksc nav <File.ks> (--at <byte> | --id <id>) --what <definition|implementations|supers> [--stdin]
-       ksc <File.ks> [-o out] [--ksb] [--disasm] [--tokens] [--ast] [--test]";
+       ksc check <File.kstl> [--stdin]  only report errors (for editors)
+       ksc doc <File.kstl> --at <byte> [--stdin]  the documentation of the name there
+       ksc std <collections/List.kstl>  print a file of the standard library
+       ksc nav <File.kstl> (--at <byte> | --id <id>) --what <definition|implementations|supers> [--stdin]
+       ksc <File.kstl> [-o out] [--kstb] [--disasm] [--tokens] [--ast] [--test]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -80,13 +80,13 @@ fn new_project(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     }
     let made = std::fs::create_dir_all(root.join("src"))
-        .and_then(|()| std::fs::write(root.join("src/Main.ks"), "use std.io.Console;\n\nproc main() {\n    Console.printl(\"Hello, Kestrel!\");\n}\n"))
+        .and_then(|()| std::fs::write(root.join("src/Main.kstl"), "use std.io.Console;\n\nproc main() {\n    Console.printl(\"Hello, Kestrel!\");\n}\n"))
         .and_then(|()| std::fs::write(root.join(".gitignore"), "build/\n"));
     if let Err(e) = made {
         eprintln!("ksc: cannot create {name}: {e}");
         return ExitCode::from(2);
     }
-    eprintln!("ksc: created {name}/ (src/Main.ks); run it with `cd {name}` and `ksc run`");
+    eprintln!("ksc: created {name}/ (src/Main.kstl); run it with `cd {name}` and `ksc run`");
     ExitCode::SUCCESS
 }
 
@@ -97,17 +97,17 @@ fn project(args: &[String], action: Action) -> ExitCode {
     let root = PathBuf::new();
     let src = root.join("src");
     if !src.is_dir() {
-        eprintln!("ksc: no src/ folder here\nksc: create a project with `ksc new Name`, or compile one file with `ksc File.ks`");
+        eprintln!("ksc: no src/ folder here\nksc: create a project with `ksc new Name`, or compile one file with `ksc File.kstl`");
         return ExitCode::from(2);
     }
     let name = here.file_name().and_then(|n| n.to_str()).unwrap_or("program").to_string();
     let disk = Disk::project(&root);
     let cache = cache(&root);
-    let main = src.join("Main.ks");
+    let main = src.join("Main.kstl");
     let flags = Flags::new(args);
     if action == Action::Test || !main.is_file() {
         if action == Action::Run {
-            eprintln!("ksc: no src/Main.ks: this project is a library, there is nothing to run");
+            eprintln!("ksc: no src/Main.kstl: this project is a library, there is nothing to run");
             return ExitCode::from(2);
         }
         // Every file of src/: a made-up main file uses them all.
@@ -115,7 +115,7 @@ fn project(args: &[String], action: Action) -> ExitCode {
         sources(&src, &src, &mut files);
         files.sort();
         let text: String = files.iter().map(|f| format!("use {f};\n")).collect();
-        let Some(output) = compile("$all.ks", &text, &disk, false, &cache) else {
+        let Some(output) = compile("$all.kstl", &text, &disk, false, &cache) else {
             return ExitCode::FAILURE;
         };
         if action == Action::Test {
@@ -136,7 +136,7 @@ fn project(args: &[String], action: Action) -> ExitCode {
         return ExitCode::FAILURE;
     };
     let ksb = flags.ksb;
-    let out = PathBuf::from("build").join(if ksb { format!("{name}.ksb") } else { format!("{name}{}", std::env::consts::EXE_SUFFIX) });
+    let out = PathBuf::from("build").join(if ksb { format!("{name}.kstb") } else { format!("{name}{}", std::env::consts::EXE_SUFFIX) });
     if !write_program(&out, &output, ksb) {
         return ExitCode::from(2);
     }
@@ -146,14 +146,14 @@ fn project(args: &[String], action: Action) -> ExitCode {
     run(&output.module, flags.rest)
 }
 
-/// The `.ks` files under `dir`, as `use` paths (`jogo.Mapa`).
+/// The `.kstl` files under `dir`, as `use` paths (`jogo.Mapa`).
 fn sources(base: &Path, dir: &Path, out: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
             sources(base, &p, out);
-        } else if p.extension().is_some_and(|x| x == "ks") {
+        } else if p.extension().is_some_and(|x| x == "kstl") {
             let rel = p.strip_prefix(base).expect("under src/").with_extension("");
             let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
             out.push(parts.join("."));
@@ -161,7 +161,7 @@ fn sources(base: &Path, dir: &Path, out: &mut Vec<String>) {
     }
 }
 
-/// `ksc File.ks ...`
+/// `ksc File.kstl ...`
 fn file(args: &[String]) -> ExitCode {
     let flag = |f: &str| args.iter().any(|a| a == f);
     let out_arg = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1));
@@ -213,23 +213,23 @@ fn file(args: &[String]) -> ExitCode {
     if flag("--disasm") {
         print!("{}", output.module.disassemble());
     }
-    // `File.ks` -> the executable `File`; `--ksb` / `-o x.ksb` -> a `.ksb`.
-    let ksb = flag("--ksb") || out_arg.is_some_and(|o| o.ends_with(".ksb"));
+    // `File.kstl` -> the executable `File`; `--kstb` / `-o x.kstb` -> a `.kstb`.
+    let ksb = flag("--kstb") || out_arg.is_some_and(|o| o.ends_with(".kstb"));
     let out = match out_arg {
         Some(o) => PathBuf::from(o),
-        None if ksb => PathBuf::from(path).with_extension("ksb"),
+        None if ksb => PathBuf::from(path).with_extension("kstb"),
         None => PathBuf::from(path).with_extension(std::env::consts::EXE_EXTENSION),
     };
     if write_program(&out, &output, ksb) { ExitCode::SUCCESS } else { ExitCode::from(2) }
 }
 
-/// `ksc check File.ks [--stdin]`: the errors of a file, for an editor.
+/// `ksc check File.kstl [--stdin]`: the errors of a file, for an editor.
 /// Nothing is written and `main` is not needed. With `--stdin` the file's
 /// text (maybe not saved) comes from standard input; its `use`s are read
 /// from where the file is. A file under a project's `src/` is checked with
 /// the whole project, so files that use each other work.
 fn check(args: &[String]) -> ExitCode {
-    let Some(target) = editor_target(args, "usage: ksc check <File.ks> [--stdin]") else {
+    let Some(target) = editor_target(args, "usage: ksc check <File.kstl> [--stdin]") else {
         return ExitCode::from(2);
     };
     let (map, result) = ksc::build(&target.root_path, &target.root_src, target.files.as_ref(), false, None);
@@ -247,15 +247,15 @@ fn check(args: &[String]) -> ExitCode {
     }
 }
 
-/// `ksc doc File.ks --at N [--stdin]`: the documentation (Markdown) of the
+/// `ksc doc File.kstl --at N [--stdin]`: the documentation (Markdown) of the
 /// name at byte `N` of the file, for an editor's hover. Nothing if none.
 fn doc(args: &[String]) -> ExitCode {
-    let Some(target) = editor_target(args, "usage: ksc doc <File.ks> --at <byte> [--stdin]") else {
+    let Some(target) = editor_target(args, "usage: ksc doc <File.kstl> --at <byte> [--stdin]") else {
         return ExitCode::from(2);
     };
     let at = args.iter().position(|a| a == "--at").and_then(|i| args.get(i + 1)).and_then(|n| n.parse::<usize>().ok());
     let Some(at) = at else {
-        eprintln!("usage: ksc doc <File.ks> --at <byte> [--stdin]");
+        eprintln!("usage: ksc doc <File.kstl> --at <byte> [--stdin]");
         return ExitCode::from(2);
     };
     let mut map = ksc::diag::SourceMap::default();
@@ -275,14 +275,14 @@ fn doc(args: &[String]) -> ExitCode {
     }
 }
 
-/// `ksc nav File.ks --at N --what definition [--stdin]`: places for an
+/// `ksc nav File.kstl --at N --what definition [--stdin]`: places for an
 /// editor, one per line: `kind<TAB>name<TAB>file<TAB>line<TAB>column<TAB>id`.
 /// `--what` is `definition`, `implementations` (of an interface or its
 /// method) or `supers` (the interfaces of a class, or the interface method
 /// a method fills in). `--id` (from an earlier answer) names the item
 /// instead of a position.
 fn nav(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: ksc nav <File.ks> (--at <byte> | --id <id>) --what <definition|implementations|supers> [--stdin]";
+    const USAGE: &str = "usage: ksc nav <File.kstl> (--at <byte> | --id <id>) --what <definition|implementations|supers> [--stdin]";
     let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     let rest: Vec<String> = {
         let mut out = Vec::new();
@@ -335,17 +335,17 @@ fn nav(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `ksc std collections/List.ks`: a file of the standard library (built
+/// `ksc std collections/List.kstl`: a file of the standard library (built
 /// into `ksc`), for an editor to show.
 fn std_file(args: &[String]) -> ExitCode {
-    let key = args.first().map(|a| a.trim_start_matches("std/").trim_end_matches(".ks").replace('/', "."));
+    let key = args.first().map(|a| a.trim_start_matches("std/").trim_end_matches(".kstl").replace('/', "."));
     match key.as_deref().and_then(ksc::modules::std_source) {
         Some(text) => {
             print!("{text}");
             ExitCode::SUCCESS
         }
         None => {
-            eprintln!("usage: ksc std <collections/List.ks> (a file of the standard library)");
+            eprintln!("usage: ksc std <collections/List.kstl> (a file of the standard library)");
             ExitCode::from(2)
         }
     }
@@ -381,7 +381,7 @@ fn editor_target(args: &[String], usage: &str) -> Option<EditorTarget> {
         }
     };
     let file = PathBuf::from(path);
-    // A file of the standard library (`.../std/io/Console.ks`): checked as
+    // A file of the standard library (`.../std/io/Console.kstl`): checked as
     // `use std.io.Console;` with this text, so its native procs are known.
     let canonical = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
     let in_std = canonical.ancestors().skip(1).find(|d| d.file_name().is_some_and(|n| n == "std")).map(|std| {
@@ -391,7 +391,7 @@ fn editor_target(args: &[String], usage: &str) -> Option<EditorTarget> {
     if let Some(module) = in_std.filter(|m| ksc::modules::std_source(&m[1..].join(".")).is_some() || m.len() > 2) {
         let files = Edited { disk: Disk { src: PathBuf::new(), lib: None }, module: module.clone(), text, shown: path.clone() };
         let root_src = format!("use {};\n", module.join("."));
-        return Some(EditorTarget { root_path: "$all.ks".into(), root_src, files: Box::new(files), module: Some(module) });
+        return Some(EditorTarget { root_path: "$all.kstl".into(), root_src, files: Box::new(files), module: Some(module) });
     }
     // In a project: the folder holding the `src/` the file is under.
     let project = file.ancestors().skip(1).find(|d| d.file_name().is_some_and(|n| n == "src")).map(|src| {
@@ -406,7 +406,7 @@ fn editor_target(args: &[String], usage: &str) -> Option<EditorTarget> {
             sources(&files.disk.src, &files.disk.src, &mut all);
             all.sort();
             let uses: String = all.iter().map(|f| format!("use {f};\n")).collect();
-            EditorTarget { root_path: "$all.ks".into(), root_src: uses, files: Box::new(files), module: Some(module) }
+            EditorTarget { root_path: "$all.kstl".into(), root_src: uses, files: Box::new(files), module: Some(module) }
         }
         None => {
             let dir = file.parent().map(PathBuf::from).unwrap_or_default();
@@ -435,7 +435,7 @@ impl ksc::modules::Files for Edited {
         if path != self.module.as_slice() {
             return Ok(found);
         }
-        let shown = found.map_or_else(|| self.disk.src.join(self.module.join("/")).with_extension("ks").display().to_string(), |f| f.shown);
+        let shown = found.map_or_else(|| self.disk.src.join(self.module.join("/")).with_extension("kstl").display().to_string(), |f| f.shown);
         Ok(Some(ksc::modules::Found { shown, src: self.text.clone(), object: None }))
     }
 }
@@ -453,8 +453,8 @@ struct Flags {
 
 impl Flags {
     fn new(args: &[String]) -> Flags {
-        let ksb = args.first().is_some_and(|a| a == "--ksb");
-        let rest = args.iter().skip_while(|a| *a == "--ksb" || *a == "--").cloned().collect();
+        let ksb = args.first().is_some_and(|a| a == "--kstb");
+        let rest = args.iter().skip_while(|a| *a == "--kstb" || *a == "--").cloned().collect();
         Flags { ksb, rest }
     }
 }
@@ -483,7 +483,7 @@ fn count(output: &ksc::Output) -> String {
     }
 }
 
-/// Writes the program: an executable (a copy of `ksvm` with it inside) or a `.ksb`.
+/// Writes the program: an executable (a copy of `ksvm` with it inside) or a `.kstb`.
 fn write_program(out: &Path, output: &ksc::Output, ksb: bool) -> bool {
     let program = output.module.to_bytes();
     let bytes = if ksb {
@@ -493,7 +493,7 @@ fn write_program(out: &Path, output: &ksc::Output, ksb: bool) -> bool {
         match runtime().and_then(|vm| ksc::native::build(&output.module, &vm)) {
             Ok(exe) => exe,
             Err(e) => {
-                eprintln!("ksc: {e}\nksc: to write a `.ksb` for ksvm instead, use --ksb");
+                eprintln!("ksc: {e}\nksc: to write a `.kstb` for ksvm instead, use --kstb");
                 return false;
             }
         }

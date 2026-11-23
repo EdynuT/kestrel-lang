@@ -35,7 +35,7 @@ fn compile_full(src: &str, need_main: bool) -> Result<ksc::Output, ksc::diag::Di
 }
 
 fn build(src: &str) -> Module {
-    let m = compile(src).unwrap_or_else(|d| panic!("compile error: {}\n{}", d.message, d.render("test.ks", src)));
+    let m = compile(src).unwrap_or_else(|d| panic!("compile error: {}\n{}", d.message, d.render("test.kstl", src)));
     // Everything the compiler emits must survive a write/read/verify round trip.
     Module::from_bytes(&m.to_bytes()).expect("emitted module verifies")
 }
@@ -2030,11 +2030,11 @@ proc main() {
     }
 }
 
-/// Compiles a program of several files: `main` is `Main.ks`, `files` maps
-/// `Shapes.Circle` to the text of `Shapes/Circle.ks`.
+/// Compiles a program of several files: `main` is `Main.kstl`, `files` maps
+/// `Shapes.Circle` to the text of `Shapes/Circle.kstl`.
 fn project(main: &str, files: &[(&str, &str)]) -> Result<Module, String> {
     let files: std::collections::HashMap<String, String> = files.iter().map(|(k, v)| (k.to_string(), with_uses(v))).collect();
-    let (map, r) = ksc::compile_program("Main.ks", &with_uses(main), &files, true);
+    let (map, r) = ksc::compile_program("Main.kstl", &with_uses(main), &files, true);
     r.map(|o| o.module).map_err(|d| map.render(&d))
 }
 
@@ -2125,11 +2125,11 @@ fn modules() {
     assert!(trap.reason.contains("no arm of this `match` lists"), "{}", trap.reason);
 
     let e = project_err("use X;\nproc main() { Console.printl(X.helper()); }", &[("X", x)]);
-    assert!(e.contains("`helper` is private to `X`") && e.contains("Main.ks:2:"), "{e}");
+    assert!(e.contains("`helper` is private to `X`") && e.contains("Main.kstl:2:"), "{e}");
     let e = project_err("use X;\nproc main() { Console.printl(X.nope()); }", &[("X", x)]);
     assert!(e.contains("`X` has no item `nope`"), "{e}");
     let e = project_err("use Nope;\nproc main() { }", &[]);
-    assert!(e.contains("cannot find `Nope.ks`"), "{e}");
+    assert!(e.contains("cannot find `Nope.kstl`"), "{e}");
     let e = project_err("use x;\nproc main() { }", &[]);
     assert!(e.contains("PascalCase"), "{e}");
     let e = project_err("use Main;\nproc main() { }", &[]);
@@ -2138,7 +2138,7 @@ fn modules() {
     assert!(e.contains("add `use X;`"), "{e}");
     // An error in another file is shown in that file.
     let e = project_err("use Bad;\nproc main() { Console.printl(Bad.f()); }", &[("Bad", "public proc f() -> int { return \"x\"; }")]);
-    assert!(e.contains("--> Bad.ks:1:"), "{e}");
+    assert!(e.contains("--> Bad.kstl:1:"), "{e}");
     let e = project_err("proc main() { }\nuse X;", &[("X", x)]);
     assert!(e.contains("`use` goes at the top"), "{e}");
     let e = project_err("public proc f() { }\nprivate proc g() { }\nproc main() { }", &[]);
@@ -2152,12 +2152,12 @@ fn build_cache() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
-    write("Lib.ks", "public proc f() -> int { return 1; }");
-    write("Other.ks", "public proc g() -> int { return 2; }");
+    write("Lib.kstl", "public proc f() -> int { return 1; }");
+    write("Other.kstl", "public proc g() -> int { return 2; }");
     let main = "use std.io.Console;\nuse Lib;\nuse Other;\nproc main() { Console.printl(Lib.f() + Other.g()); }";
     let cache = ksc::Cache { dir: dir.join("build"), compiler: 7 };
     let build = || {
-        let (map, r) = ksc::build("Main.ks", main, &ksc::modules::Disk { src: dir.clone(), lib: None }, true, Some(&cache));
+        let (map, r) = ksc::build("Main.kstl", main, &ksc::modules::Disk { src: dir.clone(), lib: None }, true, Some(&cache));
         let o = r.unwrap_or_else(|d| panic!("{}", map.render(&d)));
         let mut out = Vec::new();
         Vm::new(&o.module, "".as_bytes(), &mut out).run().unwrap();
@@ -2165,19 +2165,19 @@ fn build_cache() {
         compiled.sort();
         (String::from_utf8(out).unwrap(), compiled)
     };
-    // The first time, the file of the standard library too (`<std/io/Console.ks>`).
-    assert_eq!(build(), ("3\n".to_string(), vec!["Console.ks>".to_string(), "Lib.ks".into(), "Main.ks".into(), "Other.ks".into()]));
+    // The first time, the file of the standard library too (`<std/io/Console.kstl>`).
+    assert_eq!(build(), ("3\n".to_string(), vec!["Console.kstl>".to_string(), "Lib.kstl".into(), "Main.kstl".into(), "Other.kstl".into()]));
     // Nothing changed: nothing is compiled.
     assert_eq!(build().1, Vec::<String>::new());
     // A body changed: only that file.
-    write("Lib.ks", "public proc f() -> int { return 10; }");
-    assert_eq!(build(), ("12\n".to_string(), vec!["Lib.ks".to_string()]));
+    write("Lib.kstl", "public proc f() -> int { return 10; }");
+    assert_eq!(build(), ("12\n".to_string(), vec!["Lib.kstl".to_string()]));
     // A comment or the layout changed: only that file too.
-    write("Lib.ks", "// the library\npublic proc f()\n    -> int { return 10; }");
-    assert_eq!(build().1, vec!["Lib.ks".to_string()]);
+    write("Lib.kstl", "// the library\npublic proc f()\n    -> int { return 10; }");
+    assert_eq!(build().1, vec!["Lib.kstl".to_string()]);
     // Its public part changed: the files that use it too.
-    write("Lib.ks", "public proc f() -> int { return 10; }\npublic proc h() { }");
-    assert_eq!(build().1, vec!["Lib.ks".to_string(), "Main.ks".into()]);
+    write("Lib.kstl", "public proc f() -> int { return 10; }\npublic proc h() { }");
+    assert_eq!(build().1, vec!["Lib.kstl".to_string(), "Main.kstl".into()]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -2246,13 +2246,13 @@ proc main() {
 
 #[test]
 fn libraries() {
-    // A library compiled in one folder works in another with only its `.ksb`.
+    // A library compiled in one folder works in another with only its `.kstb`.
     let dir = std::env::temp_dir().join(format!("kestrel-libraries-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let (lib_src, app) = (dir.join("lib-src"), dir.join("app"));
     std::fs::create_dir_all(lib_src.join("corpos")).unwrap();
     std::fs::write(
-        lib_src.join("corpos/Corpo.ks"),
+        lib_src.join("corpos/Corpo.kstl"),
         "public class Corpo {
             m: real;
             public proc Corpo(m: real) -> Corpo { return Corpo { m: m }; }
@@ -2265,16 +2265,16 @@ fn libraries() {
     .unwrap();
     let lib_cache = ksc::Cache { dir: lib_src.join("build/obj"), compiler: 1 };
     let disk = ksc::modules::Disk { src: lib_src.clone(), lib: None };
-    let (map, r) = ksc::build("$all.ks", "use corpos.Corpo;", &disk, false, Some(&lib_cache));
+    let (map, r) = ksc::build("$all.kstl", "use corpos.Corpo;", &disk, false, Some(&lib_cache));
     let o = r.unwrap_or_else(|d| panic!("{}", map.render(&d)));
     assert_eq!(o.tests.iter().map(|t| t.0.as_str()).collect::<Vec<_>>(), ["corpos.Corpo.pesoCerto"]);
     std::fs::create_dir_all(app.join("lib/corpos")).unwrap();
-    std::fs::copy(lib_src.join("build/obj/corpos/Corpo.ksb"), app.join("lib/corpos/Corpo.ksb")).unwrap();
+    std::fs::copy(lib_src.join("build/obj/corpos/Corpo.kstb"), app.join("lib/corpos/Corpo.kstb")).unwrap();
     std::fs::create_dir_all(app.join("src")).unwrap();
 
     let run = |main: &str| -> Result<String, String> {
         let cache = ksc::Cache { dir: app.join("build/obj"), compiler: 1 };
-        let (map, r) = ksc::build("Main.ks", &with_uses(main), &ksc::modules::Disk::project(&app), true, Some(&cache));
+        let (map, r) = ksc::build("Main.kstl", &with_uses(main), &ksc::modules::Disk::project(&app), true, Some(&cache));
         let o = r.map_err(|d| map.render(&d))?;
         let mut out = Vec::new();
         Vm::new(&o.module, "".as_bytes(), &mut out).run().unwrap();
@@ -2287,14 +2287,14 @@ fn libraries() {
     let e = run("use corpos.Corpo;\nproc main() { Console.printl(Corpo.g()); }").unwrap_err();
     assert!(e.contains("`g` is private to `corpos.Corpo`"), "{e}");
     let e = run("use corpos.Corpo;\nproc main() { c: Corpo = Corpo(\"x\"); burn c; }").unwrap_err();
-    assert!(e.contains("expected real, found text") && e.contains("Main.ks:2:"), "{e}");
+    assert!(e.contains("expected real, found text") && e.contains("Main.kstl:2:"), "{e}");
     // Names: lowercase folders, PascalCase files, keywords as folders.
     assert!(run("use Corpos.Corpo;\nproc main() { }").unwrap_err().contains("folder names are lowercase"));
     assert!(run("use corpos.corpo;\nproc main() { }").unwrap_err().contains("PascalCase"));
     assert!(run("use std.text.Nope;\nproc main() { }").unwrap_err().contains("standard library has no `std.text.Nope`"));
     // The same file in src/ and lib/ is an error.
     std::fs::create_dir_all(app.join("src/corpos")).unwrap();
-    std::fs::write(app.join("src/corpos/Corpo.ks"), "public proc f() { }").unwrap();
+    std::fs::write(app.join("src/corpos/Corpo.kstl"), "public proc f() { }").unwrap();
     assert!(run("use corpos.Corpo;\nproc main() { }").unwrap_err().contains("keep one"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -2442,7 +2442,7 @@ fn traceback_has_lines() {
     assert_eq!(at, want.map(|(f, l)| (f.to_string(), Some(l))));
     assert_eq!(
         t.to_string(),
-        "TRAP: division by zero (handle it with `on NaT`)\n  at divide (main.ks:2)\n  at deep (main.ks:5)\n  at deep (main.ks:6) (3 times)\n  at main (main.ks:10)"
+        "TRAP: division by zero (handle it with `on NaT`)\n  at divide (main.kstl:2)\n  at deep (main.kstl:5)\n  at deep (main.kstl:6) (3 times)\n  at main (main.kstl:10)"
     );
 }
 

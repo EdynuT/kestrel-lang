@@ -1,4 +1,4 @@
-//! ksc: the Kestrel compiler (`.ks` -> `.ksb`).
+//! ksc: the Kestrel compiler (`.kstl` -> `.kstb`).
 //!
 //! Phases: [`lexer`] -> [`parser`] -> [`modules`] (the files reached by `use`,
 //! with names resolved by [`resolve`]) -> [`generics`] (one copy per use) ->
@@ -35,7 +35,7 @@ pub struct Output {
     pub compiled: Vec<String>,
 }
 
-/// Where [`build`] keeps each file's object (`.ksb`) between runs, like
+/// Where [`build`] keeps each file's object (`.kstb`) between runs, like
 /// `make`: a file is compiled again only if its text changed, or the
 /// public part of a file it uses, or the compiler.
 pub struct Cache {
@@ -52,7 +52,7 @@ pub fn compile(src: &str) -> Result<Module, diag::Diagnostic> {
 /// Like [`compile`], also giving the warnings and the tests. With
 /// `need_main: false` (for `ksc --test`), a file without `main` is fine.
 pub fn compile_full(src: &str, need_main: bool) -> Result<Output, diag::Diagnostic> {
-    compile_program("main.ks", src, &modules::NoFiles, need_main).1
+    compile_program("main.kstl", src, &modules::NoFiles, need_main).1
 }
 
 /// Compiles the program whose main file is `root_path` (with text
@@ -162,13 +162,13 @@ fn compile_here(
     Ok(Output { module, warnings, tests, compiled })
 }
 
-/// `build/Shapes/Circle.ksb` for `Shapes.Circle`.
+/// `build/Shapes/Circle.kstb` for `Shapes.Circle`.
 fn object_path(dir: &std::path::Path, module: &str) -> std::path::PathBuf {
     let mut p = dir.to_path_buf();
     for part in module.split('.') {
         p.push(part);
     }
-    p.set_extension("ksb");
+    p.set_extension("kstb");
     p
 }
 

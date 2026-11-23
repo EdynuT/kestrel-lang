@@ -13,7 +13,7 @@ pub struct Program {
     /// files that `use` this one).
     pub public: std::collections::HashSet<String>,
     /// Items that belong to another file of the program (their code is in
-    /// that file's `.ksb`): they are declared here, never compiled.
+    /// that file's `.kstb`): they are declared here, never compiled.
     pub external: std::collections::HashSet<String>,
     /// Every item, method and field, by its name as written (`trim`, `List`,
     /// `List.add`), with its signature and documentation (`/* ... */` just
@@ -37,7 +37,7 @@ pub struct Doc {
     pub at: usize,
 }
 
-/// `use Shapes.Circle;`: the path of a file (`Shapes/Circle.ks`), whose
+/// `use Shapes.Circle;`: the path of a file (`Shapes/Circle.kstl`), whose
 /// items are then written `Circle.area(...)`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UseDecl {

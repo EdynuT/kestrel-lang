@@ -65,7 +65,7 @@ public class Reporter {
      * Prints the error as ksc does:
      *
      *     error: unterminated string literal
-     *      --> teste.ks:1:5
+     *      --> teste.kstl:1:5
      *       |
      *     1 | x = "abc
      *       |     ^^^^

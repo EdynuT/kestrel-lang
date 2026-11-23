@@ -1,4 +1,4 @@
-//! The `.ksb` bytecode file (SPEC §10): writing, reading and verification.
+//! The `.kstb` bytecode file (SPEC §10): writing, reading and verification.
 //!
 //! Reading always verifies the module, so the VM can trust that every jump
 //! lands on an instruction boundary and every index points at something real.
@@ -12,14 +12,14 @@ use crate::KSB_MAGIC;
 pub const KSB_VERSION: u16 = 4;
 /// Flag bit 0: each function carries the names of its local slots.
 pub const FLAG_DEBUG_NAMES: u16 = 1;
-/// Flag bit 1: an object file (one `.ks` file, not yet linked): it ends
+/// Flag bit 1: an object file (one `.kstl` file, not yet linked): it ends
 /// with a [`Link`] section.
 pub const FLAG_OBJECT: u16 = 2;
 
 const HEADER_LEN: usize = 24;
 
 /// The end of an executable made by `ksc`: a copy of `ksvm` with the
-/// program's `.ksb` after it, then the `.ksb`'s size (u64) and this mark.
+/// program's `.kstb` after it, then the `.kstb`'s size (u64) and this mark.
 pub const EXE_MARK: [u8; 8] = *b"K3B-EXE1";
 
 /// `runtime` (the `ksvm` executable) with `program` stuck to its end.
@@ -70,7 +70,7 @@ pub struct Link {
     pub stamp: Vec<(String, u64)>,
     /// The file's declarations, as Kestrel text (its source with the bodies
     /// of plain procs and methods emptied): what other files need to use
-    /// it, so a library works without its `.ks`, as C's `.h` files.
+    /// it, so a library works without its `.kstl`, as C's `.h` files.
     pub decls: String,
 }
 
@@ -113,7 +113,7 @@ pub struct Function {
     /// Where a `throw` (or a failure of the VM) inside this function goes,
     /// innermost first: like the exception table of a Java `.class`.
     pub handlers: Vec<Handler>,
-    /// The `.ks` file it was written in (empty if unknown), for tracebacks.
+    /// The `.kstl` file it was written in (empty if unknown), for tracebacks.
     pub file: String,
     /// Which line of `file` each part of the code comes from: from byte
     /// offset `.0` on (until the next entry), line `.1`. In offset order.
@@ -170,8 +170,8 @@ pub enum CodeProblem {
 impl fmt::Display for KsbError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            KsbError::BadMagic => f.write_str("not a .ksb file (bad magic)"),
-            KsbError::UnsupportedVersion(v) => write!(f, "unsupported .ksb version {v}"),
+            KsbError::BadMagic => f.write_str("not a .kstb file (bad magic)"),
+            KsbError::UnsupportedVersion(v) => write!(f, "unsupported .kstb version {v}"),
             KsbError::Truncated => f.write_str("file is truncated"),
             KsbError::TrailingBytes => f.write_str("unexpected bytes after the last function"),
             KsbError::BadUtf8 => f.write_str("string is not valid UTF-8"),
@@ -567,7 +567,7 @@ mod tests {
             kind: Kind::Code,
             // load@0 load@3 add@6 ret@7
             handlers: vec![Handler { start: 0, end: 6, target: 7 }],
-            file: "sum.ks".into(),
+            file: "sum.kstl".into(),
             lines: vec![(0, 2), (6, 3)],
         };
         Module {

@@ -1,5 +1,5 @@
 //! Shared definitions for the Kestrel toolchain: ternary word types,
-//! the BET-VM instruction set and the `.ksb` bytecode format.
+//! the BET-VM instruction set and the `.kstb` bytecode format.
 
 pub mod bet;
 pub mod charset;
@@ -31,5 +31,5 @@ pub fn class_tag(name: &str) -> i64 {
     (h % word::WORD_MAX as u64) as i64 + 1
 }
 
-/// Magic bytes at the start of every `.ksb` file.
+/// Magic bytes at the start of every `.kstb` file.
 pub const KSB_MAGIC: [u8; 4] = *b"K3B\x01";

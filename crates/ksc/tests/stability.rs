@@ -63,7 +63,7 @@ impl Rng {
 
 /// Valid programs covering most of the language (no file writes).
 const SEEDS: &[&str] = &[
-    include_str!("tour.ks"),
+    include_str!("tour.kstl"),
     r#"enum Cor { Vermelho, Verde, Azul }
 proc nome(c: Cor) -> text { match c { Cor.Vermelho => return "r"; Cor.Verde => return "g"; Cor.Azul => return "b"; } }
 proc main() {

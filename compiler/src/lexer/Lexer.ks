@@ -14,6 +14,7 @@
  * @author Edynu
  */
 
+use std.collections.List;
 use std.text.Chars;
 use std.text.Texts;
 
@@ -24,11 +25,10 @@ use diag.Diagnostic;
 public class Lexer {
     source: text;
     position: int;
-    public tokens[]: Token;
+    public tokens: List<Token>;
 
     public proc Lexer(source: text) -> Lexer {
-        empty[]: Token = {};
-        return Lexer { source: source, position: 0, tokens: give empty };
+        return Lexer { source: source, position: 0, tokens: List<Token>() };
     }
 
     public proc current(&self) -> tryte {
@@ -64,10 +64,10 @@ public class Lexer {
             } else{
                 kind = self.symbol();                
             }
-            append(self.tokens, Token { kind: kind, start: start, end: self.position });
+            self.tokens.add(Token { kind: kind, start: start, end: self.position });
             self.skipBlanks();
         }
-        append(self.tokens, Token { kind: TokenKind.EndOfFile, start: self.position, end: self.position });
+        self.tokens.add(Token { kind: TokenKind.EndOfFile, start: self.position, end: self.position });
     }
 
     /* A text literal: from `"` to the next `"` on the same line. */

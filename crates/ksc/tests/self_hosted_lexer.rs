@@ -133,13 +133,13 @@ fn numbers_and_dots() {
             "l{case}: Lexer = Lexer(\"{input}\"); l{case}.run();"
         )
         .unwrap();
-        writeln!(source, "assert(len(l{case}.tokens) == {});", tokens.len()).unwrap();
+        writeln!(source, "assert(l{case}.tokens.len() == {});", tokens.len()).unwrap();
         for (index, (kind, start, end)) in tokens.iter().enumerate() {
             writeln!(
                 source,
-                "assert(l{case}.tokens[{index}].kind == TokenKind.{kind}); \
-                 assert(l{case}.tokens[{index}].start == {start}); \
-                 assert(l{case}.tokens[{index}].end == {end});"
+                "assert(l{case}.tokens.get({index}).kind == TokenKind.{kind}); \
+                 assert(l{case}.tokens.get({index}).start == {start}); \
+                 assert(l{case}.tokens.get({index}).end == {end});"
             )
             .unwrap();
         }

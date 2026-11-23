@@ -46,8 +46,9 @@ proc main() {
         Process.exit(1);
     }
 
-    for i: int = 0; i < len(lexer.tokens); i++ {
-        Console.printl(padLeft(Texts.toText(lexer.tokens[i].start), 5) + ".." + padRight(Texts.toText(lexer.tokens[i].end), 5) + " " + describe(lexer.tokens[i], source));
+    for i: int = 0; i < lexer.tokens.len(); i++ {
+        token: Token = lexer.tokens.get(i);
+        Console.printl(padLeft(Texts.toText(token.start), 5) + ".." + padRight(Texts.toText(token.end), 5) + " " + describe(token, source));
     }
     burn lexer;
 }

@@ -1,0 +1,20 @@
+// Copyright (c) 2026 Edynu
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+/*
+ * What a node of the syntax tree is: a number, a name, an operation
+ * between two expressions, and later statements and declarations.
+ *
+ * The parser builds every node with the same class (`Node`), so this
+ * kind is what tells them apart; it grows with each part of the
+ * language the parser learns.
+ *
+ * @since 0.8
+ * @author Edynu
+ */
+
+public enum NodeKind {
+    Number,
+    Name,
+    Binary
+}

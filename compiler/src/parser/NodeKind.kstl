@@ -16,5 +16,6 @@
 public enum NodeKind {
     Number,
     Name,
-    Binary
+    Binary,
+    Unary
 }

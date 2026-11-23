@@ -76,9 +76,37 @@ public class Parser {
         }
     }
 
+
+    proc unary(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        match token.kind {
+            TokenKind.Minus => {
+                self.advance();
+                operand: Node = self.unary();
+                end: int = operand.end;
+                children: List<Node> = List<Node>();
+                children.add(give operand);
+                return Node(NodeKind.Unary, token.start, end, token.kind, give children);
+            }
+            TokenKind.Bang => {
+                self.advance();
+                operand: Node = self.unary();
+                end: int = operand.end;
+                children: List<Node> = List<Node>();
+                children.add(give operand);
+                return Node(NodeKind.Unary, token.start, end, token.kind, give children);
+            }
+            TokenKind.Plus => {
+                self.advance();
+                return self.unary();
+            }
+            else => return self.primary();
+        }
+    }
+
     proc binary(&self, level: int) -> Node throws Diagnostic {
         if level > 4 {
-            return self.primary();
+            return self.unary();
         }
         return self.moreBinary(level, self.binary(level + 1));
     }

@@ -1947,6 +1947,26 @@ impl Checker {
         id
     }
 
+    /// `name` may be a new variable here: not one of this block, nor a
+    /// parameter (a block inside may declare another one).
+    fn fresh(&self, name: &ast::Ident) -> R<()> {
+        let n = &name.name;
+        let note = format!("to change it, write `{n} = ...` (without the type); for another variable, pick another name");
+        if let Some(&prev) = self.f.scopes.last().and_then(|s| s.names.get(n)) {
+            if self.f.locals[prev].is_final {
+                return Err(err(format!("`{n}` is final and cannot be declared again"), name.span)
+                    .with_note("pick another name, or declare the first one without `final`"));
+            }
+            return Err(err(format!("`{n}` is declared twice in this block"), name.span).with_note(note));
+        }
+        if let Some(prev) = self.lookup(n)
+            && self.f.locals[prev].kind == LocalKind::Param
+        {
+            return Err(err(format!("`{n}` is already a parameter of this proc"), name.span).with_note(note));
+        }
+        Ok(())
+    }
+
     fn lookup(&self, name: &str) -> Option<LocalId> {
         self.f.scopes.iter().rev().find_map(|s| s.names.get(name).copied())
     }
@@ -2016,6 +2036,7 @@ impl Checker {
                     };
                     return Err(err(format!("`{}` needs a value", name.name), name.span).with_note(note));
                 }
+                self.fresh(name)?;
                 let local = self.new_local(&name.name, ty, LocalKind::Let, name.span);
                 HStmtKind::Declare(local)
             }
@@ -2059,13 +2080,7 @@ impl Checker {
                     }
                     None => None,
                 };
-                let in_scope = self.f.scopes.last().and_then(|s| s.names.get(&name.name));
-                if let Some(&prev) = in_scope
-                    && self.f.locals[prev].is_final
-                {
-                    return Err(err(format!("`{}` is final and cannot be declared again", name.name), name.span)
-                        .with_note("pick another name, or declare the first one without `final`"));
-                }
+                self.fresh(name)?;
                 let local = self.new_local(&name.name, lty, LocalKind::Let, name.span);
                 self.note_size(local, &value);
                 self.f.locals[local].is_final = *is_final;
@@ -2105,6 +2120,7 @@ impl Checker {
                     };
                     // The caught error is a variable of the catch block: it owns the error.
                     self.f.scopes.push(Scope::default());
+                    self.fresh(&c.var)?;
                     let local = self.new_local(&c.var.name, ty, LocalKind::Let, c.var.span);
                     let b = self.block(&c.body);
                     self.f.scopes.pop();
@@ -2295,6 +2311,7 @@ impl Checker {
                 };
                 let end_tmp = self.new_local("$end", word, LocalKind::Hidden, var.span);
                 self.f.scopes.push(Scope::default());
+                self.fresh(var)?;
                 let v = self.new_local(&var.name, word, LocalKind::WalkVar, var.span);
                 self.f.loops += 1;
                 let body = self.block(body);

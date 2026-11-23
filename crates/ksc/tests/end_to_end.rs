@@ -176,6 +176,19 @@ fn shadowing_does_not_clobber_outer_variable() {
 }
 
 #[test]
+fn a_name_is_declared_once_per_block() {
+    let e = compile("proc main() { x: int = 1; x: int = 2; }").unwrap_err();
+    assert_eq!(e.message, "`x` is declared twice in this block");
+    // A parameter too: the body would lose it.
+    let e = compile("proc f(tokens[]: int) { tokens[]: int = {}; burn tokens; } proc main() {}").unwrap_err();
+    assert_eq!(e.message, "`tokens` is already a parameter of this proc");
+    let e = compile("proc f(i: int) { walk i in 0..2 {} } proc main() {}").unwrap_err();
+    assert_eq!(e.message, "`i` is already a parameter of this proc");
+    let e = compile("proc main() { final x: int = 1; x: int = 2; }").unwrap_err();
+    assert!(e.message.contains("is final and cannot be declared again"), "{}", e.message);
+}
+
+#[test]
 fn tri_and_logic() {
     let src = r#"
 proc sign(x: int) { tri x <=> 0 { - => Console.print("-"); 0 => Console.print("0"); + => Console.print("+"); } }

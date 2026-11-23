@@ -371,7 +371,7 @@ proc main() {
 ```
 
 - Num buffer `final`, as **células** continuam mudando (`b[0] = 5`), como num array `final` do Java. O que fica fixo é o nome. O `burn` continua obrigatório.
-- Um bloco interno pode declarar outro `x`, que é uma variável nova.
+- Nenhuma variável pode ser declarada de novo no mesmo bloco, `final` ou não, nem com o nome de um parâmetro do proc. Um bloco interno pode declarar outro `x`, que é uma variável nova.
 
 ### 8.3 `tri` (desvio triplo)
 

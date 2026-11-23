@@ -157,5 +157,8 @@ proc show(node: &Node, source: text) -> text {
     if node.kind == NodeKind.Binary {
         return "(" + show(node.children.get(0), source) + " " + symbol(node.operator) + " " + show(node.children.get(1), source) + ")";
     }
+    if node.kind == NodeKind.Declaration {
+        return "(let " + show(node.children.get(0), source) + " " + show(node.children.get(1), source) + " " + show(node.children.get(2), source) + ")";
+    }
     return Texts.sub(source, node.start, node.end);
 }

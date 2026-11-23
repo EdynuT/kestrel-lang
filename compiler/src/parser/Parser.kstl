@@ -45,6 +45,15 @@ public class Parser {
         return self.lexer.tokens.get(self.position);
     }
 
+    public proc peek(&self, offset: int) -> Token {
+        index: int = self.position + offset;
+        last: int = self.lexer.tokens.len() - 1;
+        if index > last {
+            index = last;
+        }
+        return self.lexer.tokens.get(index);
+    }
+
     public proc advance(&self) {
         if self.current().kind != TokenKind.EndOfFile {
             self.position++;
@@ -166,6 +175,9 @@ public class Parser {
 
     proc statement(&self) -> Node throws Diagnostic {
         token: Token = self.current();
+        if self.current().kind == TokenKind.Identifier && self.peek(1).kind == TokenKind.Colon {
+            return self.declaration();
+        }
         match token.kind {
             TokenKind.LeftBrace => return self.block();
             TokenKind.Return => return self.returnStatement();
@@ -201,5 +213,37 @@ public class Parser {
         children: List<Node> = List<Node>();
         children.add(give expression);
         return Node(NodeKind.Return, token.start, semicolon.end, TokenKind.Return, give children);
+    }
+
+    proc declaration(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Identifier {
+            throw Diagnostic("expected declaration", token.start, token.end);
+        }
+        self.advance();
+        nameChildren: List<Node> = List<Node>();
+        name: Node = Node(NodeKind.Name, token.start, token.end, TokenKind.Identifier, give nameChildren);
+        self.expect(TokenKind.Colon, "`:`");
+        typeNode: Node = self.typeName();
+        self.expect(TokenKind.Equal, "`=`");
+        value: Node = self.binary(0);
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        children.add(give typeNode);
+        children.add(give value);
+
+        return Node(NodeKind.Declaration, token.start, end, TokenKind.EndOfFile, give children);
+    }
+    
+    proc typeName(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        kind: TokenKind = token.kind;
+        if kind == TokenKind.Int || kind == TokenKind.Real || kind == TokenKind.Text || kind == TokenKind.Bool || kind == TokenKind.Trit || kind == TokenKind.Tryte || kind == TokenKind.Identifier {
+            self.advance();
+            return Node(NodeKind.Type, token.start, token.end, kind, List<Node>());
+        }
+        throw Diagnostic("expected a type", token.start, token.end);
     }
 }

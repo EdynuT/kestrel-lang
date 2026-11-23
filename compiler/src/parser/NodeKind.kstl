@@ -20,5 +20,7 @@ public enum NodeKind {
     Unary,
     Block,
     Return,
-    ExpressionStatement
+    ExpressionStatement,
+    Declaration,
+    Type
 }

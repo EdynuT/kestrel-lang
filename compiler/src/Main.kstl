@@ -48,28 +48,29 @@ proc main() {
             burn error;
             Process.exit(1);
         }
-    }
-    lexer: Lexer = Lexer(source);
-    try {
-        lexer.run();
-    } catch error: Diagnostic {
-        reporter: Reporter = Reporter(Process.arg(0), source);
-        reporter.report(&error);
-        burn reporter;
-        burn error;
-        Process.exit(1);
-    } catch failure: Trap {
-        // A character outside the tryte table (such as `\r`) cannot be read.
-        Console.printl("error: " + failure.message());
-        burn failure;
-        Process.exit(1);
-    }
+    } else {
+        lexer: Lexer = Lexer(source);
+        try {
+            lexer.run();
+        } catch error: Diagnostic {
+            reporter: Reporter = Reporter(Process.arg(0), source);
+            reporter.report(&error);
+            burn reporter;
+            burn error;
+            Process.exit(1);
+        } catch failure: Trap {
+            // A character outside the tryte table (such as `\r`) cannot be read.
+            Console.printl("error: " + failure.message());
+            burn failure;
+            Process.exit(1);
+        }
 
-    for i: int = 0; i < lexer.tokens.len(); i++ {
-        token: Token = lexer.tokens.get(i);
-        Console.printl(padLeft(Texts.toText(token.start), 5) + ".." + padRight(Texts.toText(token.end), 5) + " " + describe(token, source));
+        for i: int = 0; i < lexer.tokens.len(); i++ {
+            token: Token = lexer.tokens.get(i);
+            Console.printl(padLeft(Texts.toText(token.start), 5) + ".." + padRight(Texts.toText(token.end), 5) + " " + describe(token, source));
+        }
+        burn lexer;
     }
-    burn lexer;
 }
 
 proc describe(token: Token, source: text) -> text {
@@ -137,14 +138,24 @@ proc symbol(kind: TokenKind) -> text {
 }
 
 proc show(node: &Node, source: text) -> text {
-    if node.kind != NodeKind.Binary && node.kind != NodeKind.Unary {
-        return Texts.sub(source, node.start, node.end);
+    if node.kind == NodeKind.Block {
+        result: text = "(block";
+        for i: int = 0; i < node.children.len(); i++ {
+            result = result + " " + show(node.children.get(i), source);
+        }
+        return result + ")";    
     }
-    operator: text = symbol(node.operator);
+    if node.kind == NodeKind.Return{
+        return "(return " + show(node.children.get(0), source) + ")";
+    }
+    if node.kind == NodeKind.ExpressionStatement {
+        return show(node.children.get(0), source);
+    }
     if node.kind == NodeKind.Unary {
-        return "(" + operator + " " + show(node.children.get(0), source) + ")";
-    } else if node.kind == NodeKind.Binary {
-        return "(" + show(node.children.get(0), source) + " " + operator + " " + show(node.children.get(1), source) + ")";
+        return "(" + symbol(node.operator) + " " + show(node.children.get(0), source) + ")";
+    }
+    if node.kind == NodeKind.Binary {
+        return "(" + show(node.children.get(0), source) + " " + symbol(node.operator) + " " + show(node.children.get(1), source) + ")";
     }
     return Texts.sub(source, node.start, node.end);
 }

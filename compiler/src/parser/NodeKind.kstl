@@ -17,5 +17,8 @@ public enum NodeKind {
     Number,
     Name,
     Binary,
-    Unary
+    Unary,
+    Block,
+    Return,
+    ExpressionStatement
 }

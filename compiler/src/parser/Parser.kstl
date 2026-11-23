@@ -36,7 +36,7 @@ public class Parser {
     }
 
     public proc parse(&self) -> Node throws Diagnostic {
-        expression: Node = self.binary(0);
+        expression: Node = self.block();
         self.expect(TokenKind.EndOfFile, "end of file");
         return expression;
     }
@@ -147,5 +147,59 @@ public class Parser {
             4 => return kind == TokenKind.Star || kind == TokenKind.Slash || kind == TokenKind.Percent;
             else => return false;
         }
+    }
+
+    proc block(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.LeftBrace {
+            throw Diagnostic("expected '{'", token.start, token.end);
+        }
+        self.advance();
+        children: List<Node> = List<Node>();
+        while self.current().kind != TokenKind.RightBrace {
+            children.add(self.statement());
+        }
+        end: int = self.current().end;
+        self.advance();
+        return Node(NodeKind.Block, token.start, end, TokenKind.LeftBrace, give children);
+    }
+
+    proc statement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        match token.kind {
+            TokenKind.LeftBrace => return self.block();
+            TokenKind.Return => return self.returnStatement();
+            else => return self.expressionStatement();
+        }
+    }
+
+    proc expressionStatement(&self) -> Node throws Diagnostic {
+        expression: Node = self.binary(0);
+        token: Token = self.current();
+        if token.kind != TokenKind.Semicolon {
+            throw Diagnostic("expected ';'", token.start, token.end);
+        }
+        self.advance();
+        children: List<Node> = List<Node>();
+        start: int = expression.start;
+        children.add(give expression);
+        return Node(NodeKind.ExpressionStatement, start, token.end, TokenKind.Semicolon, give children);
+    }
+
+    proc returnStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Return {
+            throw Diagnostic("expected 'return'", token.start, token.end);
+        }
+        self.advance();
+        expression: Node = self.binary(0);
+        semicolon: Token = self.current();
+        if semicolon.kind != TokenKind.Semicolon {
+            throw Diagnostic("expected ';'", semicolon.start, semicolon.end);
+        }
+        self.advance();
+        children: List<Node> = List<Node>();
+        children.add(give expression);
+        return Node(NodeKind.Return, token.start, semicolon.end, TokenKind.Return, give children);
     }
 }

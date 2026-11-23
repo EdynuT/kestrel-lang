@@ -1,0 +1,105 @@
+// Copyright (c) 2026 Edynu
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+/*
+ * Shows a `Diagnostic` to the person compiling: it turns the error's
+ * position (characters from the start of the file) into a line and a
+ * column, and prints the message, the line of code and `^` marks
+ * under the part that is wrong.
+ *
+ * It keeps the file's path and source; `Main` creates one when it
+ * catches a `Diagnostic`.
+ *
+ * @since 0.8
+ * @author Edynu
+ */
+
+use std.text.Texts;
+use std.io.Console;
+
+use diag.Diagnostic;
+
+public class Reporter {
+    path: text;
+    source: text;
+
+    public proc Reporter(path: text, source: text) -> Reporter {
+        return Reporter { path: path, source: source };
+    }
+
+    public proc line(&self, position: int) -> int {
+        line: int = 1;
+        for i: int = 0; i < position && i < len(self.source); i++ {
+            if self.source[i] == '\n' {
+                line = line + 1;
+            }
+        }
+        return line;
+    }
+
+    public proc column(&self, position: int) -> int {
+        column: int = 1;
+        for i: int = 0; i < position && i < len(self.source); i++ {
+            if self.source[i] == '\n' {
+                column = 1;
+            } else {
+                column = column + 1;
+            }
+        }
+        return column;
+    }
+
+    public proc lineText(&self, position: int) -> text {
+        start: int = position;
+        while start > 0 && self.source[start - 1] != '\n' {
+            start = start - 1;
+        }
+        end: int = position;
+        while end < len(self.source) && self.source[end] != '\n' {
+            end = end + 1;
+        }
+        return Texts.sub(self.source, start, end);
+    }
+
+    /*
+     * Prints the error as ksc does:
+     *
+     *     error: unterminated string literal
+     *      --> teste.ks:1:5
+     *       |
+     *     1 | x = "abc
+     *       |     ^^^^
+     */
+    public proc report(&self, error: &Diagnostic) {
+        line: int = self.line(error.start);
+        column: int = self.column(error.start);
+        lineText: text = self.lineText(error.start);
+        lineNumber: text = Texts.toText(line);
+        // The margin is as wide as the line number.
+        margin: text = self.repeat(" ", len(lineNumber));
+
+        // The marks stop at the end of the line, and there is always one.
+        width: int = error.end - error.start;
+        if width > len(lineText) - (column - 1) {
+            width = len(lineText) - (column - 1);
+        }
+        if width < 1 {
+            width = 1;
+        }
+
+        Console.printl("error: " + error.message());
+        Console.printl(margin + "--> " + self.path + ":" + lineNumber + ":" + Texts.toText(column));
+        Console.printl(margin + " |");
+        Console.printl(lineNumber + " | " + lineText);
+        Console.printl(margin + " | " + self.repeat(" ", column - 1) + self.repeat("^", width));
+    }
+
+    /* `piece` joined `count` times: `repeat("^", 3)` is `"^^^"`. */
+    proc repeat(&self, piece: text, count: int) -> text {
+        result: text = "";
+        for i: int = 0; i < count; i++ {
+            result = result + piece;
+        }
+        return result;
+    }
+}

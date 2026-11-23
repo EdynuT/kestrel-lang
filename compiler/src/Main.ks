@@ -22,6 +22,7 @@ use lexer.Lexer;
 use lexer.Token;
 use lexer.TokenKind;
 use diag.Diagnostic;
+use diag.Reporter;
 
 proc main() {
     if !Files.exists(Process.arg(0)) {
@@ -33,7 +34,9 @@ proc main() {
     try {
         lexer.run();
     } catch error: Diagnostic {
-        Console.printl("error: " + error.message() + " at " + Texts.toText(error.start) + "-" + Texts.toText(error.end));
+        reporter: Reporter = Reporter(Process.arg(0), source);
+        reporter.report(&error);
+        burn reporter;
         burn error;
         Process.exit(1);
     } catch failure: Trap {

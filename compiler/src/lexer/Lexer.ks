@@ -175,7 +175,8 @@ public class Lexer {
                 if !self.atEnd() {
                     self.position += 2;
                 } else {
-                    throw Diagnostic("unterminated block comment", start, self.position);
+                    // Marks only the `/*`, as the rest of the file is the comment.
+                    throw Diagnostic("unterminated block comment", start, start + 2);
                 }
             } else {
                 return;
@@ -197,6 +198,8 @@ public class Lexer {
                 digit: tryte = self.current();
                 // Lowercase trytes run from 'a' = -1 down to 'm' = -13.
                 if digit != '0' && digit != '?' && !(digit >= 'A' && digit <= 'M') && !(digit >= 'm' && digit <= 'a') {
+                    // Marks the literal up to and including the bad digit.
+                    self.position++;
                     self.numberError("invalid digit in 0v literal", start);
                 }
                 self.position++;

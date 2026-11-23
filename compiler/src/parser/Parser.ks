@@ -66,13 +66,53 @@ public class Parser {
             }
             TokenKind.LeftParen => {
                 self.advance();
-                expr: Node = self.primary();
+                expression: Node = self.binary(0);
                 self.expect(TokenKind.RightParen, ")");
-                return expr;
+                return expression;
             }
             else => {
                 throw Diagnostic("expected an expression", token.start, token.end);
             }
+        }
+    }
+
+    proc binary(&self, level: int) -> Node throws Diagnostic {
+        if level > 4 {
+            return self.primary();
+        }
+        return self.moreBinary(level, self.binary(level + 1));
+    }
+    
+    proc moreBinary(&self, level: int, left: Node) -> Node throws Diagnostic {
+        kind: TokenKind = self.current().kind;
+        if !self.belongsTo(level, kind) {
+            return left;
+        }
+        self.advance();
+        start: int = left.start;
+        right: Node = self.binary(level + 1);
+
+        if level == 2 && self.belongsTo(2, self.current().kind) {
+            throw Diagnostic("comparisons cannot be chained", self.current().start, self.current().end);
+        }
+        
+        end: int = right.end;
+        children: List<Node> = List<Node>();
+        children.add(give left);
+        children.add(give right);
+        return self.moreBinary(level, Node(NodeKind.Binary, start, end, kind, give children));
+    }
+
+    proc belongsTo(&self, level: int, kind: TokenKind) -> bool {
+        match level {
+            0 => return kind == TokenKind.OrOr;
+            1 => return kind == TokenKind.AndAnd;
+            2 => return kind == TokenKind.EqualEqual || kind == TokenKind.NotEqual || kind == TokenKind.Less 
+                        || kind == TokenKind.Greater || kind == TokenKind.LessEqual 
+                        || kind == TokenKind.GreaterEqual || kind == TokenKind.Spaceship;
+            3 => return kind == TokenKind.Plus || kind == TokenKind.Minus;
+            4 => return kind == TokenKind.Star || kind == TokenKind.Slash || kind == TokenKind.Percent;
+            else => return false;
         }
     }
 }

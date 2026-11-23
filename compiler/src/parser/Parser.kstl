@@ -35,6 +35,12 @@ public class Parser {
         return Parser { source: source, lexer: give lexer, position: 0};
     }
 
+    public proc parse(&self) -> Node throws Diagnostic {
+        expression: Node = self.binary(0);
+        self.expect(TokenKind.EndOfFile, "end of file");
+        return expression;
+    }
+
     public proc current(&self) -> Token {
         return self.lexer.tokens.get(self.position);
     }
@@ -75,7 +81,6 @@ public class Parser {
             }
         }
     }
-
 
     proc unary(&self) -> Node throws Diagnostic {
         token: Token = self.current();

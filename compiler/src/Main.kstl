@@ -23,6 +23,9 @@ use lexer.Token;
 use lexer.TokenKind;
 use diag.Diagnostic;
 use diag.Reporter;
+use parser.Node;
+use parser.NodeKind;
+use parser.Parser;
 
 proc main() {
     if !Files.exists(Process.arg(0)) {
@@ -30,6 +33,22 @@ proc main() {
         Process.exit(1);
     }
     source: text = Files.read(Process.arg(0));
+    tokensOnly: bool = Process.argCount() > 1 && Process.arg(1) == "--tokens";
+    if !tokensOnly {
+        try {
+            parser: Parser = Parser(source);
+            tree: Node = parser.parse();
+            Console.printl(show(&tree, source));
+            burn tree;
+            burn parser;
+        } catch error: Diagnostic {
+            reporter: Reporter = Reporter(Process.arg(0), source);
+            reporter.report(&error);
+            burn reporter;
+            burn error;
+            Process.exit(1);
+        }
+    }
     lexer: Lexer = Lexer(source);
     try {
         lexer.run();
@@ -94,4 +113,38 @@ proc padRight(value: text, width: int) -> text {
         padding = padding + " ";
     }
     return value + padding;
+}
+
+proc symbol(kind: TokenKind) -> text {
+    match kind {
+        TokenKind.Plus => return "+";
+        TokenKind.Minus => return "-";
+        TokenKind.Star => return "*";
+        TokenKind.Slash => return "/";
+        TokenKind.Percent => return "%";
+        TokenKind.EqualEqual => return "==";
+        TokenKind.NotEqual => return "!=";
+        TokenKind.Less => return "<";
+        TokenKind.Greater => return ">";
+        TokenKind.LessEqual => return "<=";
+        TokenKind.GreaterEqual => return ">=";
+        TokenKind.Spaceship => return "<=>";
+        TokenKind.AndAnd => return "&&";
+        TokenKind.OrOr => return "||";
+        TokenKind.Bang => return "!";
+        else => return "?";
+    }
+}
+
+proc show(node: &Node, source: text) -> text {
+    if node.kind != NodeKind.Binary && node.kind != NodeKind.Unary {
+        return Texts.sub(source, node.start, node.end);
+    }
+    operator: text = symbol(node.operator);
+    if node.kind == NodeKind.Unary {
+        return "(" + operator + " " + show(node.children.get(0), source) + ")";
+    } else if node.kind == NodeKind.Binary {
+        return "(" + show(node.children.get(0), source) + " " + operator + " " + show(node.children.get(1), source) + ")";
+    }
+    return Texts.sub(source, node.start, node.end);
 }

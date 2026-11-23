@@ -2,18 +2,24 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /*
- * Lexer-related definitions for the compiler.
+ * Cuts the source code into tokens: names, keywords, numbers, texts,
+ * characters and symbols, skipping spaces and comments.
+ *
+ * Each token keeps only its kind and its place in the source
+ * (`start` to `end`); its text is read back from the source when
+ * needed. A malformed literal, an unclosed comment or an unknown
+ * character throws a `Diagnostic`.
  *
  * @since 0.8
  * @author Edynu
  */
 
-use std.io.Console;
-use std.os.Process;
 use std.text.Chars;
 use std.text.Texts;
+
 use lexer.Token;
 use lexer.TokenKind;
+use diag.Diagnostic;
 
 public class Lexer {
     source: text;
@@ -38,14 +44,14 @@ public class Lexer {
     }
 
     /* Cuts the whole source into tokens, ending with `EndOfFile`. */
-    public proc run(&self) {
+    public proc run(&self) throws Diagnostic {
         self.skipBlanks();
         while !self.atEnd() {
             start: int = self.position;
             char: tryte = self.current();
             kind: TokenKind = TokenKind.EndOfFile;
-            if Chars.isLetter(char) || char == '_' {
-                while !self.atEnd() && (Chars.isLetter(self.current()) || Chars.isDigit(self.current()) || self.current() == '_') {
+            if self.isNameStart(char) {
+                while !self.atEnd() && self.isNamePart(self.current()) {
                     self.position++;
                 }
                 kind = self.keyword(Texts.sub(self.source, start, self.position));
@@ -64,49 +70,77 @@ public class Lexer {
         append(self.tokens, Token { kind: TokenKind.EndOfFile, start: self.position, end: self.position });
     }
 
-    /* A text literal: from `"` to the next `"`, skipping `\"`. */
-    proc string(&self) -> TokenKind {
+    /* A text literal: from `"` to the next `"` on the same line. */
+    proc string(&self) -> TokenKind throws Diagnostic {
         start: int = self.position;
         self.position++;
-        while !self.atEnd() && self.current() != '"' {
-            if self.current() == '\\' {
-                self.position++;
-            }
-            self.position++;
+        while self.literalCharacter('"', start) {
         }
-        if self.atEnd() {
-            // For now; a `Diagnostic` will take its place.
-            Console.printl("error: unterminated string literal at " + Texts.toText(start));
-            Process.exit(1);
-        }
-        self.position++;
         return TokenKind.String;
     }
 
-    /* A character literal: from `'` to the next `'`, skipping `\'`. */
-    proc character(&self) -> TokenKind {
+    /* A character literal: exactly one character (or escape) between `'`. */
+    proc character(&self) -> TokenKind throws Diagnostic {
         start: int = self.position;
         self.position++;
-        while !self.atEnd() && self.current() != '\'' {
-            if self.current() == '\\' {
-                self.position++;
-            }
-            self.position++;
+        if !self.literalCharacter('\'', start) {
+            throw Diagnostic("empty character literal", start, self.position);
         }
-        if self.atEnd() {
-            // For now; a `Diagnostic` will take its place.
-            Console.printl("error: unterminated character literal at " + Texts.toText(start));
-            Process.exit(1);
+        if !self.take('\'') {
+            throw Diagnostic("character literal must hold exactly one character", start, self.position);
         }
-        self.position++;
         return TokenKind.Character;
     }
 
-    /* A decimal, ternary or heptavintimal integer, or a decimal real. */
-    proc number(&self) -> TokenKind {
-        if self.current() == '0' && (self.next() == 't' || self.next() == 'v') {
-            return self.ternary();
+    /*
+     * Reads one character of a text or character literal, with its escape
+     * (`\n`, `\t`, `\"`, `\'`, `\\`). Returns false when it reads the
+     * closing `quote`. A literal cannot cross a line break.
+     */
+    proc literalCharacter(&self, quote: tryte, start: int) -> bool throws Diagnostic {
+        if self.atEnd() || self.current() == '\n' {
+            if quote == '"' {
+                throw Diagnostic("unterminated string literal", start, self.position);
+            }
+            throw Diagnostic("unterminated character literal", start, self.position);
         }
+        character: tryte = self.current();
+        self.position++;
+        if character == quote {
+            return false;
+        }
+        if character == '\\' {
+            escape: tryte = self.current();
+            if self.atEnd() || (escape != 'n' && escape != 't' && escape != '"' && escape != '\'' && escape != '\\') {
+                throw Diagnostic("unknown escape", self.position - 1, self.position);
+            }
+            self.position++;
+        }
+        return true;
+    }
+
+    /* A decimal, ternary or heptavintimal integer, or a decimal real. */
+    proc number(&self) -> TokenKind throws Diagnostic {
+        start: int = self.position;
+        kind: TokenKind = TokenKind.Number;
+        if self.current() == '0' && (self.next() == 't' || self.next() == 'v') {
+            kind = self.ternary();
+        } else {
+            kind = self.decimal();
+        }
+        // `12abc`, `0x10`, `1.5e3`: a name glued to a number.
+        if !self.atEnd() && self.isNamePart(self.current()) {
+            while !self.atEnd() && self.isNamePart(self.current()) {
+                self.position++;
+            }
+            self.numberError("invalid character right after a number", start);
+        }
+        return kind;
+    }
+
+    /* A decimal integer, or a real with digits on both sides of the point. */
+    proc decimal(&self) -> TokenKind throws Diagnostic {
+        start: int = self.position;
         while !self.atEnd() && Chars.isDigit(self.current()) {
             self.position++;
         }
@@ -117,11 +151,14 @@ public class Lexer {
             }
             return TokenKind.RealNumber;
         }
+        if Texts.toInt(Texts.sub(self.source, start, self.position)) == null {
+            self.numberError("integer literal does not fit in an int", start);
+        }
         return TokenKind.Number;
     }
 
-    /* Skips spaces, line breaks and `//` comments. */
-    proc skipBlanks(&self) {
+    /* Skips spaces, line breaks, line comments and block comments. */
+    proc skipBlanks(&self) throws Diagnostic {
         while !self.atEnd() {
             if Chars.isSpace(self.current()) {
                 self.position++;
@@ -138,8 +175,7 @@ public class Lexer {
                 if !self.atEnd() {
                     self.position += 2;
                 } else {
-                    Console.printl("error: unterminated block comment at " + Texts.toText(start));
-                    Process.exit(1);
+                    throw Diagnostic("unterminated block comment", start, self.position);
                 }
             } else {
                 return;
@@ -148,7 +184,7 @@ public class Lexer {
     }
 
     /* A balanced-ternary integer in `0t` or `0v` notation. */
-    proc ternary(&self) -> TokenKind {
+    proc ternary(&self) -> TokenKind throws Diagnostic {
         start: int = self.position;
         prefix: tryte = self.next();
         self.position += 2;
@@ -157,7 +193,7 @@ public class Lexer {
                 self.position++;
             }
         } else {
-            while !self.atEnd() && (Chars.isLetter(self.current()) || Chars.isDigit(self.current()) || self.current() == '?') {
+            while !self.atEnd() && (self.isAsciiLetter(self.current()) || Chars.isDigit(self.current()) || self.current() == '?') {
                 digit: tryte = self.current();
                 // Lowercase trytes run from 'a' = -1 down to 'm' = -13.
                 if digit != '0' && digit != '?' && !(digit >= 'A' && digit <= 'M') && !(digit >= 'm' && digit <= 'a') {
@@ -173,16 +209,30 @@ public class Lexer {
         if (prefix == 't' && digits > 27) || (prefix == 'v' && digits > 9) {
             self.numberError("number literal has too many digits", start);
         }
-        if !self.atEnd() && (Chars.isLetter(self.current()) || Chars.isDigit(self.current()) || self.current() == '_') {
-            self.numberError("invalid character right after a number", start);
-        }
         return TokenKind.Number;
     }
 
-    /* Reports a number literal error and exits. */
-    proc numberError(&self, message: text, start: int) {
-        Console.printl("error: " + message + " at " + Texts.toText(start));
-        Process.exit(1);
+    /*
+     * Whether the character is a letter without accent (`A`..`Z`, `a`..`z`).
+     * Lowercase letters run from 'a' = -1 down to 'z' = -26.
+     */
+    proc isAsciiLetter(&self, character: tryte) -> bool {
+        return (character >= 'A' && character <= 'Z') || (character <= 'a' && character >= 'z');
+    }
+
+    /* Whether a name can start with this character: such a letter or `_`. */
+    proc isNameStart(&self, character: tryte) -> bool {
+        return self.isAsciiLetter(character) || character == '_';
+    }
+
+    /* Whether a name can go on with this character: a name start or a digit. */
+    proc isNamePart(&self, character: tryte) -> bool {
+        return self.isNameStart(character) || Chars.isDigit(character);
+    }
+
+    /* Throws a `Diagnostic` for a malformed number literal. */
+    proc numberError(&self, message: text, start: int) throws Diagnostic {
+        throw Diagnostic(message, start, self.position);
     }
 
     /* The character after the current one, or 0 at the end. */
@@ -343,7 +393,7 @@ public class Lexer {
      * The symbol at the current character, which it reads: the longest
      * one it can be (`->` before `-`).
      */
-    proc symbol(&self) -> TokenKind {
+    proc symbol(&self) -> TokenKind throws Diagnostic {
         char: tryte = self.current();
         self.position++;
         match char {
@@ -388,8 +438,7 @@ public class Lexer {
             '?' => return self.either('.', TokenKind.QuestionDot, ':', TokenKind.Elvis, TokenKind.Question);
             else => {
                 // For now; a `Diagnostic` will take its place.
-                Console.printl("error: unknown character at " + Texts.toText(self.position - 1));
-                Process.exit(1);
+                throw Diagnostic("unknown character", self.position - 1, self.position);
             }
         }
     }

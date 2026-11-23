@@ -1,9 +1,14 @@
 // Copyright (c) 2026 Edynu
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-/* 
- * Main entry point for the program. 
- * 
+/*
+ * The compiler's entry point: `ksc run File.ks` reads the file and
+ * prints its tokens, one per line, in the same format as
+ * `ksc File.ks --tokens`.
+ *
+ * A `Diagnostic` from the lexer is printed as `error: ...` and the
+ * program exits with status 1.
+ *
  * @since 0.8
  * @author Edynu
  */
@@ -16,6 +21,7 @@ use std.text.Texts;
 use lexer.Lexer;
 use lexer.Token;
 use lexer.TokenKind;
+use diag.Diagnostic;
 
 proc main() {
     if !Files.exists(Process.arg(0)) {
@@ -24,7 +30,18 @@ proc main() {
     }
     source: text = Files.read(Process.arg(0));
     lexer: Lexer = Lexer(source);
-    lexer.run();
+    try {
+        lexer.run();
+    } catch error: Diagnostic {
+        Console.printl("error: " + error.message() + " at " + Texts.toText(error.start) + "-" + Texts.toText(error.end));
+        burn error;
+        Process.exit(1);
+    } catch failure: Trap {
+        // A character outside the tryte table (such as `\r`) cannot be read.
+        Console.printl("error: " + failure.message());
+        burn failure;
+        Process.exit(1);
+    }
 
     for i: int = 0; i < len(lexer.tokens); i++ {
         Console.printl(padLeft(Texts.toText(lexer.tokens[i].start), 5) + ".." + padRight(Texts.toText(lexer.tokens[i].end), 5) + " " + describe(lexer.tokens[i], source));
@@ -36,7 +53,13 @@ proc describe(token: Token, source: text) -> text {
     word: text = Texts.sub(source, token.start, token.end);
     match token.kind {
         TokenKind.EndOfFile => return "end of file";
-        TokenKind.Number => return "number `" + Texts.toText(Texts.toInt(word) ?: 0) + "`";
+        TokenKind.Number => {
+            // A `?` digit (`0t+?`) makes the number NaT.
+            if Texts.indexOf(word, "?") >= 0 {
+                return "number `NaT`";
+            }
+            return "number `" + Texts.toText(Texts.toInt(word) ?: 0) + "`";
+        }
         TokenKind.RealNumber => return "real `" + Texts.toText(Texts.toReal(word) ?: 0.0) + "`";
         TokenKind.String => return "string literal";
         TokenKind.Character => return "character literal";

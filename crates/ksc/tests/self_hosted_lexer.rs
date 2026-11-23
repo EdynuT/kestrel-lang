@@ -10,6 +10,10 @@ fn compile_lexer_program(source: &str) -> kestrel_core::Module {
             include_str!("../../../compiler/src/lexer/Lexer.ks").to_string(),
         ),
         (
+            "diag.Diagnostic".to_string(),
+            include_str!("../../../compiler/src/diag/Diagnostic.ks").to_string(),
+        ),
+        (
             "lexer.Token".to_string(),
             include_str!("../../../compiler/src/lexer/Token.ks").to_string(),
         ),
@@ -120,7 +124,9 @@ fn numbers_and_dots() {
         ("0vABCDEFGHI", &[("Number", 0, 11), ("EndOfFile", 11, 11)]),
     ];
 
-    let mut source = String::from("use lexer.Lexer; use lexer.TokenKind;\nproc main() {\n");
+    let mut source = String::from(
+        "use lexer.Lexer; use lexer.TokenKind; use diag.Diagnostic;\nproc main() {\ntry {\n",
+    );
     for (case, (input, tokens)) in cases.iter().enumerate() {
         writeln!(
             source,
@@ -139,7 +145,7 @@ fn numbers_and_dots() {
         }
         writeln!(source, "burn l{case};").unwrap();
     }
-    source.push_str("}\n");
+    source.push_str("} catch error: Diagnostic { burn error; assert(false); }\n}\n");
 
     let module = compile_lexer_program(&source);
     let result = ksvm::Vm::new(&module, &b""[..], Vec::new())
@@ -149,29 +155,53 @@ fn numbers_and_dots() {
 }
 
 #[test]
-fn invalid_ternary_literals_report_errors() {
+fn invalid_literals_report_errors() {
     let module = compile_lexer_program(
-        "use lexer.Lexer; use std.os.Process;\n\
-         proc main() { l: Lexer = Lexer(Process.arg(0)); l.run(); burn l; }",
+        "use lexer.Lexer; use diag.Diagnostic; use std.io.Console; use std.os.Process; use std.text.Texts;\n\
+         proc main() {\n\
+             l: Lexer = Lexer(Process.arg(0));\n\
+             try { l.run(); } catch error: Diagnostic {\n\
+                 Console.printl(\"error: \" + error.message() + \" at \" + Texts.toText(error.start));\n\
+                 burn error; Process.exit(1);\n\
+             }\n\
+             burn l;\n\
+         }",
     );
     let cases = [
-        ("0t", "number literal has no digits"),
-        ("0v", "number literal has no digits"),
-        ("0t2", "number literal has no digits"),
-        ("0t+x", "invalid character right after a number"),
-        ("0t+_", "invalid character right after a number"),
-        ("0vN", "invalid digit in 0v literal"),
-        ("0vn", "invalid digit in 0v literal"),
-        ("0v9", "invalid digit in 0v literal"),
-        ("0vÁ", "invalid digit in 0v literal"),
-        ("0vA_", "invalid character right after a number"),
+        ("0t", "number literal has no digits", 2),
+        ("0v", "number literal has no digits", 2),
+        ("0t2", "number literal has no digits", 2),
+        ("0t+x", "invalid character right after a number", 2),
+        ("0t+_", "invalid character right after a number", 2),
+        ("0vN", "invalid digit in 0v literal", 2),
+        ("0vn", "invalid digit in 0v literal", 2),
+        ("0v9", "invalid digit in 0v literal", 2),
+        ("0vÁ", "number literal has no digits", 2),
+        ("0vA_", "invalid character right after a number", 2),
         (
             "0t0000000000000000000000000000",
             "number literal has too many digits",
+            2,
         ),
-        ("0vABCDEFGHIJ", "number literal has too many digits"),
+        ("0vABCDEFGHIJ", "number literal has too many digits", 2),
+        ("12abc", "invalid character right after a number", 2),
+        ("1.5e3", "invalid character right after a number", 2),
+        ("3812798742494", "integer literal does not fit in an int", 2),
+        ("\"open", "unterminated string literal", 2),
+        ("\"a\nb\"", "unterminated string literal", 2),
+        // The escape is reported at its backslash.
+        ("\"\\q\"", "unknown escape", 3),
+        ("''", "empty character literal", 2),
+        (
+            "'ab'",
+            "character literal must hold exactly one character",
+            2,
+        ),
+        ("/* open", "unterminated block comment", 2),
+        ("#", "unknown character", 2),
+        ("é", "unknown character", 2),
     ];
-    for (input, message) in cases {
+    for (input, message, start) in cases {
         let mut printed = Vec::new();
         let result = ksvm::Vm::new(&module, &b""[..], &mut printed)
             .with_args(vec![format!("  {input}")])
@@ -180,7 +210,7 @@ fn invalid_ternary_literals_report_errors() {
         assert_eq!(ksvm::exit_code(Ok(result)), 1, "{input:?}");
         assert_eq!(
             String::from_utf8(printed).unwrap(),
-            format!("error: {message} at 2\n"),
+            format!("error: {message} at {start}\n"),
             "{input:?}"
         );
     }

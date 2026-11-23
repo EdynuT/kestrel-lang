@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /*
- * Token-related definitions for the lexer.
+ * One piece of the source code found by the lexer: its kind and where
+ * it is (`start` to `end`, counted in characters from the start of
+ * the file; `end` is not included).
  *
  * @since 0.8
  * @author Edynu

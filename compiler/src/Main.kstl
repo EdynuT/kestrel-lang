@@ -145,6 +145,14 @@ proc symbol(kind: TokenKind) -> text {
     }
 }
 
+proc showList(label: text, node: &Node, source: text) -> text {
+    result: text = "(" + label;
+    for i: int = 0; i < node.children.len(); i++ {
+        result = result + " " + show(node.children.get(i), source);
+    }
+    return result + ")";
+}
+
 proc show(node: &Node, source: text) -> text {
     if node.kind == NodeKind.Block {
         result: text = "(block";
@@ -152,6 +160,18 @@ proc show(node: &Node, source: text) -> text {
             result = result + " " + show(node.children.get(i), source);
         }
         return result + ")";    
+    }
+    if node.kind == NodeKind.Program {
+        return showList("program", &node, source);
+    }
+    if node.kind == NodeKind.Proc {
+        return showList("proc", &node, source);
+    }
+    if node.kind == NodeKind.Parameters {
+        return showList("params", &node, source);
+    }
+    if node.kind == NodeKind.Parameter {
+        return "(param " + show(node.children.get(0), source) + " " + show(node.children.get(1), source) + ")";
     }
     if node.kind == NodeKind.Return{
         return "(return " + show(node.children.get(0), source) + ")";

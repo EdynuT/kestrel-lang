@@ -28,5 +28,9 @@ public enum NodeKind {
     While,
     For,
     Continue,
-    Break
+    Break,
+    Program,
+    Proc,
+    Parameters,
+    Parameter
 }

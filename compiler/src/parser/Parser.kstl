@@ -36,9 +36,13 @@ public class Parser {
     }
 
     public proc parse(&self) -> Node throws Diagnostic {
-        expression: Node = self.block();
-        self.expect(TokenKind.EndOfFile, "end of file");
-        return expression;
+        start: int = self.current().start;
+        children: List<Node> = List<Node>();
+        while self.current().kind != TokenKind.EndOfFile {
+            children.add(self.procedure());
+        }
+        end: int = self.current().end;
+        return Node(NodeKind.Program, start, end, TokenKind.EndOfFile, give children);
     }
 
     proc current(&self) -> Token {
@@ -183,6 +187,65 @@ public class Parser {
         end: int = self.current().end;
         self.advance();
         return Node(NodeKind.Block, token.start, end, TokenKind.LeftBrace, give children);
+    }
+
+    proc parameters(&self) -> Node throws Diagnostic {
+        start: int = self.current().start;
+        self.expect(TokenKind.LeftParen, "`(`");
+        children: List<Node> = List<Node>();
+        if self.current().kind != TokenKind.RightParen {
+            parameter: Node = self.parameter();
+            children.add(give parameter);
+            while self.current().kind == TokenKind.Comma {
+                self.advance();
+                nextParameter: Node = self.parameter();
+                children.add(give nextParameter);
+            }
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.RightParen, "`)`");
+        return Node(NodeKind.Parameters, start, end, TokenKind.LeftParen, give children);
+    }
+    
+    proc parameter(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Identifier {
+            throw Diagnostic("expected parameter name", token.start, token.end);
+        }
+        self.advance();
+        nameChildren: List<Node> = List<Node>();
+        name: Node = Node(NodeKind.Name, token.start, token.end, TokenKind.Identifier, give nameChildren);
+        self.expect(TokenKind.Colon, "`:`");
+        type: Node = self.typeName();
+        end: int = type.end;
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        children.add(give type);
+        return Node(NodeKind.Parameter, token.start, end, TokenKind.Identifier, give children);
+    }
+    
+    proc procedure(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Proc {
+            throw Diagnostic("expected 'proc'", token.start, token.end);
+        }
+        self.advance();
+        nameToken: Token = self.current();
+        if nameToken.kind != TokenKind.Identifier {
+            throw Diagnostic("expected procedure name", nameToken.start, nameToken.end);
+        }
+        self.advance();
+        children: List<Node> = List<Node>();
+        children.add(Node(NodeKind.Name, nameToken.start, nameToken.end, TokenKind.Identifier, List<Node>()));
+        children.add(self.parameters());
+        if self.current().kind == TokenKind.Arrow {
+            self.advance();
+            children.add(self.typeName());
+        }
+        body: Node = self.block();
+        end: int = body.end;
+        children.add(give body);
+        return Node(NodeKind.Proc, token.start, end, TokenKind.Proc, give children);
     }
 
     proc statement(&self) -> Node throws Diagnostic {

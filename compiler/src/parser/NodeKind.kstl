@@ -26,5 +26,7 @@ public enum NodeKind {
     Assignment,
     If,
     While,
-    For
+    For,
+    Continue,
+    Break
 }

@@ -169,6 +169,12 @@ proc show(node: &Node, source: text) -> text {
     if node.kind == NodeKind.For {
         return "(for " + show(node.children.get(0), source) + " " + show(node.children.get(1), source) + " " + show(node.children.get(2), source) + " " + show(node.children.get(3), source) + ")";
     }
+    if node.kind == NodeKind.Continue {
+        return "(continue)";
+    }
+    if node.kind == NodeKind.Break {
+        return "(break)";
+    }
     if node.kind == NodeKind.ExpressionStatement {
         return show(node.children.get(0), source);
     }

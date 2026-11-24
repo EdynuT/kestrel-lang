@@ -196,6 +196,8 @@ public class Parser {
             TokenKind.If => return self.ifStatement();
             TokenKind.While => return self.whileStatement();
             TokenKind.For => return self.forStatement();
+            TokenKind.Continue => return self.jumpStatement();
+            TokenKind.Break => return self.jumpStatement();
             else => return self.expressionStatement();
         }
     }
@@ -287,6 +289,25 @@ public class Parser {
         children.add(give increment);
         children.add(give body);
         return Node(NodeKind.For, token.start, end, TokenKind.For, give children);
+    }
+
+    proc jumpStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Continue && token.kind != TokenKind.Break {
+            throw Diagnostic("expected 'continue' or 'break'", token.start, token.end);
+        }
+        self.advance();
+        semicolon: Token = self.current();
+        if semicolon.kind != TokenKind.Semicolon {
+            throw Diagnostic("expected ';'", semicolon.start, semicolon.end);
+        }
+        self.advance();
+        end: int = semicolon.end;
+        kind: NodeKind = NodeKind.Continue;
+        if token.kind == TokenKind.Break {
+            kind = NodeKind.Break;
+        }
+        return Node(kind, token.start, end, token.kind, List<Node>());
     }
 
     proc step(&self) -> Node throws Diagnostic {

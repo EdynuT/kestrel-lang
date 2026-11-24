@@ -75,9 +75,9 @@ public class Parser {
     proc primary(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         match token.kind {
-            TokenKind.Number => {
+            TokenKind.Number | TokenKind.RealNumber | TokenKind.String | TokenKind.Character | TokenKind.True | TokenKind.False | TokenKind.Null | TokenKind.Poison => {
                 self.advance();
-                return Node(NodeKind.Number, token.start, token.end, TokenKind.EndOfFile, List<Node>());
+                return Node(NodeKind.Literal, token.start, token.end, token.kind, List<Node>());
             }
             TokenKind.Identifier => {
                 self.advance();
@@ -86,7 +86,7 @@ public class Parser {
             TokenKind.LeftParen => {
                 self.advance();
                 expression: Node = self.binary(0);
-                self.expect(TokenKind.RightParen, ")");
+                self.expect(TokenKind.RightParen, "`)`");
                 return expression;
             }
             else => {

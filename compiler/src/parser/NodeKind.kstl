@@ -34,5 +34,6 @@ public enum NodeKind {
     Parameters,
     Parameter,
     Call,
-    Field
+    Field,
+    Literal
 }

@@ -158,6 +158,18 @@ public class Parser {
         }
     }
 
+    proc isAssignment(&self, kind: TokenKind) -> bool {
+        match kind {
+            TokenKind.Equal => return true;
+            TokenKind.PlusEqual => return true;
+            TokenKind.MinusEqual => return true;
+            TokenKind.StarEqual => return true;
+            TokenKind.SlashEqual => return true;
+            TokenKind.PercentEqual => return true;
+            else => return false;
+        }
+    }
+
     proc block(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.LeftBrace {
@@ -187,6 +199,18 @@ public class Parser {
 
     proc expressionStatement(&self) -> Node throws Diagnostic {
         expression: Node = self.binary(0);
+        if self.isAssignment(self.current().kind) {
+            kind: TokenKind = self.current().kind;
+            self.advance();
+            value: Node = self.binary(0);
+            semicolonEnd: int = self.current().end;
+            self.expect(TokenKind.Semicolon, "`;`");
+            start: int = expression.start;
+            children: List<Node> = List<Node>();
+            children.add(give expression);
+            children.add(give value);
+            return Node(NodeKind.Assignment, start, semicolonEnd, kind, give children);
+        }
         token: Token = self.current();
         if token.kind != TokenKind.Semicolon {
             throw Diagnostic("expected ';'", token.start, token.end);

@@ -123,6 +123,12 @@ proc symbol(kind: TokenKind) -> text {
         TokenKind.Star => return "*";
         TokenKind.Slash => return "/";
         TokenKind.Percent => return "%";
+        TokenKind.Equal => return "=";
+        TokenKind.PlusEqual => return "+=";
+        TokenKind.MinusEqual => return "-=";
+        TokenKind.StarEqual => return "*=";
+        TokenKind.SlashEqual => return "/=";
+        TokenKind.PercentEqual => return "%=";
         TokenKind.EqualEqual => return "==";
         TokenKind.NotEqual => return "!=";
         TokenKind.Less => return "<";
@@ -155,6 +161,9 @@ proc show(node: &Node, source: text) -> text {
         return "(" + symbol(node.operator) + " " + show(node.children.get(0), source) + ")";
     }
     if node.kind == NodeKind.Binary {
+        return "(" + show(node.children.get(0), source) + " " + symbol(node.operator) + " " + show(node.children.get(1), source) + ")";
+    }
+    if node.kind == NodeKind.Assignment {
         return "(" + show(node.children.get(0), source) + " " + symbol(node.operator) + " " + show(node.children.get(1), source) + ")";
     }
     if node.kind == NodeKind.Declaration {

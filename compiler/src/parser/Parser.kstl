@@ -202,19 +202,12 @@ public class Parser {
 
     proc expressionStatement(&self) -> Node throws Diagnostic {
         expression: Node = self.step();
-        token: Token = self.current();
-        if token.kind != TokenKind.Semicolon {
-            throw Diagnostic("expected ';'", token.start, token.end);
-        }
-        self.advance();
-        if expression.kind == NodeKind.Assignment {
-            expression.end = token.end;
-            return expression;
-        }
-        children: List<Node> = List<Node>();
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
         start: int = expression.start;
+        children: List<Node> = List<Node>();
         children.add(give expression);
-        return Node(NodeKind.ExpressionStatement, start, token.end, TokenKind.Semicolon, give children);
+        return Node(NodeKind.ExpressionStatement, start, end, TokenKind.Semicolon, give children);
     }
 
     proc returnStatement(&self) -> Node throws Diagnostic {

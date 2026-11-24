@@ -36,5 +36,8 @@ public enum NodeKind {
     Call,
     Field,
     Literal,
-    Use
+    Use,
+    Public,
+    Enum,
+    EnumItem
 }

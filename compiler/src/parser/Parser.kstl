@@ -43,7 +43,7 @@ public class Parser {
                 children.add(self.useDeclaration());
                 continue;
             }
-            children.add(self.procedure());
+            children.add(self.topLevel());
         }
         end: int = self.current().end;
         return Node(NodeKind.Program, start, end, TokenKind.EndOfFile, give children);
@@ -273,6 +273,8 @@ public class Parser {
         children.add(give type);
         return Node(NodeKind.Parameter, token.start, end, TokenKind.Identifier, give children);
     }
+
+    // ================= Procedures ===================
     
     proc procedure(&self) -> Node throws Diagnostic {
         token: Token = self.current();
@@ -297,6 +299,15 @@ public class Parser {
         children.add(give body);
         return Node(NodeKind.Proc, token.start, end, TokenKind.Proc, give children);
     }
+
+    proc enumOrProcedure(&self) -> Node throws Diagnostic {
+        if self.current().kind == TokenKind.Enum {
+            return self.enumDeclaration();
+        }
+        return self.procedure();
+    }
+
+    // ================= Statements ===================
 
     proc statement(&self) -> Node throws Diagnostic {
         token: Token = self.current();
@@ -446,6 +457,8 @@ public class Parser {
         return target;
     }
 
+    // ================= Declarations ===================
+
     proc declaration(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.Identifier {
@@ -482,6 +495,8 @@ public class Parser {
         return Node(NodeKind.Use, useToken.start, end, TokenKind.EndOfFile, give children);
     }
 
+    // ================= Other Stuff ===================
+
     proc useName(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind == TokenKind.Identifier || token.kind == TokenKind.Text {
@@ -490,6 +505,65 @@ public class Parser {
             return Node(NodeKind.Name, token.start, token.end, kind, List<Node>());
         }
         throw Diagnostic("expected a name in a use declaration", token.start, token.end);
+    }
+
+    proc topLevel(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind == TokenKind.Public {
+            start: int = token.start;
+            self.advance();
+            declaration: Node = self.enumOrProcedure();
+            end: int = declaration.end;
+            children: List<Node> = List<Node>();
+            children.add(give declaration);
+            return Node(NodeKind.Public, start, end, TokenKind.Public, give children);
+        }
+        return self.enumOrProcedure();
+    }
+
+    proc enumDeclaration(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        start: int = token.start;
+        self.expect(TokenKind.Enum, "`enum`");
+        name: Node = self.name("enum name");
+        self.expect(TokenKind.LeftBrace, "`{`");
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        while self.current().kind != TokenKind.RightBrace {
+            children.add(self.enumItem());
+            if self.current().kind == TokenKind.Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.RightBrace, "`}`");
+        return Node(NodeKind.Enum, start, end, TokenKind.Enum, give children);
+    }
+
+    proc enumItem(&self) -> Node throws Diagnostic {
+        name: Node = self.name("enum item name");
+        start: int = name.start;
+        end: int = name.end;
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        if self.current().kind == TokenKind.Equal {
+            self.advance();
+            value: Node = self.binary(0);
+            end = value.end;
+            children.add(give value);
+        }
+        return Node(NodeKind.EnumItem, start, end, TokenKind.Identifier, give children);
+    }
+
+    proc name(&self, what: text) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Identifier {
+            throw Diagnostic("expected " + what, token.start, token.end);
+        }
+        self.advance();
+        return Node(NodeKind.Name, token.start, token.end, token.kind, List<Node>());
     }
     
     proc typeName(&self) -> Node throws Diagnostic {

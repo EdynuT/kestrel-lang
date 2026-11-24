@@ -171,6 +171,18 @@ proc show(node: &Node, source: text) -> text {
     if node.kind == NodeKind.Use {
         return showList("use", &node, source);
     }
+    if node.kind == NodeKind.Public {
+        return showList("public", &node, source);
+    }
+    if node.kind == NodeKind.Enum {
+        return showList("enum", &node, source);
+    }
+    if node.kind == NodeKind.EnumItem {
+        if node.children.len() == 1 {
+            return "(" + show(node.children.get(0), source) + ")";
+        }
+        return "(" + show(node.children.get(0), source) + " " + show(node.children.get(1), source) + ")";
+    }
     if node.kind == NodeKind.Proc {
         return showList("proc", &node, source);
     }

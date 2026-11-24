@@ -161,6 +161,9 @@ proc show(node: &Node, source: text) -> text {
         }
         return result + ")";    
     }
+    if node.kind == NodeKind.Call {
+        return showList("call", &node, source);
+    }
     if node.kind == NodeKind.Program {
         return showList("program", &node, source);
     }

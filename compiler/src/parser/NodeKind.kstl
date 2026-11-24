@@ -32,5 +32,6 @@ public enum NodeKind {
     Program,
     Proc,
     Parameters,
-    Parameter
+    Parameter,
+    Call
 }

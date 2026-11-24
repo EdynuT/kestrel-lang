@@ -118,8 +118,32 @@ public class Parser {
                 self.advance();
                 return self.unary();
             }
-            else => return self.primary();
+            else => return self.postfix();
         }
+    }
+
+    proc postfix(&self) -> Node throws Diagnostic {
+        return self.morePostfix(self.primary());
+    }
+
+    proc morePostfix(&self, callee: Node) -> Node throws Diagnostic {
+        if self.current().kind != TokenKind.LeftParen {
+            return callee;
+        }
+        self.advance();
+        start: int = callee.start;
+        children: List<Node> = List<Node>();
+        children.add(give callee);
+        if self.current().kind != TokenKind.RightParen {
+            children.add(self.binary(0));
+            while self.current().kind == TokenKind.Comma {
+                self.advance();
+                children.add(self.binary(0));
+            }
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.RightParen, "`)`");
+        return self.morePostfix(Node(NodeKind.Call, start, end, TokenKind.EndOfFile, give children));
     }
 
     proc binary(&self, level: int) -> Node throws Diagnostic {

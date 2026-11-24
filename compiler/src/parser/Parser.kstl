@@ -126,14 +126,21 @@ public class Parser {
         return self.morePostfix(self.primary());
     }
 
-    proc morePostfix(&self, callee: Node) -> Node throws Diagnostic {
-        if self.current().kind != TokenKind.LeftParen {
-            return callee;
+    proc morePostfix(&self, target: Node) -> Node throws Diagnostic {
+        if self.current().kind == TokenKind.LeftParen {
+            return self.morePostfix(self.call(give target));
         }
+        if self.current().kind == TokenKind.Dot {
+            return self.morePostfix(self.field(give target));
+        }
+        return target;
+    }
+
+    proc call(&self, target: Node) -> Node throws Diagnostic {
         self.advance();
-        start: int = callee.start;
+        start: int = target.start;
         children: List<Node> = List<Node>();
-        children.add(give callee);
+        children.add(give target);
         if self.current().kind != TokenKind.RightParen {
             children.add(self.binary(0));
             while self.current().kind == TokenKind.Comma {
@@ -143,7 +150,22 @@ public class Parser {
         }
         end: int = self.current().end;
         self.expect(TokenKind.RightParen, "`)`");
-        return self.morePostfix(Node(NodeKind.Call, start, end, TokenKind.EndOfFile, give children));
+        return Node(NodeKind.Call, start, end, TokenKind.LeftParen, give children);
+    }
+
+    proc field(&self, target: Node) -> Node throws Diagnostic {
+        self.advance();
+        start: int = target.start;
+        children: List<Node> = List<Node>();
+        children.add(give target);
+        if self.current().kind != TokenKind.Identifier {
+            throw Diagnostic("expected a field name after `.`", self.current().start, self.current().end);
+        }
+        name: Node = Node(NodeKind.Name, self.current().start, self.current().end, TokenKind.EndOfFile, List<Node>());
+        end: int = name.end;
+        self.advance();
+        children.add(give name);
+        return Node(NodeKind.Field, start, end, TokenKind.Dot, give children);
     }
 
     proc binary(&self, level: int) -> Node throws Diagnostic {
@@ -402,7 +424,7 @@ public class Parser {
         token: Token = self.current();
         kind: TokenKind = token.kind;
         if self.isAssignment(kind) || kind == TokenKind.PlusPlus || kind == TokenKind.MinusMinus {
-            if target.kind != NodeKind.Name {
+            if target.kind != NodeKind.Name && target.kind != NodeKind.Field {
                 throw Diagnostic("cannot assign to this expression", target.start, target.end);
             }
             self.advance();

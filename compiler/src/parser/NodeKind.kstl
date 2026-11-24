@@ -33,5 +33,6 @@ public enum NodeKind {
     Proc,
     Parameters,
     Parameter,
-    Call
+    Call,
+    Field
 }

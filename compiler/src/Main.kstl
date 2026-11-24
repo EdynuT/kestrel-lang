@@ -141,6 +141,7 @@ proc symbol(kind: TokenKind) -> text {
         TokenKind.AndAnd => return "&&";
         TokenKind.OrOr => return "||";
         TokenKind.Bang => return "!";
+        TokenKind.Dot => return ".";
         else => return "?";
     }
 }
@@ -204,7 +205,7 @@ proc show(node: &Node, source: text) -> text {
     if node.kind == NodeKind.Unary {
         return "(" + symbol(node.operator) + " " + show(node.children.get(0), source) + ")";
     }
-    if node.kind == NodeKind.Binary {
+    if node.kind == NodeKind.Binary || node.kind == NodeKind.Field {
         return "(" + show(node.children.get(0), source) + " " + symbol(node.operator) + " " + show(node.children.get(1), source) + ")";
     }
     if node.kind == NodeKind.Assignment {

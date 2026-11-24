@@ -23,5 +23,7 @@ public enum NodeKind {
     ExpressionStatement,
     Declaration,
     Type,
-    Assignment
+    Assignment,
+    If,
+    Else
 }

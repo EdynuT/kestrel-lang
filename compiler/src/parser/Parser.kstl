@@ -193,6 +193,7 @@ public class Parser {
         match token.kind {
             TokenKind.LeftBrace => return self.block();
             TokenKind.Return => return self.returnStatement();
+            TokenKind.If => return self.ifStatement();
             else => return self.expressionStatement();
         }
     }
@@ -237,6 +238,33 @@ public class Parser {
         children: List<Node> = List<Node>();
         children.add(give expression);
         return Node(NodeKind.Return, token.start, semicolon.end, TokenKind.Return, give children);
+    }
+
+    proc ifStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.If {
+            throw Diagnostic("expected 'if'", token.start, token.end);
+        }
+        self.advance();
+        condition: Node = self.binary(0);
+        thenBlock: Node = self.block();
+        end: int = thenBlock.end;
+        children: List<Node> = List<Node>();
+        children.add(give condition);
+        children.add(give thenBlock);
+        if self.current().kind == TokenKind.Else {
+            self.advance();
+            if self.current().kind == TokenKind.If {
+                elseIfNode: Node = self.ifStatement();
+                end = elseIfNode.end;
+                children.add(give elseIfNode);
+            } else {
+                elseBlock: Node = self.block();
+                end = elseBlock.end;
+                children.add(give elseBlock);
+            }
+        }
+        return Node(NodeKind.If, token.start, end, TokenKind.If, give children);
     }
 
     proc declaration(&self) -> Node throws Diagnostic {

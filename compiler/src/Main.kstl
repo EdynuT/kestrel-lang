@@ -154,6 +154,13 @@ proc show(node: &Node, source: text) -> text {
     if node.kind == NodeKind.Return{
         return "(return " + show(node.children.get(0), source) + ")";
     }
+    if node.kind == NodeKind.If {
+        result: text = "(if " + show(node.children.get(0), source) + " " + show(node.children.get(1), source);
+        if node.children.len() == 3 {
+            result = result + " " + show(node.children.get(2), source);
+        }
+        return result + ")";
+    }
     if node.kind == NodeKind.ExpressionStatement {
         return show(node.children.get(0), source);
     }

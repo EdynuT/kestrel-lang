@@ -30,19 +30,7 @@ public class Lexer {
     public proc Lexer(source: text) -> Lexer {
         return Lexer { source: source, position: 0, tokens: List<Token>() };
     }
-
-    public proc current(&self) -> tryte {
-        if self.position < len(self.source) {
-            return self.source[self.position];
-        }
-        return 0;
-    }
-
-    /* Whether every character was read. */
-    public proc atEnd(&self) -> bool {
-        return self.position >= len(self.source);
-    }
-
+    
     /* Cuts the whole source into tokens, ending with `EndOfFile`. */
     public proc run(&self) throws Diagnostic {
         self.skipBlanks();
@@ -68,6 +56,18 @@ public class Lexer {
             self.skipBlanks();
         }
         self.tokens.add(Token { kind: TokenKind.EndOfFile, start: self.position, end: self.position });
+    }
+    
+    proc current(&self) -> tryte {
+        if self.position < len(self.source) {
+            return self.source[self.position];
+        }
+        return 0;
+    }
+
+    /* Whether every character was read. */
+    proc atEnd(&self) -> bool {
+        return self.position >= len(self.source);
     }
 
     /* A text literal: from `"` to the next `"` on the same line. */

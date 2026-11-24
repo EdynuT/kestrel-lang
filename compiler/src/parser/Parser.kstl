@@ -41,11 +41,11 @@ public class Parser {
         return expression;
     }
 
-    public proc current(&self) -> Token {
+    proc current(&self) -> Token {
         return self.lexer.tokens.get(self.position);
     }
 
-    public proc peek(&self, offset: int) -> Token {
+    proc peek(&self, offset: int) -> Token {
         index: int = self.position + offset;
         last: int = self.lexer.tokens.len() - 1;
         if index > last {
@@ -54,21 +54,21 @@ public class Parser {
         return self.lexer.tokens.get(index);
     }
 
-    public proc advance(&self) {
+    proc advance(&self) {
         if self.current().kind != TokenKind.EndOfFile {
             self.position++;
         }
     }
 
     /* Reads the current token if it is `kind`; `what` names it in the error: "`)`". */
-    public proc expect(&self, kind: TokenKind, what: text) throws Diagnostic {
+    proc expect(&self, kind: TokenKind, what: text) throws Diagnostic {
         if self.current().kind != kind {
             throw Diagnostic("expected " + what, self.current().start, self.current().end);
         }
         self.advance();
     }
 
-    public proc primary(&self) -> Node throws Diagnostic {
+    proc primary(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         match token.kind {
             TokenKind.Number => {

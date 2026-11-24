@@ -129,6 +129,8 @@ proc symbol(kind: TokenKind) -> text {
         TokenKind.StarEqual => return "*=";
         TokenKind.SlashEqual => return "/=";
         TokenKind.PercentEqual => return "%=";
+        TokenKind.PlusPlus => return "++";
+        TokenKind.MinusMinus => return "--";
         TokenKind.EqualEqual => return "==";
         TokenKind.NotEqual => return "!=";
         TokenKind.Less => return "<";
@@ -161,6 +163,12 @@ proc show(node: &Node, source: text) -> text {
         }
         return result + ")";
     }
+    if node.kind == NodeKind.While {
+        return "(while " + show(node.children.get(0), source) + " " + show(node.children.get(1), source) + ")";
+    }
+    if node.kind == NodeKind.For {
+        return "(for " + show(node.children.get(0), source) + " " + show(node.children.get(1), source) + " " + show(node.children.get(2), source) + " " + show(node.children.get(3), source) + ")";
+    }
     if node.kind == NodeKind.ExpressionStatement {
         return show(node.children.get(0), source);
     }
@@ -171,6 +179,9 @@ proc show(node: &Node, source: text) -> text {
         return "(" + show(node.children.get(0), source) + " " + symbol(node.operator) + " " + show(node.children.get(1), source) + ")";
     }
     if node.kind == NodeKind.Assignment {
+        if node.children.len() == 1 {
+            return "(" + show(node.children.get(0), source) + symbol(node.operator) + ")";
+        }
         return "(" + show(node.children.get(0), source) + " " + symbol(node.operator) + " " + show(node.children.get(1), source) + ")";
     }
     if node.kind == NodeKind.Declaration {

@@ -194,29 +194,23 @@ public class Parser {
             TokenKind.LeftBrace => return self.block();
             TokenKind.Return => return self.returnStatement();
             TokenKind.If => return self.ifStatement();
+            TokenKind.While => return self.whileStatement();
+            TokenKind.For => return self.forStatement();
             else => return self.expressionStatement();
         }
     }
 
     proc expressionStatement(&self) -> Node throws Diagnostic {
-        expression: Node = self.binary(0);
-        if self.isAssignment(self.current().kind) {
-            kind: TokenKind = self.current().kind;
-            self.advance();
-            value: Node = self.binary(0);
-            semicolonEnd: int = self.current().end;
-            self.expect(TokenKind.Semicolon, "`;`");
-            start: int = expression.start;
-            children: List<Node> = List<Node>();
-            children.add(give expression);
-            children.add(give value);
-            return Node(NodeKind.Assignment, start, semicolonEnd, kind, give children);
-        }
+        expression: Node = self.step();
         token: Token = self.current();
         if token.kind != TokenKind.Semicolon {
             throw Diagnostic("expected ';'", token.start, token.end);
         }
         self.advance();
+        if expression.kind == NodeKind.Assignment {
+            expression.end = token.end;
+            return expression;
+        }
         children: List<Node> = List<Node>();
         start: int = expression.start;
         children.add(give expression);
@@ -265,6 +259,64 @@ public class Parser {
             }
         }
         return Node(NodeKind.If, token.start, end, TokenKind.If, give children);
+    }
+
+    proc whileStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.While {
+            throw Diagnostic("expected 'while'", token.start, token.end);
+        }
+        self.advance();
+        condition: Node = self.binary(0);
+        body: Node = self.block();
+        end: int = body.end;
+        children: List<Node> = List<Node>();
+        children.add(give condition);
+        children.add(give body);
+        return Node(NodeKind.While, token.start, end, TokenKind.While, give children);
+    }
+
+    proc forStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.For {
+            throw Diagnostic("expected 'for'", token.start, token.end);
+        }
+        self.advance();
+        initializer: Node = self.declaration();
+        condition: Node = self.binary(0);
+        self.expect(TokenKind.Semicolon, "`;`");
+        increment: Node = self.step();
+        body: Node = self.block();
+        end: int = body.end;
+        children: List<Node> = List<Node>();
+        children.add(give initializer);
+        children.add(give condition);
+        children.add(give increment);
+        children.add(give body);
+        return Node(NodeKind.For, token.start, end, TokenKind.For, give children);
+    }
+
+    proc step(&self) -> Node throws Diagnostic {
+        target: Node = self.binary(0);
+        token: Token = self.current();
+        kind: TokenKind = token.kind;
+        if self.isAssignment(kind) || kind == TokenKind.PlusPlus || kind == TokenKind.MinusMinus {
+            if target.kind != NodeKind.Name {
+                throw Diagnostic("cannot assign to this expression", target.start, target.end);
+            }
+            self.advance();
+            start: int = target.start;
+            end: int = token.end;
+            children: List<Node> = List<Node>();
+            children.add(give target);
+            if kind != TokenKind.PlusPlus && kind != TokenKind.MinusMinus {
+                value: Node = self.binary(0);
+                end = value.end;
+                children.add(give value);
+            }
+            return Node(NodeKind.Assignment, start, end, kind, give children);
+        }
+        return target;
     }
 
     proc declaration(&self) -> Node throws Diagnostic {

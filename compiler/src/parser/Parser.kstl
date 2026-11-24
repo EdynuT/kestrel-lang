@@ -39,6 +39,10 @@ public class Parser {
         start: int = self.current().start;
         children: List<Node> = List<Node>();
         while self.current().kind != TokenKind.EndOfFile {
+            if self.current().kind == TokenKind.Use {
+                children.add(self.useDeclaration());
+                continue;
+            }
             children.add(self.procedure());
         }
         end: int = self.current().end;
@@ -462,6 +466,30 @@ public class Parser {
         children.add(give value);
 
         return Node(NodeKind.Declaration, token.start, end, TokenKind.EndOfFile, give children);
+    }
+
+    proc useDeclaration(&self) -> Node throws Diagnostic {
+        useToken: Token = self.current();
+        self.advance();
+        children: List<Node> = List<Node>();
+        children.add(self.useName());
+        while self.current().kind == TokenKind.Dot {
+            self.advance();
+            children.add(self.useName());
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
+        return Node(NodeKind.Use, useToken.start, end, TokenKind.EndOfFile, give children);
+    }
+
+    proc useName(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind == TokenKind.Identifier || token.kind == TokenKind.Text {
+            kind: TokenKind = token.kind;
+            self.advance();
+            return Node(NodeKind.Name, token.start, token.end, kind, List<Node>());
+        }
+        throw Diagnostic("expected a name in a use declaration", token.start, token.end);
     }
     
     proc typeName(&self) -> Node throws Diagnostic {

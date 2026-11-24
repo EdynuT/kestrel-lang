@@ -168,6 +168,9 @@ proc show(node: &Node, source: text) -> text {
     if node.kind == NodeKind.Program {
         return showList("program", &node, source);
     }
+    if node.kind == NodeKind.Use {
+        return showList("use", &node, source);
+    }
     if node.kind == NodeKind.Proc {
         return showList("proc", &node, source);
     }

@@ -286,5 +286,11 @@ proc show(node: &Node, source: text) -> text {
         }
         return showList(Texts.sub(source, node.start, end), &node, source);
     }
+    if node.kind == NodeKind.Index {
+        return showList("index", &node, source);
+    }
+    if node.kind == NodeKind.Name && node.operator == TokenKind.LeftBracket {
+        return Texts.sub(source, node.start, node.end) + "[]";
+    }
     return Texts.sub(source, node.start, node.end);
 }

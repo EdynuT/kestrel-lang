@@ -136,6 +136,8 @@ public class Parser {
             return self.enumDeclaration();
         } else if self.current().kind == TokenKind.Class {
             return self.classDeclaration();
+        } else if self.current().kind == TokenKind.Const {
+            return self.constDeclaration();
         }
         return self.procedure();
     }
@@ -294,6 +296,25 @@ public class Parser {
             children.add(give value);
         }
         return Node(NodeKind.EnumItem, start, end, TokenKind.Identifier, give children);
+    }
+
+    /* `const LIMIT: int = 9;`: a value known at compile time. */
+    proc constDeclaration(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        start: int = token.start;
+        self.advance();
+        name: Node = self.name("constant name");
+        self.expect(TokenKind.Colon, "`:`");
+        typeNode: Node = self.typeName();
+        self.expect(TokenKind.Equal, "`=`");
+        value: Node = self.binary(0);
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        children.add(give typeNode);
+        children.add(give value);
+        return Node(NodeKind.Const, start, end, TokenKind.Const, give children);
     }
 
     /* `class Name { members }`. */

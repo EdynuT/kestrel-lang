@@ -56,5 +56,6 @@ public enum NodeKind {
     ArrayLiteral,
     Claim,
     Optional,
-    ArrayType
+    ArrayType,
+    Const
 }

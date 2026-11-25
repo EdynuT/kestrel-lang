@@ -177,6 +177,9 @@ proc show(node: &Node, source: text) -> text {
     if node.kind == NodeKind.Public {
         return showList("public", &node, source);
     }
+    if node.kind == NodeKind.Const {
+        return showList("const", &node, source);
+    }
     if node.kind == NodeKind.Class {
         return showList("class", &node, source);
     }

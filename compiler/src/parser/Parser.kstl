@@ -371,6 +371,8 @@ public class Parser {
             TokenKind.Continue => return self.jumpStatement();
             TokenKind.Break => return self.jumpStatement();
             TokenKind.Burn => return self.burnStatement();
+            TokenKind.Try => return self.tryStatement();
+            TokenKind.Throw => return self.throwStatement();
             else => return self.expressionStatement();
         }
     }
@@ -495,6 +497,39 @@ public class Parser {
         children: List<Node> = List<Node>();
         children.add(give name);
         return Node(NodeKind.Burn, token.start, end, token.kind, give children);
+    }
+
+    proc tryStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Try {
+            throw Diagnostic("expected 'try'", token.start, token.end);
+        }
+        self.advance();
+        children: List<Node> = List<Node>();
+        children.add(self.block());
+        if self.current().kind != TokenKind.Catch {
+            throw Diagnostic("expected `catch`", self.current().start, self.current().end);
+        }
+        end: int = 0;
+        while self.current().kind == TokenKind.Catch {
+            clause: Node = self.catchClause();
+            end = clause.end;
+            children.add(give clause);
+        }
+        return Node(NodeKind.Try, token.start, end, token.kind, give children);
+    }
+
+    proc throwStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Throw {
+            throw Diagnostic("expected 'throw'", token.start, token.end);
+        }
+        self.advance();
+        children: List<Node> = List<Node>();
+        children.add(self.binary(0));
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
+        return Node(NodeKind.Throw, token.start, end, token.kind, give children);
     }
 
     // ================= Declarations ===================
@@ -706,5 +741,21 @@ public class Parser {
             return Node(NodeKind.Throws, start, end, TokenKind.Throws, give errors);
         }
         throw Diagnostic("expected throws clause", self.current().start, self.current().end);
+    }
+
+    proc catchClause(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Catch {
+            throw Diagnostic("expected 'catch'", token.start, token.end);
+        }
+        self.advance();
+        children: List<Node> = List<Node>();
+        children.add(self.name("error name"));
+        self.expect(TokenKind.Colon, "`:`");
+        children.add(self.typeName());
+        body: Node = self.block();
+        end: int = body.end;
+        children.add(give body);
+        return Node(NodeKind.Catch, token.start, end, token.kind, give children);
     }
 }

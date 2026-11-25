@@ -45,5 +45,8 @@ public enum NodeKind {
     Borrow,
     Throws,
     Give,
-    Burn
+    Burn,
+    Try,
+    Catch,
+    Throw
 }

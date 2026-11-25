@@ -218,12 +218,25 @@ proc show(node: &Node, source: text) -> text {
     if node.kind == NodeKind.Return{
         return "(return " + show(node.children.get(0), source) + ")";
     }
+    if node.kind == NodeKind.Throw {
+        return "(throw " + show(node.children.get(0), source) + ")";
+    }
     if node.kind == NodeKind.If {
         result: text = "(if " + show(node.children.get(0), source) + " " + show(node.children.get(1), source);
         if node.children.len() == 3 {
             result = result + " " + show(node.children.get(2), source);
         }
         return result + ")";
+    }
+    if node.kind == NodeKind.Try {
+        result: text = "(try " + show(node.children.get(0), source);
+        for i: int = 1; i < node.children.len(); i++ {
+            result = result + " " + show(node.children.get(i), source);
+        }
+        return result + ")";
+    }
+    if node.kind == NodeKind.Catch {
+        return showList("catch", &node, source);
     }
     if node.kind == NodeKind.While {
         return "(while " + show(node.children.get(0), source) + " " + show(node.children.get(1), source) + ")";

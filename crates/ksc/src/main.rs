@@ -39,7 +39,7 @@ const USAGE: &str = "usage: ksc new <Name>          create a project
        ksc check <File.kstl> [--stdin]  only report errors (for editors)
        ksc doc <File.kstl> --at <byte> [--stdin]  the documentation of the name there
        ksc std <collections/List.kstl>  print a file of the standard library
-       ksc nav <File.kstl> (--at <byte> | --id <id>) --what <definition|implementations|supers> [--stdin]
+       ksc nav <File.kstl> (--at <byte> | --id <id>) --what <definition|implementations|supers|references> [--stdin]
        ksc <File.kstl> [-o out] [--kstb] [--disasm] [--tokens] [--ast] [--test]";
 
 fn main() -> ExitCode {
@@ -279,10 +279,11 @@ fn doc(args: &[String]) -> ExitCode {
 /// editor, one per line: `kind<TAB>name<TAB>file<TAB>line<TAB>column<TAB>id`.
 /// `--what` is `definition`, `implementations` (of an interface or its
 /// method) or `supers` (the interfaces of a class, or the interface method
-/// a method fills in). `--id` (from an earlier answer) names the item
+/// a method fills in) or `references` (every place that names it, one line
+/// each, the declaration included). `--id` (from an earlier answer) names the item
 /// instead of a position.
 fn nav(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: ksc nav <File.kstl> (--at <byte> | --id <id>) --what <definition|implementations|supers> [--stdin]";
+    const USAGE: &str = "usage: ksc nav <File.kstl> (--at <byte> | --id <id>) --what <definition|implementations|supers|references> [--stdin]";
     let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     let rest: Vec<String> = {
         let mut out = Vec::new();
@@ -319,6 +320,18 @@ fn nav(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if value("--what").as_deref() == Some("references") {
+        // Each overload (`area~2`) is the same name: one search per declaration.
+        let mut seen = std::collections::HashSet::new();
+        for t in found.iter().filter(|(_, key)| !key.is_empty() && !key.contains('~')) {
+            for (u, offset) in ksc::docs::references(&units, &map, t) {
+                if let Some(p) = ksc::nav::reference(&units, &map, t, u, offset).filter(|p| seen.insert((p.file.clone(), p.line, p.column))) {
+                    println!("{}\t{}\t{}\t{}\t{}\t{}", p.kind.word(), p.name, p.file, p.line, p.column, p.id);
+                }
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
     let places: Vec<ksc::docs::Target> = match value("--what").as_deref() {
         Some("definition") => found,
         Some("implementations") => found.iter().flat_map(|t| ksc::nav::implementations(&units, t)).collect(),

@@ -178,6 +178,13 @@ pub fn load(root_path: &str, root_src: &str, files: &dyn Files, map: &mut Source
             if dotted == loaded[next].path {
                 return Err(Diagnostic::new("a file cannot use itself", u.span));
             }
+            // The same `use` twice is an error, as two variables with the
+            // same name are (and two different files with one name too).
+            if let Some(earlier) = decls.iter().take_while(|o| o.span != u.span).find(|o| o.dotted() == dotted) {
+                let line = map.file_at(earlier.span.start).and_then(|f| f.src.get(..earlier.span.start - f.base)).map_or(0, |b| b.matches('\n').count() + 1);
+                return Err(Diagnostic::new(format!("`use {dotted}` is written twice"), u.span)
+                    .with_note(format!("it is already at line {line}; remove this one")));
+            }
             if mine.iter().any(|&k: &usize| loaded[k].path.rsplit('.').next() == Some(u.alias().name.as_str())) {
                 return Err(Diagnostic::new(format!("two used files are named `{}`", u.alias().name), u.alias().span)
                     .with_note("their items would be written the same way"));

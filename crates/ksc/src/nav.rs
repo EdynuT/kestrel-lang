@@ -20,6 +20,8 @@ pub enum Kind {
     Const,
     Method,
     Field,
+    /// A value of an enum (`TokenKind.Bang`).
+    Value,
 }
 
 impl Kind {
@@ -34,6 +36,7 @@ impl Kind {
             Kind::Const => "const",
             Kind::Method => "method",
             Kind::Field => "field",
+            Kind::Value => "value",
         }
     }
 }
@@ -80,6 +83,7 @@ pub fn kind(units: &[Unit], (u, key): &Target) -> Option<Kind> {
         return Some(match item(owner)? {
             Item::Class(c) if c.methods.iter().any(|m| m.decl.name.name == member) => Kind::Method,
             Item::Class(_) | Item::Struct(_) => Kind::Field,
+            Item::Enum(_) => Kind::Value,
             Item::Interface(_) => Kind::Method,
             _ => return None,
         });
@@ -98,6 +102,17 @@ pub fn kind(units: &[Unit], (u, key): &Target) -> Option<Kind> {
 pub fn place(units: &[Unit], map: &SourceMap, target: &Target) -> Option<Place> {
     let (u, key) = target;
     let at = units[*u].program.docs.get(key).map_or(units[*u].base, |d| d.at);
+    place_of(units, map, target, at)
+}
+
+/// A place where `target` is named: byte `offset` of unit `u`'s file.
+pub fn reference(units: &[Unit], map: &SourceMap, target: &Target, u: usize, offset: usize) -> Option<Place> {
+    place_of(units, map, target, units[u].base + offset)
+}
+
+/// `target`, shown at span position `at`.
+fn place_of(units: &[Unit], map: &SourceMap, target: &Target, at: usize) -> Option<Place> {
+    let (u, key) = target;
     let f = map.file_at(at)?;
     let before = f.src.get(..at - f.base)?;
     let line = before.matches('\n').count() as u32 + 1;

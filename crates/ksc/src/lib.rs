@@ -153,6 +153,11 @@ fn compile_here(
         }
         objects.push(unit.object);
         warnings.extend(unit.warnings);
+        // (`$all.kstl`, made up to check a whole project, uses every file.)
+        if mine && !units[k].info.path.starts_with('$') {
+            warnings.extend(unused_uses(src, units[k].base, &units[k].program));
+            warnings.extend(docs::unused_private_methods(&units, map, k));
+        }
         if mine {
             tests.extend(unit.tests);
         }
@@ -191,6 +196,26 @@ fn lines(object: &mut Module, map: &diag::SourceMap) {
         }
         f.lines = out;
     }
+}
+
+/// A warning for each `use a.b.Name;` whose `Name` the file never writes
+/// again: its items are always written `Name.item` (or `Name` itself, for a
+/// type), so a file that never names it does not need it.
+fn unused_uses(src: &str, base: usize, program: &ast::Program) -> Vec<diag::Diagnostic> {
+    let Some(tokens) = docs::lex_with_formats(src) else { return Vec::new() };
+    let in_use = |at: usize| program.uses.iter().any(|u| u.span.start <= at && at < u.span.end);
+    let unused = program
+        .uses
+        .iter()
+        .filter(|u| {
+            let alias = &u.alias().name;
+            !tokens.iter().any(|t| matches!(&t.tok, lexer::Tok::Ident(n) if n == alias) && !in_use(base + t.span.start))
+        })
+        .map(|u| {
+            diag::Diagnostic::warning(format!("`use {}` is never used", u.dotted()), u.span)
+                .with_note(format!("nothing in this file is written `{}`; remove the `use`", u.alias().name))
+        });
+    unused.collect()
 }
 
 /// One file compiled on its own: its object for the linker.

@@ -253,6 +253,9 @@ struct FnCx {
     /// What `isNaT` checks proved non-empty for the code being checked
     /// (`None`: proved, then something could have emptied it).
     narrowed: Vec<Option<Narrow>>,
+    /// Locals named somewhere after their declaration: the others are
+    /// reported as never used.
+    used: RefCell<HashSet<LocalId>>,
 }
 
 impl FnCx {
@@ -266,6 +269,7 @@ impl FnCx {
             resized: HashSet::new(),
             narrowed: Vec::new(),
             instance: false,
+            used: RefCell::new(HashSet::new()),
         }
     }
 }
@@ -1914,6 +1918,13 @@ impl Checker {
             return Err(err(format!("`{}` must end with `return` (it returns {})", p.name.name, sig.ret), end));
         }
         let f = std::mem::replace(&mut self.f, FnCx::new(Type::Void));
+        let used = f.used.borrow();
+        for (id, local) in f.locals.iter().enumerate() {
+            if local.kind == LocalKind::Let && !used.contains(&id) {
+                self.warn(format!("variable `{}` is never used", local.name), local.span, Some("remove it, or use it".to_string()));
+            }
+        }
+        drop(used);
         Ok(HProc { name: p.name.name.clone(), params: p.params.len(), ret: sig.ret, locals: f.locals, body, refs: sig.refs.clone(), link, throws: sig.throws })
     }
 
@@ -1959,7 +1970,7 @@ impl Checker {
             }
             return Err(err(format!("`{n}` is declared twice in this block"), name.span).with_note(note));
         }
-        if let Some(prev) = self.lookup(n)
+        if let Some(prev) = self.find_local(n)
             && self.f.locals[prev].kind == LocalKind::Param
         {
             return Err(err(format!("`{n}` is already a parameter of this proc"), name.span).with_note(note));
@@ -1967,7 +1978,16 @@ impl Checker {
         Ok(())
     }
 
+    /// The local `name` refers to here; counts as a use of it.
     fn lookup(&self, name: &str) -> Option<LocalId> {
+        let id = self.find_local(name)?;
+        self.f.used.borrow_mut().insert(id);
+        Some(id)
+    }
+
+    /// The local `name` refers to here, without counting it as used (for
+    /// checks about declaring a new one).
+    fn find_local(&self, name: &str) -> Option<LocalId> {
         self.f.scopes.iter().rev().find_map(|s| s.names.get(name).copied())
     }
 

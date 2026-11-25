@@ -838,8 +838,16 @@ impl Parser {
         self.expect(Tok::LBrace)?;
         let mut variants = Vec::new();
         while self.peek() != &Tok::RBrace {
+            let start = self.pos;
             let v = self.ident()?;
             let value = if self.eat(&Tok::Eq) { Some(self.expr()?) } else { None };
+            // Kept for the editor: `TokenKind.Bang` goes (F12) to its value.
+            let key = format!("{}.{}", name.name, v.name);
+            self.note_doc(key.clone(), start);
+            // Shown as `TokenKind.Bang` (or `Http.Ok = 200`), not just `Bang`.
+            if let Some(d) = self.docs.get_mut(&key) {
+                d.sig = format!("{}.{}", name.name, d.sig);
+            }
             variants.push((v, value));
             if !self.eat(&Tok::Comma) {
                 break;
@@ -856,6 +864,7 @@ impl Parser {
         self.expect(Tok::LBrace)?;
         let mut fields = Vec::new();
         while self.peek() != &Tok::RBrace {
+            let start = self.pos;
             let field = self.ident()?;
             if self.peek() == &Tok::LBracket {
                 return Err(Diagnostic::new("a struct cannot hold an array", self.span())
@@ -871,6 +880,9 @@ impl Parser {
                 return Err(self.unexpected("`;`").with_note("struct fields end with `;`, like variables"));
             }
             self.expect(Tok::Semi)?;
+            // Kept like a class's field: for the editor (hover, F12) and the
+            // "never used" warning.
+            self.note_doc(format!("{}.{}", name.name, field.name), start);
             fields.push((field, ty));
         }
         self.expect(Tok::RBrace)?;

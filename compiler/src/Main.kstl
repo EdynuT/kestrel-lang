@@ -17,6 +17,7 @@ use std.io.Files;
 use std.io.Console;
 use std.os.Process;
 use std.text.Texts;
+use std.text.Chars;
 
 use lexer.Lexer;
 use lexer.Token;
@@ -277,6 +278,13 @@ proc show(node: &Node, source: text) -> text {
     }
     if node.kind == NodeKind.Declaration {
         return "(let " + show(node.children.get(0), source) + " " + show(node.children.get(1), source) + " " + show(node.children.get(2), source) + ")";
+    }
+    if node.kind == NodeKind.Type && node.children.len() > 0 {
+        end: int = node.start;
+        while end < node.end && (Chars.isLetter(source[end]) || Chars.isDigit(source[end]) || source[end] == '_') {
+            end++;
+        }
+        return showList(Texts.sub(source, node.start, end), &node, source);
     }
     return Texts.sub(source, node.start, node.end);
 }

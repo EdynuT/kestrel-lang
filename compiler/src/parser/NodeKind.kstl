@@ -60,5 +60,7 @@ public enum NodeKind {
     Const,
     Struct,
     Interface,
-    Signature
+    Signature,
+    Annotation,
+    Annotated
 }

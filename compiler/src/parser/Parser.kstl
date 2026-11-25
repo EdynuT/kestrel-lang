@@ -115,9 +115,20 @@ public class Parser {
         throw Diagnostic("expected a name in a use declaration", token.start, token.end);
     }
 
-    /* A declaration of the file, wrapped in a Public node after `public`. */
+    /* A declaration of the file, wrapped in an Annotated node after `@...` and in a Public node after `public`. */
     proc topLevel(&self) -> Node throws Diagnostic {
         token: Token = self.current();
+        if token.kind == TokenKind.At {
+            start: int = token.start;
+            children: List<Node> = List<Node>();
+            while self.current().kind == TokenKind.At {
+                children.add(self.annotation());
+            }
+            declaration: Node = self.topLevel();
+            end: int = declaration.end;
+            children.add(give declaration);
+            return Node(NodeKind.Annotated, start, end, TokenKind.At, give children);
+        }
         if token.kind == TokenKind.Public {
             start: int = token.start;
             self.advance();
@@ -181,6 +192,27 @@ public class Parser {
         end: int = self.current().end;
         self.expect(TokenKind.Semicolon, "`;`");
         return Node(NodeKind.Signature, token.start, end, TokenKind.Proc, give children);
+    }
+
+    /* `@name` or `@name(A, B)`, before a declaration. */
+    proc annotation(&self) -> Node throws Diagnostic {
+        start: int = self.current().start;
+        self.expect(TokenKind.At, "`@`");
+        name: Node = self.name("annotation name");
+        children: List<Node> = List<Node>();
+        end: int = name.end;
+        children.add(give name);
+        if self.current().kind == TokenKind.LeftParen {
+            self.advance();
+            children.add(self.name("annotation name"));
+            while self.current().kind == TokenKind.Comma {
+                self.advance();
+                children.add(self.name("annotation name"));
+            }
+            end = self.current().end;
+            self.expect(TokenKind.RightParen, "`)`");
+        }
+        return Node(NodeKind.Annotation, start, end, TokenKind.At, give children);
     }
 
     /* `(a: int, b: text)`: a Parameters node with one child per parameter. */
@@ -383,9 +415,20 @@ public class Parser {
         return Node(NodeKind.Interface, start, end, TokenKind.Interface, give children);
     }
 
-    /* One member of a class, wrapped in a Public node after `public`. */
+    /* One member of a class, wrapped in an Annotated node after `@...` and in a Public node after `public`. */
     proc member(&self) -> Node throws Diagnostic {
         token: Token = self.current();
+        if token.kind == TokenKind.At {
+            start: int = token.start;
+            children: List<Node> = List<Node>();
+            while self.current().kind == TokenKind.At {
+                children.add(self.annotation());
+            }
+            declaration: Node = self.member();
+            end: int = declaration.end;
+            children.add(give declaration);
+            return Node(NodeKind.Annotated, start, end, TokenKind.At, give children);
+        }
         if token.kind == TokenKind.Public {
             start: int = token.start;
             self.advance();

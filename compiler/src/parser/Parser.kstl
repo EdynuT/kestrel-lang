@@ -805,9 +805,9 @@ public class Parser {
 
     // ---------- Expressions: from the lowest precedence to the highest ----------
 
-    /* Operations at `level` or above (see `belongsTo`); below level 5 comes `unary`. */
+    /* Operations at `level` or above (see `belongsTo`); below level 6 comes `unary`. */
     proc binary(&self, level: int) -> Node throws Diagnostic {
-        if level > 5 {
+        if level > 6 {
             return self.unary();
         }
         return self.moreBinary(level, self.binary(level + 1));
@@ -834,7 +834,7 @@ public class Parser {
         return self.moreBinary(level, Node(NodeKind.Binary, start, end, kind, give children));
     }
 
-    /* Whether `kind` is an operator of `level`: 0 `||`, 1 `&&`, 2 comparisons, 3 `?:`, 4 `+ -`, 5 `* / %`. */
+    /* Whether `kind` is an operator of `level`: 0 `||`, 1 `&&`, 2 comparisons, 3 `?:`, 4 `+ -`, 5 `* / %`, 6 `<< >>`. */
     proc belongsTo(&self, level: int, kind: TokenKind) -> bool {
         match level {
             0 => return kind == TokenKind.OrOr;
@@ -845,6 +845,7 @@ public class Parser {
             3 => return kind == TokenKind.Elvis;
             4 => return kind == TokenKind.Plus || kind == TokenKind.Minus;
             5 => return kind == TokenKind.Star || kind == TokenKind.Slash || kind == TokenKind.Percent;
+            6 => return kind == TokenKind.ShiftLeft || kind == TokenKind.ShiftRight;
             else => return false;
         }
     }
@@ -897,8 +898,24 @@ public class Parser {
                 self.advance();
                 return self.unary();
             }
-            else => return self.postfix();
+            else => return self.power();
         }
+    }
+
+    /* `base ** exponent`, above the unary operators and grouped from the right: `2 ** 3 ** 2` is `2 ** (3 ** 2)`. */
+    proc power(&self) -> Node throws Diagnostic {
+        base: Node = self.postfix();
+        if self.current().kind != TokenKind.StarStar {
+            return base;
+        }
+        start: int = base.start;
+        self.advance();
+        exponent: Node = self.unary();
+        end: int = exponent.end;
+        children: List<Node> = List<Node>();
+        children.add(give base);
+        children.add(give exponent);
+        return Node(NodeKind.Binary, start, end, TokenKind.StarStar, give children);
     }
 
     /* An operand followed by its suffixes: calls, fields and indexes. */

@@ -138,16 +138,20 @@ public class Parser {
             return self.classDeclaration();
         } else if self.current().kind == TokenKind.Struct {
             return self.structDeclaration();
+        } else if self.current().kind == TokenKind.Interface {
+            return self.interfaceDeclaration();
         } else if self.current().kind == TokenKind.Const {
             return self.constDeclaration();
         }
-        return self.procedure();
+        return self.procedure(true);
     }
 
     // ---------- Declarations: proc, enum and class ----------
 
-    /* `proc name(params) -> returnType throws errors { body }`; the return type and the throws are optional. */
-    proc procedure(&self) -> Node throws Diagnostic {
+    /* A procedure declaration: `proc name(params) -> returnType throws errors { body }`; the return type and the throws are optional.
+     * With `hasBody` false it is a signature ending in `;` (in an interface).
+     */
+    proc procedure(&self, hasBody: bool) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.Proc {
             throw Diagnostic("expected 'proc'", token.start, token.end);
@@ -168,10 +172,15 @@ public class Parser {
         if self.current().kind == TokenKind.Throws {
             children.add(self.throwsClause());
         }
-        body: Node = self.block();
-        end: int = body.end;
-        children.add(give body);
-        return Node(NodeKind.Proc, token.start, end, TokenKind.Proc, give children);
+        if hasBody {
+            body: Node = self.block();
+            end: int = body.end;
+            children.add(give body);
+            return Node(NodeKind.Proc, token.start, end, TokenKind.Proc, give children);
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
+        return Node(NodeKind.Signature, token.start, end, TokenKind.Proc, give children);
     }
 
     /* `(a: int, b: text)`: a Parameters node with one child per parameter. */
@@ -357,6 +366,23 @@ public class Parser {
         return Node(NodeKind.Struct, start, end, TokenKind.Struct, give children);
     }
 
+    /* An interface declaration: `interface Name { proc name(&self) -> type; }`: only signatures, no bodies. */
+    proc interfaceDeclaration(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        start: int = token.start;
+        self.expect(TokenKind.Interface, "`interface`");
+        name: Node = self.name("interface name");
+        self.expect(TokenKind.LeftBrace, "`{`");
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        while self.current().kind != TokenKind.RightBrace {
+            children.add(self.procedure(false));
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.RightBrace, "`}`");
+        return Node(NodeKind.Interface, start, end, TokenKind.Interface, give children);
+    }
+
     /* One member of a class, wrapped in a Public node after `public`. */
     proc member(&self) -> Node throws Diagnostic {
         token: Token = self.current();
@@ -375,7 +401,7 @@ public class Parser {
     /* What a member is: a method (`proc`) or a field. */
     proc memberBody(&self) -> Node throws Diagnostic {
         if self.current().kind == TokenKind.Proc {
-            return self.procedure();
+            return self.procedure(true);
         }
         return self.classField("class field name");
     }

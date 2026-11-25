@@ -186,6 +186,12 @@ proc show(node: &Node, source: text) -> text {
     if node.kind == NodeKind.Struct {
         return showList("struct", &node, source);
     }
+    if node.kind == NodeKind.Interface {
+        return showList("interface", &node, source);
+    }
+    if node.kind == NodeKind.Signature {
+        return showList("signature", &node, source);
+    }
     if node.kind == NodeKind.ClassField {
         return "(field " + show(node.children.get(0), source) + " " + show(node.children.get(1), source) + ")";
     }

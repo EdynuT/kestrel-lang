@@ -52,5 +52,9 @@ public enum NodeKind {
     Match,
     Arm,
     Else,
-    Index
+    Index,
+    ArrayLiteral,
+    Claim,
+    Optional,
+    ArrayType
 }

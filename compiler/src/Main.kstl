@@ -277,7 +277,7 @@ proc show(node: &Node, source: text) -> text {
         return "(" + show(node.children.get(0), source) + " " + symbol(node.operator) + " " + show(node.children.get(1), source) + ")";
     }
     if node.kind == NodeKind.Declaration {
-        return "(let " + show(node.children.get(0), source) + " " + show(node.children.get(1), source) + " " + show(node.children.get(2), source) + ")";
+        return showList("let", &node, source);
     }
     if node.kind == NodeKind.Type && node.children.len() > 0 {
         end: int = node.start;
@@ -291,6 +291,18 @@ proc show(node: &Node, source: text) -> text {
     }
     if node.kind == NodeKind.Name && node.operator == TokenKind.LeftBracket {
         return Texts.sub(source, node.start, node.end) + "[]";
+    }
+    if node.kind == NodeKind.ArrayLiteral {
+        return showList("array", &node, source);
+    }
+    if node.kind == NodeKind.Claim {
+        return showList("claim", &node, source);
+    }
+    if node.kind == NodeKind.Optional {
+        return "?" + show(node.children.get(0), source);
+    }
+    if node.kind == NodeKind.ArrayType {
+        return showList("array-type", &node, source);
     }
     return Texts.sub(source, node.start, node.end);
 }

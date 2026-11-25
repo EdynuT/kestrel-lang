@@ -142,7 +142,7 @@ public class Parser {
 
     // ---------- Declarations: proc, enum and class ----------
 
-    /* `proc name(params) -> type throws errors { body }`; the return type and the throws are optional. */
+    /* `proc name(params) -> returnType throws errors { body }`; the return type and the throws are optional. */
     proc procedure(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.Proc {
@@ -159,7 +159,7 @@ public class Parser {
         children.add(self.parameters());
         if self.current().kind == TokenKind.Arrow {
             self.advance();
-            children.add(self.typeName());
+            children.add(self.returnType());
         }
         if self.current().kind == TokenKind.Throws {
             children.add(self.throwsClause());
@@ -392,12 +392,20 @@ public class Parser {
         }
     }
 
-    /* A variable: `x: int = 1;` or `v[]: int = other();`. */
+    /* A variable: `x: int = 1;`, `v[]: int = other();` or, without a value, `empty: int?;`. */
     proc declaration(&self) -> Node throws Diagnostic {
         name: Node = self.arrayName("variable name");
         start: int = name.start;
         self.expect(TokenKind.Colon, "`:`");
         typeNode: Node = self.typeName();
+        if self.current().kind == TokenKind.Semicolon {
+            end: int = self.current().end;
+            self.advance();
+            children: List<Node> = List<Node>();
+            children.add(give name);
+            children.add(give typeNode);
+            return Node(NodeKind.Declaration, start, end, TokenKind.EndOfFile, give children);
+        }
         self.expect(TokenKind.Equal, "`=`");
         value: Node = self.binary(0);
         end: int = self.current().end;
@@ -739,6 +747,14 @@ public class Parser {
                 children.add(give operand);
                 return Node(NodeKind.Give, token.start, end, token.kind, give children);
             }
+            TokenKind.Claim => {
+                self.advance();
+                operand: Node = self.unary();
+                end: int = operand.end;
+                children: List<Node> = List<Node>();
+                children.add(give operand);
+                return Node(NodeKind.Claim, token.start, end, token.kind, give children);
+            }
             TokenKind.Minus => {
                 self.advance();
                 operand: Node = self.unary();
@@ -847,6 +863,21 @@ public class Parser {
                 self.expect(TokenKind.RightParen, "`)`");
                 return expression;
             }
+            TokenKind.LeftBrace => {
+                self.advance();
+                children: List<Node> = List<Node>();
+                while self.current().kind != TokenKind.RightBrace {
+                    children.add(self.binary(0));
+                    if self.current().kind == TokenKind.Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                end: int = self.current().end;
+                self.expect(TokenKind.RightBrace, "`}`");
+                return Node(NodeKind.ArrayLiteral, token.start, end, TokenKind.LeftBrace, give children);
+            }
             else => {
                 throw Diagnostic("expected an expression", token.start, token.end);
             }
@@ -901,6 +932,14 @@ public class Parser {
             end = self.current().end;
             self.expect(TokenKind.Greater, "`>`");
         }
+        if self.current().kind == TokenKind.Question {
+            nullableEnd: int = self.current().end;
+            self.advance();
+            typeNode: Node = Node(NodeKind.Type, token.start, end, kind, give children);
+            nullableChildren: List<Node> = List<Node>();
+            nullableChildren.add(give typeNode);
+            return Node(NodeKind.Optional, token.start, nullableEnd, TokenKind.Question, give nullableChildren);
+        }
         return Node(NodeKind.Type, token.start, end, kind, give children);
     }
 
@@ -909,6 +948,21 @@ public class Parser {
         return kind == TokenKind.Int || kind == TokenKind.Real || kind == TokenKind.Text ||
             kind == TokenKind.Bool || kind == TokenKind.Trit || kind == TokenKind.Tryte ||
             kind == TokenKind.Identifier;
+    }
+
+    /* A return type: a type (`-> int`, `-> Node?`) or an array (`-> int[]`). */
+    proc returnType(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        typeNode: Node = self.typeName();
+        if self.current().kind == TokenKind.LeftBracket {
+            self.advance();
+            end: int = self.current().end;
+            self.expect(TokenKind.RightBracket, "`]`");
+            arrayChildren: List<Node> = List<Node>();
+            arrayChildren.add(give typeNode);
+            return Node(NodeKind.ArrayType, token.start, end, TokenKind.LeftBracket, give arrayChildren);
+        }
+        return typeNode;
     }
 
     /* Whether a name followed by `<` is a generic (`List<Node>()`) and not a comparison (`a < b`); it looks ahead without moving. */

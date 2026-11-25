@@ -41,5 +41,7 @@ public enum NodeKind {
     Enum,
     EnumItem,
     Class,
-    ClassField
+    ClassField,
+    Borrow,
+    Throws
 }

@@ -16,6 +16,7 @@
  */
 
 use std.collections.List;
+use std.text.Texts;
 
 use lexer.Token;
 use lexer.TokenKind;
@@ -25,13 +26,14 @@ use parser.Node;
 use parser.NodeKind;
 
 public class Parser {
+    source: text;
     lexer: Lexer;
     position: int;
     
     public proc Parser(source: text) -> Parser throws Diagnostic {
         lexer: Lexer = Lexer(source);
         lexer.run();
-        return Parser { lexer: give lexer, position: 0};
+        return Parser { source: source, lexer: give lexer, position: 0};
     }
 
     public proc parse(&self) -> Node throws Diagnostic {
@@ -257,20 +259,46 @@ public class Parser {
     }
     
     proc parameter(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.Identifier {
-            throw Diagnostic("expected parameter name", token.start, token.end);
+        if self.current().kind == TokenKind.Ampersand {
+            token: Token = self.current();
+            self.advance();
+            name: Node = self.name("borrowed parameter name");
+            if Texts.sub(self.source, name.start, name.end) != "self" {
+                throw Diagnostic("only `self` can be borrowed without a type", name.start, name.end);
+            }
+            end: int = name.end;
+            children: List<Node> = List<Node>();
+            children.add(give name);
+            return Node(NodeKind.Borrow, token.start, end, TokenKind.Ampersand, give children);
         }
+        name: Node = self.name("parameter name");
+        if self.current().kind != TokenKind.Colon {
+            if Texts.sub(self.source, name.start, name.end) != "self" {
+                throw Diagnostic("only `self` can be used without a type", name.start, name.end);
+            }
+            return name;
+        }
+        start: int = name.start;
         self.advance();
-        nameChildren: List<Node> = List<Node>();
-        name: Node = Node(NodeKind.Name, token.start, token.end, TokenKind.Identifier, give nameChildren);
-        self.expect(TokenKind.Colon, "`:`");
-        type: Node = self.typeName();
-        end: int = type.end;
+        typeNode: Node = self.parameterType();
+        end: int = typeNode.end;
         children: List<Node> = List<Node>();
         children.add(give name);
-        children.add(give type);
-        return Node(NodeKind.Parameter, token.start, end, TokenKind.Identifier, give children);
+        children.add(give typeNode);
+        return Node(NodeKind.Parameter, start, end, TokenKind.Identifier, give children);
+    }
+
+    proc parameterType(&self) -> Node throws Diagnostic {
+        if self.current().kind == TokenKind.Ampersand {
+            token: Token = self.current();
+            self.advance();
+            typeNode: Node = self.typeName();
+            end: int = typeNode.end;
+            children: List<Node> = List<Node>();
+            children.add(give typeNode);
+            return Node(NodeKind.Borrow, token.start, end, TokenKind.Ampersand, give children);
+        }
+        return self.typeName();
     }
 
     // ================= Procedures ===================
@@ -292,6 +320,9 @@ public class Parser {
         if self.current().kind == TokenKind.Arrow {
             self.advance();
             children.add(self.typeName());
+        }
+        if self.current().kind == TokenKind.Throws {
+            children.add(self.throwsClause());
         }
         body: Node = self.block();
         end: int = body.end;
@@ -433,29 +464,6 @@ public class Parser {
             kind = NodeKind.Break;
         }
         return Node(kind, token.start, end, token.kind, List<Node>());
-    }
-
-    proc step(&self) -> Node throws Diagnostic {
-        target: Node = self.binary(0);
-        token: Token = self.current();
-        kind: TokenKind = token.kind;
-        if self.isAssignment(kind) || kind == TokenKind.PlusPlus || kind == TokenKind.MinusMinus {
-            if target.kind != NodeKind.Name && target.kind != NodeKind.Field {
-                throw Diagnostic("cannot assign to this expression", target.start, target.end);
-            }
-            self.advance();
-            start: int = target.start;
-            end: int = token.end;
-            children: List<Node> = List<Node>();
-            children.add(give target);
-            if kind != TokenKind.PlusPlus && kind != TokenKind.MinusMinus {
-                value: Node = self.binary(0);
-                end = value.end;
-                children.add(give value);
-            }
-            return Node(NodeKind.Assignment, start, end, kind, give children);
-        }
-        return target;
     }
 
     // ================= Declarations ===================
@@ -616,7 +624,30 @@ public class Parser {
         self.advance();
         return Node(NodeKind.Name, token.start, token.end, token.kind, List<Node>());
     }
-    
+
+    proc step(&self) -> Node throws Diagnostic {
+        target: Node = self.binary(0);
+        token: Token = self.current();
+        kind: TokenKind = token.kind;
+        if self.isAssignment(kind) || kind == TokenKind.PlusPlus || kind == TokenKind.MinusMinus {
+            if target.kind != NodeKind.Name && target.kind != NodeKind.Field {
+                throw Diagnostic("cannot assign to this expression", target.start, target.end);
+            }
+            self.advance();
+            start: int = target.start;
+            end: int = token.end;
+            children: List<Node> = List<Node>();
+            children.add(give target);
+            if kind != TokenKind.PlusPlus && kind != TokenKind.MinusMinus {
+                value: Node = self.binary(0);
+                end = value.end;
+                children.add(give value);
+            }
+            return Node(NodeKind.Assignment, start, end, kind, give children);
+        }
+        return target;
+    }
+
     proc typeName(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         kind: TokenKind = token.kind;
@@ -625,5 +656,24 @@ public class Parser {
             return Node(NodeKind.Type, token.start, token.end, kind, List<Node>());
         }
         throw Diagnostic("expected a type", token.start, token.end);
+    }
+
+    proc throwsClause(&self) -> Node throws Diagnostic {
+        if self.current().kind == TokenKind.Throws {
+            start: int = self.current().start;
+            self.advance();
+            errors: List<Node> = List<Node>();
+            error: Node = self.name("error name");
+            end: int = error.end;
+            errors.add(give error);
+            while self.current().kind == TokenKind.Comma {
+                self.advance();
+                nextError: Node = self.name("error name");
+                end = nextError.end;
+                errors.add(give nextError);
+            }
+            return Node(NodeKind.Throws, start, end, TokenKind.Throws, give errors);
+        }
+        throw Diagnostic("expected throws clause", self.current().start, self.current().end);
     }
 }

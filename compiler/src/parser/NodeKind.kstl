@@ -39,5 +39,7 @@ public enum NodeKind {
     Use,
     Public,
     Enum,
-    EnumItem
+    EnumItem,
+    Class,
+    ClassField
 }

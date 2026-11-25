@@ -57,5 +57,6 @@ public enum NodeKind {
     Claim,
     Optional,
     ArrayType,
-    Const
+    Const,
+    Struct
 }

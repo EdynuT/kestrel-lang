@@ -136,6 +136,8 @@ public class Parser {
             return self.enumDeclaration();
         } else if self.current().kind == TokenKind.Class {
             return self.classDeclaration();
+        } else if self.current().kind == TokenKind.Struct {
+            return self.structDeclaration();
         } else if self.current().kind == TokenKind.Const {
             return self.constDeclaration();
         }
@@ -334,6 +336,27 @@ public class Parser {
         return Node(NodeKind.Class, start, end, TokenKind.Class, give children);
     }
 
+    /* `struct Name { fields }`: only fields, no methods. */
+    proc structDeclaration(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        start: int = token.start;
+        self.expect(TokenKind.Struct, "`struct`");
+        name: Node = self.name("struct name");
+        self.expect(TokenKind.LeftBrace, "`{`");
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        while self.current().kind != TokenKind.RightBrace {
+            field: Node = self.classField("struct field name");
+            if field.children.get(0).operator == TokenKind.LeftBracket {
+                throw Diagnostic("a struct cannot hold an array", field.start, field.end);
+            }
+            children.add(give field);
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.RightBrace, "`}`");
+        return Node(NodeKind.Struct, start, end, TokenKind.Struct, give children);
+    }
+
     /* One member of a class, wrapped in a Public node after `public`. */
     proc member(&self) -> Node throws Diagnostic {
         token: Token = self.current();
@@ -354,12 +377,12 @@ public class Parser {
         if self.current().kind == TokenKind.Proc {
             return self.procedure();
         }
-        return self.classField();
+        return self.classField("class field name");
     }
 
     /* A field of a class: `name: type;` or `values[]: int;`. */
-    proc classField(&self) -> Node throws Diagnostic {
-        name: Node = self.arrayName("class field name");
+    proc classField(&self, what: text) -> Node throws Diagnostic {
+        name: Node = self.arrayName(what);
         self.expect(TokenKind.Colon, "`:`");
         typeNode: Node = self.typeName();
         end: int = self.current().end;

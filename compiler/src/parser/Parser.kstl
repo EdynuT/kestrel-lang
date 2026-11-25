@@ -235,28 +235,28 @@ public class Parser {
         return Node(NodeKind.Parameters, start, end, TokenKind.LeftParen, give children);
     }
 
-    /* One parameter: `name: type`, `v[]: int`, or `self` / `&self` without a type. */
+    /* One parameter: `name: type`, `[sym] [&]v[]: int`, or `self` / `&self` without a type. */
     proc parameter(&self) -> Node throws Diagnostic {
-        if self.current().kind == TokenKind.Ampersand {
+        start: int = self.current().start;
+        next: Token = self.peek(1);
+        if self.current().kind == TokenKind.Ampersand && next.kind == TokenKind.Identifier &&
+            Texts.sub(self.source, next.start, next.end) == "self" && self.peek(2).kind != TokenKind.LeftBracket {
             token: Token = self.current();
             self.advance();
             name: Node = self.name("borrowed parameter name");
-            if Texts.sub(self.source, name.start, name.end) != "self" {
-                throw Diagnostic("only `self` can be borrowed without a type", name.start, name.end);
-            }
             end: int = name.end;
             children: List<Node> = List<Node>();
             children.add(give name);
             return Node(NodeKind.Borrow, token.start, end, TokenKind.Ampersand, give children);
         }
-        name: Node = self.arrayName("parameter name");
+        name: Node = self.arrayName("parameter name", true);
         if self.current().kind != TokenKind.Colon {
-            if Texts.sub(self.source, name.start, name.end) != "self" {
+            if name.kind != NodeKind.Name || name.operator != TokenKind.EndOfFile ||
+                Texts.sub(self.source, name.start, name.end) != "self" {
                 throw Diagnostic("only `self` can be used without a type", name.start, name.end);
             }
             return name;
         }
-        start: int = name.start;
         self.advance();
         typeNode: Node = self.parameterType();
         end: int = typeNode.end;
@@ -450,14 +450,14 @@ public class Parser {
         return self.classField("class field name");
     }
 
-    /* A field of a class: `name: type;` or `values[]: int;`. */
+    /* A field of a class: `name: type;` or `[sym] values[]: int;`. */
     proc classField(&self, what: text) -> Node throws Diagnostic {
-        name: Node = self.arrayName(what);
+        start: int = self.current().start;
+        name: Node = self.arrayName(what, false);
         self.expect(TokenKind.Colon, "`:`");
         typeNode: Node = self.typeName();
         end: int = self.current().end;
         self.expect(TokenKind.Semicolon, "`;`");
-        start: int = name.start;
         children: List<Node> = List<Node>();
         children.add(give name);
         children.add(give typeNode);
@@ -482,12 +482,14 @@ public class Parser {
         return Node(NodeKind.Block, token.start, end, TokenKind.LeftBrace, give children);
     }
 
-    /* Picks the statement by its first token; `name:` or `name[]:` starts a declaration. */
+    /* Picks the statement by its first token; `name:`, `name[]:` or `sym` starts a declaration. */
     proc statement(&self) -> Node throws Diagnostic {
         token: Token = self.current();
-        if self.current().kind == TokenKind.Identifier && self.peek(1).kind == TokenKind.Colon {
+        if token.kind == TokenKind.Sym {
             return self.declaration();
-        } else if self.current().kind == TokenKind.Identifier && self.peek(1).kind == TokenKind.LeftBracket && self.peek(2).kind == TokenKind.RightBracket && self.peek(3).kind == TokenKind.Colon {
+        } else if token.kind == TokenKind.Identifier && self.peek(1).kind == TokenKind.Colon {
+            return self.declaration();
+        } else if token.kind == TokenKind.Identifier && self.peek(1).kind == TokenKind.LeftBracket && self.peek(2).kind == TokenKind.RightBracket && self.peek(3).kind == TokenKind.Colon {
             return self.declaration();
         }
         match token.kind {
@@ -507,10 +509,10 @@ public class Parser {
         }
     }
 
-    /* A variable: `x: int = 1;`, `v[]: int = other();` or, without a value, `empty: int?;`. */
+    /* A variable: `x: int = 1;`, `[sym] v[]: int = other();`, or `empty: int?;`. */
     proc declaration(&self) -> Node throws Diagnostic {
-        name: Node = self.arrayName("variable name");
-        start: int = name.start;
+        start: int = self.current().start;
+        name: Node = self.arrayName("variable name", false);
         self.expect(TokenKind.Colon, "`:`");
         typeNode: Node = self.typeName();
         if self.current().kind == TokenKind.Semicolon {
@@ -1081,20 +1083,42 @@ public class Parser {
         return Node(NodeKind.Name, token.start, token.end, token.kind, List<Node>());
     }
 
-    /* A name that may be followed by `[]`; then its operator is `LeftBracket`. */
-    proc arrayName(&self, what: text) -> Node throws Diagnostic {
+    /* A name, optionally `sym` or borrowed (`&`), with `[]`; the operator is `LeftBracket` or `Sym`. */
+    proc arrayName(&self, what: text, canBorrow: bool) -> Node throws Diagnostic {
+        isSym: bool = false;
+        borrowed: bool = false;
+        if self.current().kind == TokenKind.Sym {
+            isSym = true;
+            self.advance();
+        }
+        borrowStart: int = self.current().start;
+        if canBorrow && self.current().kind == TokenKind.Ampersand {
+            borrowed = true;
+            self.advance();
+        }
         token: Token = self.current();
         if token.kind != TokenKind.Identifier {
             throw Diagnostic("expected " + what, token.start, token.end);
         }
         self.advance();
         operator: TokenKind = TokenKind.EndOfFile;
-        if self.current().kind == TokenKind.LeftBracket {
-            self.advance();
+        end: int = token.end;
+        if isSym || borrowed || self.current().kind == TokenKind.LeftBracket {
+            self.expect(TokenKind.LeftBracket, "`[`");
+            end = self.current().end;
             self.expect(TokenKind.RightBracket, "`]`");
             operator = TokenKind.LeftBracket;
         }
-        return Node(NodeKind.Name, token.start, token.end, operator, List<Node>());
+        if isSym {
+            operator = TokenKind.Sym;
+        }
+        name: Node = Node(NodeKind.Name, token.start, token.end, operator, List<Node>());
+        if borrowed {
+            children: List<Node> = List<Node>();
+            children.add(give name);
+            return Node(NodeKind.Borrow, borrowStart, end, TokenKind.Ampersand, give children);
+        }
+        return name;
     }
 
     /* A type: `int`, `Node` or a generic like `List<Node>`. */

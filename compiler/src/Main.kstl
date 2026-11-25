@@ -328,6 +328,9 @@ proc show(node: &Node, source: text) -> text {
     if node.kind == NodeKind.Name && node.operator == TokenKind.LeftBracket {
         return Texts.sub(source, node.start, node.end) + "[]";
     }
+    if node.kind == NodeKind.Name && node.operator == TokenKind.Sym {
+        return "sym " + Texts.sub(source, node.start, node.end) + "[]";
+    }
     if node.kind == NodeKind.ArrayLiteral {
         return showList("array", &node, source);
     }

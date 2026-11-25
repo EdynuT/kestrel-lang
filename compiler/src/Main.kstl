@@ -140,6 +140,7 @@ proc symbol(kind: TokenKind) -> text {
         TokenKind.Spaceship => return "<=>";
         TokenKind.AndAnd => return "&&";
         TokenKind.OrOr => return "||";
+        TokenKind.Elvis => return "?:";
         TokenKind.Bang => return "!";
         TokenKind.Dot => return ".";
         TokenKind.Ampersand => return "&";

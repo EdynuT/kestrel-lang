@@ -17,6 +17,7 @@
 
 use std.collections.List;
 use std.text.Texts;
+use std.text.Chars;
 
 use lexer.Token;
 use lexer.TokenKind;
@@ -190,7 +191,7 @@ public class Parser {
     }
 
     proc binary(&self, level: int) -> Node throws Diagnostic {
-        if level > 4 {
+        if level > 5 {
             return self.unary();
         }
         return self.moreBinary(level, self.binary(level + 1));
@@ -223,8 +224,9 @@ public class Parser {
             2 => return kind == TokenKind.EqualEqual || kind == TokenKind.NotEqual || kind == TokenKind.Less 
                         || kind == TokenKind.Greater || kind == TokenKind.LessEqual 
                         || kind == TokenKind.GreaterEqual || kind == TokenKind.Spaceship;
-            3 => return kind == TokenKind.Plus || kind == TokenKind.Minus;
-            4 => return kind == TokenKind.Star || kind == TokenKind.Slash || kind == TokenKind.Percent;
+            3 => return kind == TokenKind.Elvis;
+            4 => return kind == TokenKind.Plus || kind == TokenKind.Minus;
+            5 => return kind == TokenKind.Star || kind == TokenKind.Slash || kind == TokenKind.Percent;
             else => return false;
         }
     }
@@ -647,10 +649,12 @@ public class Parser {
 
     proc useName(&self) -> Node throws Diagnostic {
         token: Token = self.current();
-        if token.kind == TokenKind.Identifier || token.kind == TokenKind.Text {
-            kind: TokenKind = token.kind;
-            self.advance();
-            return Node(NodeKind.Name, token.start, token.end, kind, List<Node>());
+        if token.start < token.end {
+            first: tryte = self.source[token.start];
+            if Chars.isLetter(first) || first == '_' {
+                self.advance();
+                return Node(NodeKind.Name, token.start, token.end, token.kind, List<Node>());
+            }
         }
         throw Diagnostic("expected a name in a use declaration", token.start, token.end);
     }

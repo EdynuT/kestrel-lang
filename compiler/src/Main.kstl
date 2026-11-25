@@ -228,6 +228,9 @@ proc show(node: &Node, source: text) -> text {
         }
         return result + ")";
     }
+    if node.kind == NodeKind.Else {
+        return showList("else", &node, source);
+    }
     if node.kind == NodeKind.Try {
         result: text = "(try " + show(node.children.get(0), source);
         for i: int = 1; i < node.children.len(); i++ {
@@ -237,6 +240,12 @@ proc show(node: &Node, source: text) -> text {
     }
     if node.kind == NodeKind.Catch {
         return showList("catch", &node, source);
+    }
+    if node.kind == NodeKind.Match {
+        return showList("match", &node, source);
+    }
+    if node.kind == NodeKind.Arm {
+        return showList("arm", &node, source);
     }
     if node.kind == NodeKind.While {
         return "(while " + show(node.children.get(0), source) + " " + show(node.children.get(1), source) + ")";

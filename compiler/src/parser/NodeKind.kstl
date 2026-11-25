@@ -48,5 +48,8 @@ public enum NodeKind {
     Burn,
     Try,
     Catch,
-    Throw
+    Throw,
+    Match,
+    Arm,
+    Else
 }

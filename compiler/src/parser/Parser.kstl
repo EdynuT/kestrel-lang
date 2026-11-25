@@ -373,6 +373,7 @@ public class Parser {
             TokenKind.Burn => return self.burnStatement();
             TokenKind.Try => return self.tryStatement();
             TokenKind.Throw => return self.throwStatement();
+            TokenKind.Match => return self.matchStatement();
             else => return self.expressionStatement();
         }
     }
@@ -532,6 +533,24 @@ public class Parser {
         return Node(NodeKind.Throw, token.start, end, token.kind, give children);
     }
 
+    proc matchStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Match {
+            throw Diagnostic("expected 'match'", token.start, token.end);
+        }
+        self.advance();
+        subject: Node = self.binary(0);
+        self.expect(TokenKind.LeftBrace, "`{`");
+        children: List<Node> = List<Node>();
+        children.add(give subject);
+        while self.current().kind != TokenKind.RightBrace {
+            children.add(self.matchArm());
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.RightBrace, "`}`");
+        return Node(NodeKind.Match, token.start, end, token.kind, give children);
+    }
+
     // ================= Declarations ===================
 
     proc declaration(&self) -> Node throws Diagnostic {
@@ -567,7 +586,11 @@ public class Parser {
         while self.current().kind != TokenKind.RightBrace {
             children.add(self.enumItem());
             if self.current().kind == TokenKind.Comma {
+                comma: Token = self.current();
                 self.advance();
+                if self.current().kind == TokenKind.RightBrace {
+                    throw Diagnostic("unexpected trailing comma", comma.start, comma.end);
+                }
             } else {
                 break;
             }
@@ -757,5 +780,31 @@ public class Parser {
         end: int = body.end;
         children.add(give body);
         return Node(NodeKind.Catch, token.start, end, token.kind, give children);
+    }
+
+    proc matchArm(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind == TokenKind.Else {
+            self.advance();
+            self.expect(TokenKind.FatArrow, "`=>`");
+            body: Node = self.statement();
+            end: int = body.end;
+            children: List<Node> = List<Node>();
+            children.add(give body);
+            return Node(NodeKind.Else, token.start, end, token.kind, give children);
+        }
+        pattern: Node = self.binary(0);
+        children: List<Node> = List<Node>();
+        children.add(give pattern);
+        while self.current().kind == TokenKind.Pipe {
+            self.advance();
+            nextPattern: Node = self.binary(0);
+            children.add(give nextPattern);
+        }
+        self.expect(TokenKind.FatArrow, "`=>`");
+        body: Node = self.statement();
+        end: int = body.end;
+        children.add(give body);
+        return Node(NodeKind.Arm, token.start, end, token.kind, give children);
     }
 }

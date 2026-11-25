@@ -540,6 +540,7 @@ if c == Cor.Azul { ... }
 ```
 
 - É declarado fora dos `proc`, como o `const`. O valor é escrito `Tipo.Nome`, como em Java.
+- Os nomes são separados por vírgula, sem vírgula depois do último: `enum E { A, B }` é aceito, `enum E { A, B, }` é erro.
 - Os números começam em 0 e sobem de 1 em 1. Um valor explícito (`= 200`) reinicia a contagem a partir dele. Dois nomes com o mesmo número são erro.
 - Um valor de enum é guardado como o seu número: não ocupa heap e não precisa de `burn`.
 - Aceita só `==` e `!=` com outro valor do **mesmo** enum. Contas e `<`/`>` são erro de tipo. `(int) c` lê o número.
@@ -1169,16 +1170,20 @@ Os saltos usam um **offset absoluto em bytes** (`u32`) dentro do código da pró
 
 ## 11. Gramática (EBNF)
 
+Em caminhos de `use`, `KEYWORD` representa qualquer palavra-chave da linguagem
+(por exemplo, `text` em `std.text.Texts`).
+
 ```ebnf
 program    = { use_decl } { { annotation } [ "public" ] ( const_decl | proc_decl | enum_decl | struct_decl | class_decl | iface_decl ) } ;
-use_decl   = "use" IDENT { "." IDENT } ";" ;
+use_decl   = "use" path_part { "." path_part } ";" ;
+path_part  = IDENT | KEYWORD ;
 iface_decl = "interface" IDENT "{" { "proc" IDENT "(" [ "&" ] "self" { "," param } ")" [ "->" ret_type ] ";" } "}" ;
 class_decl = { annotation } "class" IDENT "{" { member } "}" ;
 member     = [ "public" | "private" ] ( field | proc_decl ) ;
 field      = [ "sym" ] IDENT [ "[" "]" ] ":" type ";" ;
 annotation = "@" IDENT [ "(" IDENT { "," IDENT } ")" ] ;
 struct_decl = "struct" IDENT "{" { IDENT ":" type ";" } "}" ;
-enum_decl  = "enum" IDENT "{" [ IDENT [ "=" expr ] { "," IDENT [ "=" expr ] } [ "," ] ] "}" ;
+enum_decl  = "enum" IDENT "{" [ IDENT [ "=" expr ] { "," IDENT [ "=" expr ] } ] "}" ;
 const_decl = "const" IDENT ":" scalar "=" expr ";" ;
 proc_decl  = "proc" IDENT "(" [ param { "," param } ] ")" [ "->" ret_type ] [ "throws" name { "," name } ] block ;
 name       = IDENT { "." IDENT } ;

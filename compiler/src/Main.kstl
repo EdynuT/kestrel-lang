@@ -199,6 +199,12 @@ proc show(node: &Node, source: text) -> text {
     if node.kind == NodeKind.Borrow {
         return "(" + symbol(node.operator) + " " + show(node.children.get(0), source) + ")";
     }
+    if node.kind == NodeKind.Give {
+        return "(give " + show(node.children.get(0), source) + ")";
+    }
+    if node.kind == NodeKind.Burn {
+        return "(burn " + show(node.children.get(0), source) + ")";
+    }
     if node.kind == NodeKind.Parameter {
         return "(param " + show(node.children.get(0), source) + " " + show(node.children.get(1), source) + ")";
     }

@@ -103,6 +103,22 @@ public class Parser {
     proc unary(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         match token.kind {
+            TokenKind.Ampersand => {
+                self.advance();
+                operand: Node = self.unary();
+                end: int = operand.end;
+                children: List<Node> = List<Node>();
+                children.add(give operand);
+                return Node(NodeKind.Borrow, token.start, end, token.kind, give children);
+            }
+            TokenKind.Give => {
+                self.advance();
+                operand: Node = self.unary();
+                end: int = operand.end;
+                children: List<Node> = List<Node>();
+                children.add(give operand);
+                return Node(NodeKind.Give, token.start, end, token.kind, give children);
+            }
             TokenKind.Minus => {
                 self.advance();
                 operand: Node = self.unary();
@@ -354,6 +370,7 @@ public class Parser {
             TokenKind.For => return self.forStatement();
             TokenKind.Continue => return self.jumpStatement();
             TokenKind.Break => return self.jumpStatement();
+            TokenKind.Burn => return self.burnStatement();
             else => return self.expressionStatement();
         }
     }
@@ -464,6 +481,20 @@ public class Parser {
             kind = NodeKind.Break;
         }
         return Node(kind, token.start, end, token.kind, List<Node>());
+    }
+
+    proc burnStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Burn {
+            throw Diagnostic("expected 'burn'", token.start, token.end);
+        }
+        self.advance();
+        name: Node = self.name("burn target");
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        return Node(NodeKind.Burn, token.start, end, token.kind, give children);
     }
 
     // ================= Declarations ===================

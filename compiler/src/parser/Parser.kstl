@@ -30,31 +30,22 @@ public class Parser {
     source: text;
     lexer: Lexer;
     position: int;
-    
+
+    // ---------- Tokens: looking at the current token and moving on ----------
+
+    /* Runs the lexer on `source` and starts at its first token. */
     public proc Parser(source: text) -> Parser throws Diagnostic {
         lexer: Lexer = Lexer(source);
         lexer.run();
         return Parser { source: source, lexer: give lexer, position: 0};
     }
 
-    public proc parse(&self) -> Node throws Diagnostic {
-        start: int = self.current().start;
-        children: List<Node> = List<Node>();
-        while self.current().kind != TokenKind.EndOfFile {
-            if self.current().kind == TokenKind.Use {
-                children.add(self.useDeclaration());
-                continue;
-            }
-            children.add(self.topLevel());
-        }
-        end: int = self.current().end;
-        return Node(NodeKind.Program, start, end, TokenKind.EndOfFile, give children);
-    }
-
+    /* The token the parser is looking at. */
     proc current(&self) -> Token {
         return self.lexer.tokens.get(self.position);
     }
 
+    /* The token `offset` places ahead, without moving (the last one is `EndOfFile`). */
     proc peek(&self, offset: int) -> Token {
         index: int = self.position + offset;
         last: int = self.lexer.tokens.len() - 1;
@@ -64,6 +55,7 @@ public class Parser {
         return self.lexer.tokens.get(index);
     }
 
+    /* Moves to the next token; it stays put at the end of the file. */
     proc advance(&self) {
         if self.current().kind != TokenKind.EndOfFile {
             self.position++;
@@ -78,32 +70,656 @@ public class Parser {
         self.advance();
     }
 
-    proc primary(&self) -> Node throws Diagnostic {
+    // ---------- File: `use` lines and the declarations around them ----------
+
+    /* Reads the whole file: `use` lines, then declarations, until the end. */
+    public proc parse(&self) -> Node throws Diagnostic {
+        start: int = self.current().start;
+        children: List<Node> = List<Node>();
+        while self.current().kind != TokenKind.EndOfFile {
+            if self.current().kind == TokenKind.Use {
+                children.add(self.useDeclaration());
+                continue;
+            }
+            children.add(self.topLevel());
+        }
+        end: int = self.current().end;
+        return Node(NodeKind.Program, start, end, TokenKind.EndOfFile, give children);
+    }
+
+    /* `use std.io.Console;`: one Name child per part of the path. */
+    proc useDeclaration(&self) -> Node throws Diagnostic {
+        useToken: Token = self.current();
+        self.advance();
+        children: List<Node> = List<Node>();
+        children.add(self.useName());
+        while self.current().kind == TokenKind.Dot {
+            self.advance();
+            children.add(self.useName());
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
+        return Node(NodeKind.Use, useToken.start, end, TokenKind.EndOfFile, give children);
+    }
+
+    /* One part of a `use` path: any word, keywords included (`std.text`). */
+    proc useName(&self) -> Node throws Diagnostic {
         token: Token = self.current();
-        match token.kind {
-            TokenKind.Number | TokenKind.RealNumber | TokenKind.String | TokenKind.Character | TokenKind.True | TokenKind.False | TokenKind.Null | TokenKind.Poison => {
+        if token.start < token.end {
+            first: tryte = self.source[token.start];
+            if Chars.isLetter(first) || first == '_' {
                 self.advance();
-                return Node(NodeKind.Literal, token.start, token.end, token.kind, List<Node>());
+                return Node(NodeKind.Name, token.start, token.end, token.kind, List<Node>());
             }
-            TokenKind.Identifier => {
-                if self.looksGeneric() {
-                    return self.typeName();
+        }
+        throw Diagnostic("expected a name in a use declaration", token.start, token.end);
+    }
+
+    /* A declaration of the file, wrapped in a Public node after `public`. */
+    proc topLevel(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind == TokenKind.Public {
+            start: int = token.start;
+            self.advance();
+            declaration: Node = self.topLevelBody();
+            end: int = declaration.end;
+            children: List<Node> = List<Node>();
+            children.add(give declaration);
+            return Node(NodeKind.Public, start, end, TokenKind.Public, give children);
+        }
+        return self.topLevelBody();
+    }
+
+    /* What a declaration of the file is: an enum, a class or a proc. */
+    proc topLevelBody(&self) -> Node throws Diagnostic {
+        if self.current().kind == TokenKind.Enum {
+            return self.enumDeclaration();
+        } else if self.current().kind == TokenKind.Class {
+            return self.classDeclaration();
+        }
+        return self.procedure();
+    }
+
+    // ---------- Declarations: proc, enum and class ----------
+
+    /* `proc name(params) -> type throws errors { body }`; the return type and the throws are optional. */
+    proc procedure(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Proc {
+            throw Diagnostic("expected 'proc'", token.start, token.end);
+        }
+        self.advance();
+        nameToken: Token = self.current();
+        if nameToken.kind != TokenKind.Identifier {
+            throw Diagnostic("expected procedure name", nameToken.start, nameToken.end);
+        }
+        self.advance();
+        children: List<Node> = List<Node>();
+        children.add(Node(NodeKind.Name, nameToken.start, nameToken.end, TokenKind.Identifier, List<Node>()));
+        children.add(self.parameters());
+        if self.current().kind == TokenKind.Arrow {
+            self.advance();
+            children.add(self.typeName());
+        }
+        if self.current().kind == TokenKind.Throws {
+            children.add(self.throwsClause());
+        }
+        body: Node = self.block();
+        end: int = body.end;
+        children.add(give body);
+        return Node(NodeKind.Proc, token.start, end, TokenKind.Proc, give children);
+    }
+
+    /* `(a: int, b: text)`: a Parameters node with one child per parameter. */
+    proc parameters(&self) -> Node throws Diagnostic {
+        start: int = self.current().start;
+        self.expect(TokenKind.LeftParen, "`(`");
+        children: List<Node> = List<Node>();
+        if self.current().kind != TokenKind.RightParen {
+            parameter: Node = self.parameter();
+            children.add(give parameter);
+            while self.current().kind == TokenKind.Comma {
+                self.advance();
+                nextParameter: Node = self.parameter();
+                children.add(give nextParameter);
+            }
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.RightParen, "`)`");
+        return Node(NodeKind.Parameters, start, end, TokenKind.LeftParen, give children);
+    }
+
+    /* One parameter: `name: type`, `v[]: int`, or `self` / `&self` without a type. */
+    proc parameter(&self) -> Node throws Diagnostic {
+        if self.current().kind == TokenKind.Ampersand {
+            token: Token = self.current();
+            self.advance();
+            name: Node = self.name("borrowed parameter name");
+            if Texts.sub(self.source, name.start, name.end) != "self" {
+                throw Diagnostic("only `self` can be borrowed without a type", name.start, name.end);
+            }
+            end: int = name.end;
+            children: List<Node> = List<Node>();
+            children.add(give name);
+            return Node(NodeKind.Borrow, token.start, end, TokenKind.Ampersand, give children);
+        }
+        name: Node = self.arrayName("parameter name");
+        if self.current().kind != TokenKind.Colon {
+            if Texts.sub(self.source, name.start, name.end) != "self" {
+                throw Diagnostic("only `self` can be used without a type", name.start, name.end);
+            }
+            return name;
+        }
+        start: int = name.start;
+        self.advance();
+        typeNode: Node = self.parameterType();
+        end: int = typeNode.end;
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        children.add(give typeNode);
+        return Node(NodeKind.Parameter, start, end, TokenKind.Identifier, give children);
+    }
+
+    /* The type of a parameter, which may be borrowed: `&Node`. */
+    proc parameterType(&self) -> Node throws Diagnostic {
+        if self.current().kind == TokenKind.Ampersand {
+            token: Token = self.current();
+            self.advance();
+            typeNode: Node = self.typeName();
+            end: int = typeNode.end;
+            children: List<Node> = List<Node>();
+            children.add(give typeNode);
+            return Node(NodeKind.Borrow, token.start, end, TokenKind.Ampersand, give children);
+        }
+        return self.typeName();
+    }
+
+    /* `throws Diagnostic, Trap`: the errors a proc may throw. */
+    proc throwsClause(&self) -> Node throws Diagnostic {
+        if self.current().kind == TokenKind.Throws {
+            start: int = self.current().start;
+            self.advance();
+            errors: List<Node> = List<Node>();
+            error: Node = self.name("error name");
+            end: int = error.end;
+            errors.add(give error);
+            while self.current().kind == TokenKind.Comma {
+                self.advance();
+                nextError: Node = self.name("error name");
+                end = nextError.end;
+                errors.add(give nextError);
+            }
+            return Node(NodeKind.Throws, start, end, TokenKind.Throws, give errors);
+        }
+        throw Diagnostic("expected throws clause", self.current().start, self.current().end);
+    }
+
+    /* `enum Color { Red, Green = 5 }`; a comma after the last item is an error. */
+    proc enumDeclaration(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        start: int = token.start;
+        self.expect(TokenKind.Enum, "`enum`");
+        name: Node = self.name("enum name");
+        self.expect(TokenKind.LeftBrace, "`{`");
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        while self.current().kind != TokenKind.RightBrace {
+            children.add(self.enumItem());
+            if self.current().kind == TokenKind.Comma {
+                comma: Token = self.current();
+                self.advance();
+                if self.current().kind == TokenKind.RightBrace {
+                    throw Diagnostic("unexpected trailing comma", comma.start, comma.end);
                 }
-                self.advance();
-                return Node(NodeKind.Name, token.start, token.end, TokenKind.EndOfFile, List<Node>());
+            } else {
+                break;
             }
-            TokenKind.LeftParen => {
-                self.advance();
-                expression: Node = self.binary(0);
-                self.expect(TokenKind.RightParen, "`)`");
-                return expression;
-            }
-            else => {
-                throw Diagnostic("expected an expression", token.start, token.end);
-            }
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.RightBrace, "`}`");
+        return Node(NodeKind.Enum, start, end, TokenKind.Enum, give children);
+    }
+
+    /* One item of an enum, with an optional `= value`. */
+    proc enumItem(&self) -> Node throws Diagnostic {
+        name: Node = self.name("enum item name");
+        start: int = name.start;
+        end: int = name.end;
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        if self.current().kind == TokenKind.Equal {
+            self.advance();
+            value: Node = self.binary(0);
+            end = value.end;
+            children.add(give value);
+        }
+        return Node(NodeKind.EnumItem, start, end, TokenKind.Identifier, give children);
+    }
+
+    /* `class Name { members }`. */
+    proc classDeclaration(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        start: int = token.start;
+        self.expect(TokenKind.Class, "`class`");
+        name: Node = self.name("class name");
+        self.expect(TokenKind.LeftBrace, "`{`");
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        while self.current().kind != TokenKind.RightBrace {
+            children.add(self.member());
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.RightBrace, "`}`");
+        return Node(NodeKind.Class, start, end, TokenKind.Class, give children);
+    }
+
+    /* One member of a class, wrapped in a Public node after `public`. */
+    proc member(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind == TokenKind.Public {
+            start: int = token.start;
+            self.advance();
+            declaration: Node = self.memberBody();
+            end: int = declaration.end;
+            children: List<Node> = List<Node>();
+            children.add(give declaration);
+            return Node(NodeKind.Public, start, end, TokenKind.Public, give children);
+        }
+        return self.memberBody();
+    }
+
+    /* What a member is: a method (`proc`) or a field. */
+    proc memberBody(&self) -> Node throws Diagnostic {
+        if self.current().kind == TokenKind.Proc {
+            return self.procedure();
+        }
+        return self.classField();
+    }
+
+    /* A field of a class: `name: type;` or `values[]: int;`. */
+    proc classField(&self) -> Node throws Diagnostic {
+        name: Node = self.arrayName("class field name");
+        self.expect(TokenKind.Colon, "`:`");
+        typeNode: Node = self.typeName();
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
+        start: int = name.start;
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        children.add(give typeNode);
+        return Node(NodeKind.ClassField, start, end, TokenKind.EndOfFile, give children);
+    }
+
+    // ---------- Statements: what goes inside a block ----------
+
+    /* `{ statements }`. */
+    proc block(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.LeftBrace {
+            throw Diagnostic("expected '{'", token.start, token.end);
+        }
+        self.advance();
+        children: List<Node> = List<Node>();
+        while self.current().kind != TokenKind.RightBrace {
+            children.add(self.statement());
+        }
+        end: int = self.current().end;
+        self.advance();
+        return Node(NodeKind.Block, token.start, end, TokenKind.LeftBrace, give children);
+    }
+
+    /* Picks the statement by its first token; `name:` or `name[]:` starts a declaration. */
+    proc statement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if self.current().kind == TokenKind.Identifier && self.peek(1).kind == TokenKind.Colon {
+            return self.declaration();
+        } else if self.current().kind == TokenKind.Identifier && self.peek(1).kind == TokenKind.LeftBracket && self.peek(2).kind == TokenKind.RightBracket && self.peek(3).kind == TokenKind.Colon {
+            return self.declaration();
+        }
+        match token.kind {
+            TokenKind.LeftBrace => return self.block();
+            TokenKind.Return => return self.returnStatement();
+            TokenKind.If => return self.ifStatement();
+            TokenKind.While => return self.whileStatement();
+            TokenKind.For => return self.forStatement();
+            TokenKind.Continue => return self.jumpStatement();
+            TokenKind.Break => return self.jumpStatement();
+            TokenKind.Burn => return self.burnStatement();
+            TokenKind.Try => return self.tryStatement();
+            TokenKind.Throw => return self.throwStatement();
+            TokenKind.Match => return self.matchStatement();
+            else => return self.expressionStatement();
         }
     }
 
+    /* A variable: `x: int = 1;` or `v[]: int = other();`. */
+    proc declaration(&self) -> Node throws Diagnostic {
+        name: Node = self.arrayName("variable name");
+        start: int = name.start;
+        self.expect(TokenKind.Colon, "`:`");
+        typeNode: Node = self.typeName();
+        self.expect(TokenKind.Equal, "`=`");
+        value: Node = self.binary(0);
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        children.add(give typeNode);
+        children.add(give value);
+        return Node(NodeKind.Declaration, start, end, TokenKind.EndOfFile, give children);
+    }
+
+    /* An expression or assignment followed by `;`: `x = 1;`, `print(x);`. */
+    proc expressionStatement(&self) -> Node throws Diagnostic {
+        expression: Node = self.step();
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
+        start: int = expression.start;
+        children: List<Node> = List<Node>();
+        children.add(give expression);
+        return Node(NodeKind.ExpressionStatement, start, end, TokenKind.Semicolon, give children);
+    }
+
+    /* An expression that may be an assignment (`x = 1`, `x += 2`, `x++`), without the `;`. */
+    proc step(&self) -> Node throws Diagnostic {
+        target: Node = self.binary(0);
+        token: Token = self.current();
+        kind: TokenKind = token.kind;
+        if self.isAssignment(kind) || kind == TokenKind.PlusPlus || kind == TokenKind.MinusMinus {
+            if target.kind != NodeKind.Name && target.kind != NodeKind.Field && target.kind != NodeKind.Index {
+                throw Diagnostic("cannot assign to this expression", target.start, target.end);
+            }
+            self.advance();
+            start: int = target.start;
+            end: int = token.end;
+            children: List<Node> = List<Node>();
+            children.add(give target);
+            if kind != TokenKind.PlusPlus && kind != TokenKind.MinusMinus {
+                value: Node = self.binary(0);
+                end = value.end;
+                children.add(give value);
+            }
+            return Node(NodeKind.Assignment, start, end, kind, give children);
+        }
+        return target;
+    }
+
+    /* Whether `kind` is `=` or one of `+=`, `-=`, `*=`, `/=`, `%=`. */
+    proc isAssignment(&self, kind: TokenKind) -> bool {
+        match kind {
+            TokenKind.Equal => return true;
+            TokenKind.PlusEqual => return true;
+            TokenKind.MinusEqual => return true;
+            TokenKind.StarEqual => return true;
+            TokenKind.SlashEqual => return true;
+            TokenKind.PercentEqual => return true;
+            else => return false;
+        }
+    }
+
+    /* `return value;`. */
+    proc returnStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Return {
+            throw Diagnostic("expected 'return'", token.start, token.end);
+        }
+        self.advance();
+        expression: Node = self.binary(0);
+        semicolon: Token = self.current();
+        if semicolon.kind != TokenKind.Semicolon {
+            throw Diagnostic("expected ';'", semicolon.start, semicolon.end);
+        }
+        self.advance();
+        children: List<Node> = List<Node>();
+        children.add(give expression);
+        return Node(NodeKind.Return, token.start, semicolon.end, TokenKind.Return, give children);
+    }
+
+    /* `if condition { } else { }`; an `else if` is an If node inside the else. */
+    proc ifStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.If {
+            throw Diagnostic("expected 'if'", token.start, token.end);
+        }
+        self.advance();
+        condition: Node = self.binary(0);
+        thenBlock: Node = self.block();
+        end: int = thenBlock.end;
+        children: List<Node> = List<Node>();
+        children.add(give condition);
+        children.add(give thenBlock);
+        if self.current().kind == TokenKind.Else {
+            self.advance();
+            if self.current().kind == TokenKind.If {
+                elseIfNode: Node = self.ifStatement();
+                end = elseIfNode.end;
+                children.add(give elseIfNode);
+            } else {
+                elseBlock: Node = self.block();
+                end = elseBlock.end;
+                children.add(give elseBlock);
+            }
+        }
+        return Node(NodeKind.If, token.start, end, TokenKind.If, give children);
+    }
+
+    /* `while condition { }`. */
+    proc whileStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.While {
+            throw Diagnostic("expected 'while'", token.start, token.end);
+        }
+        self.advance();
+        condition: Node = self.binary(0);
+        body: Node = self.block();
+        end: int = body.end;
+        children: List<Node> = List<Node>();
+        children.add(give condition);
+        children.add(give body);
+        return Node(NodeKind.While, token.start, end, TokenKind.While, give children);
+    }
+
+    /* `for i: int = 0; i < n; i++ { }`: declaration, condition, step and body. */
+    proc forStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.For {
+            throw Diagnostic("expected 'for'", token.start, token.end);
+        }
+        self.advance();
+        initializer: Node = self.declaration();
+        condition: Node = self.binary(0);
+        self.expect(TokenKind.Semicolon, "`;`");
+        increment: Node = self.step();
+        body: Node = self.block();
+        end: int = body.end;
+        children: List<Node> = List<Node>();
+        children.add(give initializer);
+        children.add(give condition);
+        children.add(give increment);
+        children.add(give body);
+        return Node(NodeKind.For, token.start, end, TokenKind.For, give children);
+    }
+
+    /* `break;` or `continue;`. */
+    proc jumpStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Continue && token.kind != TokenKind.Break {
+            throw Diagnostic("expected 'continue' or 'break'", token.start, token.end);
+        }
+        self.advance();
+        semicolon: Token = self.current();
+        if semicolon.kind != TokenKind.Semicolon {
+            throw Diagnostic("expected ';'", semicolon.start, semicolon.end);
+        }
+        self.advance();
+        end: int = semicolon.end;
+        kind: NodeKind = NodeKind.Continue;
+        if token.kind == TokenKind.Break {
+            kind = NodeKind.Break;
+        }
+        return Node(kind, token.start, end, token.kind, List<Node>());
+    }
+
+    /* `burn name;`. */
+    proc burnStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Burn {
+            throw Diagnostic("expected 'burn'", token.start, token.end);
+        }
+        self.advance();
+        name: Node = self.name("burn target");
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        return Node(NodeKind.Burn, token.start, end, token.kind, give children);
+    }
+
+    /* `try { } catch e: Error { }`, with one or more catch clauses. */
+    proc tryStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Try {
+            throw Diagnostic("expected 'try'", token.start, token.end);
+        }
+        self.advance();
+        children: List<Node> = List<Node>();
+        children.add(self.block());
+        if self.current().kind != TokenKind.Catch {
+            throw Diagnostic("expected `catch`", self.current().start, self.current().end);
+        }
+        end: int = 0;
+        while self.current().kind == TokenKind.Catch {
+            clause: Node = self.catchClause();
+            end = clause.end;
+            children.add(give clause);
+        }
+        return Node(NodeKind.Try, token.start, end, token.kind, give children);
+    }
+
+    /* `catch name: Type { }`. */
+    proc catchClause(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Catch {
+            throw Diagnostic("expected 'catch'", token.start, token.end);
+        }
+        self.advance();
+        children: List<Node> = List<Node>();
+        children.add(self.name("error name"));
+        self.expect(TokenKind.Colon, "`:`");
+        children.add(self.typeName());
+        body: Node = self.block();
+        end: int = body.end;
+        children.add(give body);
+        return Node(NodeKind.Catch, token.start, end, token.kind, give children);
+    }
+
+    /* `throw value;`. */
+    proc throwStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Throw {
+            throw Diagnostic("expected 'throw'", token.start, token.end);
+        }
+        self.advance();
+        children: List<Node> = List<Node>();
+        children.add(self.binary(0));
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
+        return Node(NodeKind.Throw, token.start, end, token.kind, give children);
+    }
+
+    /* `match value { arms }`. */
+    proc matchStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Match {
+            throw Diagnostic("expected 'match'", token.start, token.end);
+        }
+        self.advance();
+        subject: Node = self.binary(0);
+        self.expect(TokenKind.LeftBrace, "`{`");
+        children: List<Node> = List<Node>();
+        children.add(give subject);
+        while self.current().kind != TokenKind.RightBrace {
+            children.add(self.matchArm());
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.RightBrace, "`}`");
+        return Node(NodeKind.Match, token.start, end, token.kind, give children);
+    }
+
+    /* One arm of a match: `A | B => statement` or `else => statement`. */
+    proc matchArm(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind == TokenKind.Else {
+            self.advance();
+            self.expect(TokenKind.FatArrow, "`=>`");
+            body: Node = self.statement();
+            end: int = body.end;
+            children: List<Node> = List<Node>();
+            children.add(give body);
+            return Node(NodeKind.Else, token.start, end, token.kind, give children);
+        }
+        pattern: Node = self.binary(0);
+        children: List<Node> = List<Node>();
+        children.add(give pattern);
+        while self.current().kind == TokenKind.Pipe {
+            self.advance();
+            nextPattern: Node = self.binary(0);
+            children.add(give nextPattern);
+        }
+        self.expect(TokenKind.FatArrow, "`=>`");
+        body: Node = self.statement();
+        end: int = body.end;
+        children.add(give body);
+        return Node(NodeKind.Arm, token.start, end, token.kind, give children);
+    }
+
+    // ---------- Expressions: from the lowest precedence to the highest ----------
+
+    /* Operations at `level` or above (see `belongsTo`); below level 5 comes `unary`. */
+    proc binary(&self, level: int) -> Node throws Diagnostic {
+        if level > 5 {
+            return self.unary();
+        }
+        return self.moreBinary(level, self.binary(level + 1));
+    }
+
+    /* Joins `left` with the operators of `level` that follow it, from left to right. */
+    proc moreBinary(&self, level: int, left: Node) -> Node throws Diagnostic {
+        kind: TokenKind = self.current().kind;
+        if !self.belongsTo(level, kind) {
+            return left;
+        }
+        self.advance();
+        start: int = left.start;
+        right: Node = self.binary(level + 1);
+
+        if level == 2 && self.belongsTo(2, self.current().kind) {
+            throw Diagnostic("comparisons cannot be chained", self.current().start, self.current().end);
+        }
+        
+        end: int = right.end;
+        children: List<Node> = List<Node>();
+        children.add(give left);
+        children.add(give right);
+        return self.moreBinary(level, Node(NodeKind.Binary, start, end, kind, give children));
+    }
+
+    /* Whether `kind` is an operator of `level`: 0 `||`, 1 `&&`, 2 comparisons, 3 `?:`, 4 `+ -`, 5 `* / %`. */
+    proc belongsTo(&self, level: int, kind: TokenKind) -> bool {
+        match level {
+            0 => return kind == TokenKind.OrOr;
+            1 => return kind == TokenKind.AndAnd;
+            2 => return kind == TokenKind.EqualEqual || kind == TokenKind.NotEqual || kind == TokenKind.Less 
+                        || kind == TokenKind.Greater || kind == TokenKind.LessEqual 
+                        || kind == TokenKind.GreaterEqual || kind == TokenKind.Spaceship;
+            3 => return kind == TokenKind.Elvis;
+            4 => return kind == TokenKind.Plus || kind == TokenKind.Minus;
+            5 => return kind == TokenKind.Star || kind == TokenKind.Slash || kind == TokenKind.Percent;
+            else => return false;
+        }
+    }
+
+    /* A prefix before an operand: `-x`, `!x`, `&x`, `give x`, `+x`. */
     proc unary(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         match token.kind {
@@ -147,10 +763,12 @@ public class Parser {
         }
     }
 
+    /* An operand followed by its suffixes: calls, fields and indexes. */
     proc postfix(&self) -> Node throws Diagnostic {
         return self.morePostfix(self.primary());
     }
 
+    /* Applies the suffixes after `target`, one at a time: `a.b(c)[d]`. */
     proc morePostfix(&self, target: Node) -> Node throws Diagnostic {
         match self.current().kind {
             TokenKind.LeftParen => return self.morePostfix(self.call(give target));
@@ -160,6 +778,7 @@ public class Parser {
         }
     }
 
+    /* `target(arguments)`. */
     proc call(&self, target: Node) -> Node throws Diagnostic {
         self.advance();
         start: int = target.start;
@@ -177,6 +796,7 @@ public class Parser {
         return Node(NodeKind.Call, start, end, TokenKind.LeftParen, give children);
     }
 
+    /* `target.name`. */
     proc field(&self, target: Node) -> Node throws Diagnostic {
         self.advance();
         start: int = target.start;
@@ -192,542 +812,7 @@ public class Parser {
         return Node(NodeKind.Field, start, end, TokenKind.Dot, give children);
     }
 
-    proc binary(&self, level: int) -> Node throws Diagnostic {
-        if level > 5 {
-            return self.unary();
-        }
-        return self.moreBinary(level, self.binary(level + 1));
-    }
-    
-    proc moreBinary(&self, level: int, left: Node) -> Node throws Diagnostic {
-        kind: TokenKind = self.current().kind;
-        if !self.belongsTo(level, kind) {
-            return left;
-        }
-        self.advance();
-        start: int = left.start;
-        right: Node = self.binary(level + 1);
-
-        if level == 2 && self.belongsTo(2, self.current().kind) {
-            throw Diagnostic("comparisons cannot be chained", self.current().start, self.current().end);
-        }
-        
-        end: int = right.end;
-        children: List<Node> = List<Node>();
-        children.add(give left);
-        children.add(give right);
-        return self.moreBinary(level, Node(NodeKind.Binary, start, end, kind, give children));
-    }
-
-    proc belongsTo(&self, level: int, kind: TokenKind) -> bool {
-        match level {
-            0 => return kind == TokenKind.OrOr;
-            1 => return kind == TokenKind.AndAnd;
-            2 => return kind == TokenKind.EqualEqual || kind == TokenKind.NotEqual || kind == TokenKind.Less 
-                        || kind == TokenKind.Greater || kind == TokenKind.LessEqual 
-                        || kind == TokenKind.GreaterEqual || kind == TokenKind.Spaceship;
-            3 => return kind == TokenKind.Elvis;
-            4 => return kind == TokenKind.Plus || kind == TokenKind.Minus;
-            5 => return kind == TokenKind.Star || kind == TokenKind.Slash || kind == TokenKind.Percent;
-            else => return false;
-        }
-    }
-
-    proc isAssignment(&self, kind: TokenKind) -> bool {
-        match kind {
-            TokenKind.Equal => return true;
-            TokenKind.PlusEqual => return true;
-            TokenKind.MinusEqual => return true;
-            TokenKind.StarEqual => return true;
-            TokenKind.SlashEqual => return true;
-            TokenKind.PercentEqual => return true;
-            else => return false;
-        }
-    }
-
-    proc block(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.LeftBrace {
-            throw Diagnostic("expected '{'", token.start, token.end);
-        }
-        self.advance();
-        children: List<Node> = List<Node>();
-        while self.current().kind != TokenKind.RightBrace {
-            children.add(self.statement());
-        }
-        end: int = self.current().end;
-        self.advance();
-        return Node(NodeKind.Block, token.start, end, TokenKind.LeftBrace, give children);
-    }
-
-    // ================= Parameters ===================
-    
-    proc parameter(&self) -> Node throws Diagnostic {
-        if self.current().kind == TokenKind.Ampersand {
-            token: Token = self.current();
-            self.advance();
-            name: Node = self.name("borrowed parameter name");
-            if Texts.sub(self.source, name.start, name.end) != "self" {
-                throw Diagnostic("only `self` can be borrowed without a type", name.start, name.end);
-            }
-            end: int = name.end;
-            children: List<Node> = List<Node>();
-            children.add(give name);
-            return Node(NodeKind.Borrow, token.start, end, TokenKind.Ampersand, give children);
-        }
-        name: Node = self.arrayName("parameter name");
-        if self.current().kind != TokenKind.Colon {
-            if Texts.sub(self.source, name.start, name.end) != "self" {
-                throw Diagnostic("only `self` can be used without a type", name.start, name.end);
-            }
-            return name;
-        }
-        start: int = name.start;
-        self.advance();
-        typeNode: Node = self.parameterType();
-        end: int = typeNode.end;
-        children: List<Node> = List<Node>();
-        children.add(give name);
-        children.add(give typeNode);
-        return Node(NodeKind.Parameter, start, end, TokenKind.Identifier, give children);
-    }
-
-    proc parameters(&self) -> Node throws Diagnostic {
-        start: int = self.current().start;
-        self.expect(TokenKind.LeftParen, "`(`");
-        children: List<Node> = List<Node>();
-        if self.current().kind != TokenKind.RightParen {
-            parameter: Node = self.parameter();
-            children.add(give parameter);
-            while self.current().kind == TokenKind.Comma {
-                self.advance();
-                nextParameter: Node = self.parameter();
-                children.add(give nextParameter);
-            }
-        }
-        end: int = self.current().end;
-        self.expect(TokenKind.RightParen, "`)`");
-        return Node(NodeKind.Parameters, start, end, TokenKind.LeftParen, give children);
-    }
-
-    proc parameterType(&self) -> Node throws Diagnostic {
-        if self.current().kind == TokenKind.Ampersand {
-            token: Token = self.current();
-            self.advance();
-            typeNode: Node = self.typeName();
-            end: int = typeNode.end;
-            children: List<Node> = List<Node>();
-            children.add(give typeNode);
-            return Node(NodeKind.Borrow, token.start, end, TokenKind.Ampersand, give children);
-        }
-        return self.typeName();
-    }
-
-    // ================= Procedures ===================
-    
-    proc procedure(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.Proc {
-            throw Diagnostic("expected 'proc'", token.start, token.end);
-        }
-        self.advance();
-        nameToken: Token = self.current();
-        if nameToken.kind != TokenKind.Identifier {
-            throw Diagnostic("expected procedure name", nameToken.start, nameToken.end);
-        }
-        self.advance();
-        children: List<Node> = List<Node>();
-        children.add(Node(NodeKind.Name, nameToken.start, nameToken.end, TokenKind.Identifier, List<Node>()));
-        children.add(self.parameters());
-        if self.current().kind == TokenKind.Arrow {
-            self.advance();
-            children.add(self.typeName());
-        }
-        if self.current().kind == TokenKind.Throws {
-            children.add(self.throwsClause());
-        }
-        body: Node = self.block();
-        end: int = body.end;
-        children.add(give body);
-        return Node(NodeKind.Proc, token.start, end, TokenKind.Proc, give children);
-    }
-
-    proc enumOrProcedure(&self) -> Node throws Diagnostic {
-        if self.current().kind == TokenKind.Enum {
-            return self.enumDeclaration();
-        } else if self.current().kind == TokenKind.Class {
-            return self.classDeclaration();
-        }
-        return self.procedure();
-    }
-
-    // ================= Statements ===================
-
-    proc statement(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if self.current().kind == TokenKind.Identifier && self.peek(1).kind == TokenKind.Colon {
-            return self.declaration();
-        } else if self.current().kind == TokenKind.Identifier && self.peek(1).kind == TokenKind.LeftBracket && self.peek(2).kind == TokenKind.RightBracket && self.peek(3).kind == TokenKind.Colon {
-            return self.declaration();
-        }
-        match token.kind {
-            TokenKind.LeftBrace => return self.block();
-            TokenKind.Return => return self.returnStatement();
-            TokenKind.If => return self.ifStatement();
-            TokenKind.While => return self.whileStatement();
-            TokenKind.For => return self.forStatement();
-            TokenKind.Continue => return self.jumpStatement();
-            TokenKind.Break => return self.jumpStatement();
-            TokenKind.Burn => return self.burnStatement();
-            TokenKind.Try => return self.tryStatement();
-            TokenKind.Throw => return self.throwStatement();
-            TokenKind.Match => return self.matchStatement();
-            else => return self.expressionStatement();
-        }
-    }
-
-    proc expressionStatement(&self) -> Node throws Diagnostic {
-        expression: Node = self.step();
-        end: int = self.current().end;
-        self.expect(TokenKind.Semicolon, "`;`");
-        start: int = expression.start;
-        children: List<Node> = List<Node>();
-        children.add(give expression);
-        return Node(NodeKind.ExpressionStatement, start, end, TokenKind.Semicolon, give children);
-    }
-
-    proc returnStatement(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.Return {
-            throw Diagnostic("expected 'return'", token.start, token.end);
-        }
-        self.advance();
-        expression: Node = self.binary(0);
-        semicolon: Token = self.current();
-        if semicolon.kind != TokenKind.Semicolon {
-            throw Diagnostic("expected ';'", semicolon.start, semicolon.end);
-        }
-        self.advance();
-        children: List<Node> = List<Node>();
-        children.add(give expression);
-        return Node(NodeKind.Return, token.start, semicolon.end, TokenKind.Return, give children);
-    }
-
-    proc ifStatement(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.If {
-            throw Diagnostic("expected 'if'", token.start, token.end);
-        }
-        self.advance();
-        condition: Node = self.binary(0);
-        thenBlock: Node = self.block();
-        end: int = thenBlock.end;
-        children: List<Node> = List<Node>();
-        children.add(give condition);
-        children.add(give thenBlock);
-        if self.current().kind == TokenKind.Else {
-            self.advance();
-            if self.current().kind == TokenKind.If {
-                elseIfNode: Node = self.ifStatement();
-                end = elseIfNode.end;
-                children.add(give elseIfNode);
-            } else {
-                elseBlock: Node = self.block();
-                end = elseBlock.end;
-                children.add(give elseBlock);
-            }
-        }
-        return Node(NodeKind.If, token.start, end, TokenKind.If, give children);
-    }
-
-    proc whileStatement(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.While {
-            throw Diagnostic("expected 'while'", token.start, token.end);
-        }
-        self.advance();
-        condition: Node = self.binary(0);
-        body: Node = self.block();
-        end: int = body.end;
-        children: List<Node> = List<Node>();
-        children.add(give condition);
-        children.add(give body);
-        return Node(NodeKind.While, token.start, end, TokenKind.While, give children);
-    }
-
-    proc forStatement(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.For {
-            throw Diagnostic("expected 'for'", token.start, token.end);
-        }
-        self.advance();
-        initializer: Node = self.declaration();
-        condition: Node = self.binary(0);
-        self.expect(TokenKind.Semicolon, "`;`");
-        increment: Node = self.step();
-        body: Node = self.block();
-        end: int = body.end;
-        children: List<Node> = List<Node>();
-        children.add(give initializer);
-        children.add(give condition);
-        children.add(give increment);
-        children.add(give body);
-        return Node(NodeKind.For, token.start, end, TokenKind.For, give children);
-    }
-
-    proc jumpStatement(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.Continue && token.kind != TokenKind.Break {
-            throw Diagnostic("expected 'continue' or 'break'", token.start, token.end);
-        }
-        self.advance();
-        semicolon: Token = self.current();
-        if semicolon.kind != TokenKind.Semicolon {
-            throw Diagnostic("expected ';'", semicolon.start, semicolon.end);
-        }
-        self.advance();
-        end: int = semicolon.end;
-        kind: NodeKind = NodeKind.Continue;
-        if token.kind == TokenKind.Break {
-            kind = NodeKind.Break;
-        }
-        return Node(kind, token.start, end, token.kind, List<Node>());
-    }
-
-    proc burnStatement(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.Burn {
-            throw Diagnostic("expected 'burn'", token.start, token.end);
-        }
-        self.advance();
-        name: Node = self.name("burn target");
-        end: int = self.current().end;
-        self.expect(TokenKind.Semicolon, "`;`");
-        children: List<Node> = List<Node>();
-        children.add(give name);
-        return Node(NodeKind.Burn, token.start, end, token.kind, give children);
-    }
-
-    proc tryStatement(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.Try {
-            throw Diagnostic("expected 'try'", token.start, token.end);
-        }
-        self.advance();
-        children: List<Node> = List<Node>();
-        children.add(self.block());
-        if self.current().kind != TokenKind.Catch {
-            throw Diagnostic("expected `catch`", self.current().start, self.current().end);
-        }
-        end: int = 0;
-        while self.current().kind == TokenKind.Catch {
-            clause: Node = self.catchClause();
-            end = clause.end;
-            children.add(give clause);
-        }
-        return Node(NodeKind.Try, token.start, end, token.kind, give children);
-    }
-
-    proc throwStatement(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.Throw {
-            throw Diagnostic("expected 'throw'", token.start, token.end);
-        }
-        self.advance();
-        children: List<Node> = List<Node>();
-        children.add(self.binary(0));
-        end: int = self.current().end;
-        self.expect(TokenKind.Semicolon, "`;`");
-        return Node(NodeKind.Throw, token.start, end, token.kind, give children);
-    }
-
-    proc matchStatement(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.Match {
-            throw Diagnostic("expected 'match'", token.start, token.end);
-        }
-        self.advance();
-        subject: Node = self.binary(0);
-        self.expect(TokenKind.LeftBrace, "`{`");
-        children: List<Node> = List<Node>();
-        children.add(give subject);
-        while self.current().kind != TokenKind.RightBrace {
-            children.add(self.matchArm());
-        }
-        end: int = self.current().end;
-        self.expect(TokenKind.RightBrace, "`}`");
-        return Node(NodeKind.Match, token.start, end, token.kind, give children);
-    }
-
-    // ================= Declarations ===================
-
-    proc declaration(&self) -> Node throws Diagnostic {
-        name: Node = self.arrayName("variable name");
-        start: int = name.start;
-        self.expect(TokenKind.Colon, "`:`");
-        typeNode: Node = self.typeName();
-        self.expect(TokenKind.Equal, "`=`");
-        value: Node = self.binary(0);
-        end: int = self.current().end;
-        self.expect(TokenKind.Semicolon, "`;`");
-        children: List<Node> = List<Node>();
-        children.add(give name);
-        children.add(give typeNode);
-        children.add(give value);
-        return Node(NodeKind.Declaration, start, end, TokenKind.EndOfFile, give children);
-    }
-
-    proc enumDeclaration(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        start: int = token.start;
-        self.expect(TokenKind.Enum, "`enum`");
-        name: Node = self.name("enum name");
-        self.expect(TokenKind.LeftBrace, "`{`");
-        children: List<Node> = List<Node>();
-        children.add(give name);
-        while self.current().kind != TokenKind.RightBrace {
-            children.add(self.enumItem());
-            if self.current().kind == TokenKind.Comma {
-                comma: Token = self.current();
-                self.advance();
-                if self.current().kind == TokenKind.RightBrace {
-                    throw Diagnostic("unexpected trailing comma", comma.start, comma.end);
-                }
-            } else {
-                break;
-            }
-        }
-        end: int = self.current().end;
-        self.expect(TokenKind.RightBrace, "`}`");
-        return Node(NodeKind.Enum, start, end, TokenKind.Enum, give children);
-    }
-
-    proc useDeclaration(&self) -> Node throws Diagnostic {
-        useToken: Token = self.current();
-        self.advance();
-        children: List<Node> = List<Node>();
-        children.add(self.useName());
-        while self.current().kind == TokenKind.Dot {
-            self.advance();
-            children.add(self.useName());
-        }
-        end: int = self.current().end;
-        self.expect(TokenKind.Semicolon, "`;`");
-        return Node(NodeKind.Use, useToken.start, end, TokenKind.EndOfFile, give children);
-    }
-
-    proc classDeclaration(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        start: int = token.start;
-        self.expect(TokenKind.Class, "`class`");
-        name: Node = self.name("class name");
-        self.expect(TokenKind.LeftBrace, "`{`");
-        children: List<Node> = List<Node>();
-        children.add(give name);
-        while self.current().kind != TokenKind.RightBrace {
-            children.add(self.member());
-        }
-        end: int = self.current().end;
-        self.expect(TokenKind.RightBrace, "`}`");
-        return Node(NodeKind.Class, start, end, TokenKind.Class, give children);
-    }
-
-    // ================= Other Stuff ===================
-
-    proc useName(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.start < token.end {
-            first: tryte = self.source[token.start];
-            if Chars.isLetter(first) || first == '_' {
-                self.advance();
-                return Node(NodeKind.Name, token.start, token.end, token.kind, List<Node>());
-            }
-        }
-        throw Diagnostic("expected a name in a use declaration", token.start, token.end);
-    }
-
-    proc topLevel(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind == TokenKind.Public {
-            start: int = token.start;
-            self.advance();
-            declaration: Node = self.enumOrProcedure();
-            end: int = declaration.end;
-            children: List<Node> = List<Node>();
-            children.add(give declaration);
-            return Node(NodeKind.Public, start, end, TokenKind.Public, give children);
-        }
-        return self.enumOrProcedure();
-    }
-
-    proc member(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind == TokenKind.Public {
-            start: int = token.start;
-            self.advance();
-            declaration: Node = self.memberBody();
-            end: int = declaration.end;
-            children: List<Node> = List<Node>();
-            children.add(give declaration);
-            return Node(NodeKind.Public, start, end, TokenKind.Public, give children);
-        }
-        return self.memberBody();
-    }
-
-    proc memberBody(&self) -> Node throws Diagnostic {
-        if self.current().kind == TokenKind.Proc {
-            return self.procedure();
-        }
-        return self.classField();
-    }
-
-    proc enumItem(&self) -> Node throws Diagnostic {
-        name: Node = self.name("enum item name");
-        start: int = name.start;
-        end: int = name.end;
-        children: List<Node> = List<Node>();
-        children.add(give name);
-        if self.current().kind == TokenKind.Equal {
-            self.advance();
-            value: Node = self.binary(0);
-            end = value.end;
-            children.add(give value);
-        }
-        return Node(NodeKind.EnumItem, start, end, TokenKind.Identifier, give children);
-    }
-
-    proc name(&self, what: text) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.Identifier {
-            throw Diagnostic("expected " + what, token.start, token.end);
-        }
-        self.advance();
-        return Node(NodeKind.Name, token.start, token.end, token.kind, List<Node>());
-    }
-
-    proc step(&self) -> Node throws Diagnostic {
-        target: Node = self.binary(0);
-        token: Token = self.current();
-        kind: TokenKind = token.kind;
-        if self.isAssignment(kind) || kind == TokenKind.PlusPlus || kind == TokenKind.MinusMinus {
-            if target.kind != NodeKind.Name && target.kind != NodeKind.Field && target.kind != NodeKind.Index {
-                throw Diagnostic("cannot assign to this expression", target.start, target.end);
-            }
-            self.advance();
-            start: int = target.start;
-            end: int = token.end;
-            children: List<Node> = List<Node>();
-            children.add(give target);
-            if kind != TokenKind.PlusPlus && kind != TokenKind.MinusMinus {
-                value: Node = self.binary(0);
-                end = value.end;
-                children.add(give value);
-            }
-            return Node(NodeKind.Assignment, start, end, kind, give children);
-        }
-        return target;
-    }
-
+    /* `target[index]`. */
     proc index(&self, target: Node) -> Node throws Diagnostic {
         token: Token = self.current();
         start: int = target.start;
@@ -741,6 +826,62 @@ public class Parser {
         return Node(NodeKind.Index, start, end, token.kind, give children);
     }
 
+    /* The smallest expression: a literal, a name, a generic type or `(expression)`. */
+    proc primary(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        match token.kind {
+            TokenKind.Number | TokenKind.RealNumber | TokenKind.String | TokenKind.Character | TokenKind.True | TokenKind.False | TokenKind.Null | TokenKind.Poison => {
+                self.advance();
+                return Node(NodeKind.Literal, token.start, token.end, token.kind, List<Node>());
+            }
+            TokenKind.Identifier => {
+                if self.looksGeneric() {
+                    return self.typeName();
+                }
+                self.advance();
+                return Node(NodeKind.Name, token.start, token.end, TokenKind.EndOfFile, List<Node>());
+            }
+            TokenKind.LeftParen => {
+                self.advance();
+                expression: Node = self.binary(0);
+                self.expect(TokenKind.RightParen, "`)`");
+                return expression;
+            }
+            else => {
+                throw Diagnostic("expected an expression", token.start, token.end);
+            }
+        }
+    }
+
+    // ---------- Names and types ----------
+
+    /* A name; `what` describes it in the error: "expected class name". */
+    proc name(&self, what: text) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Identifier {
+            throw Diagnostic("expected " + what, token.start, token.end);
+        }
+        self.advance();
+        return Node(NodeKind.Name, token.start, token.end, token.kind, List<Node>());
+    }
+
+    /* A name that may be followed by `[]`; then its operator is `LeftBracket`. */
+    proc arrayName(&self, what: text) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Identifier {
+            throw Diagnostic("expected " + what, token.start, token.end);
+        }
+        self.advance();
+        operator: TokenKind = TokenKind.EndOfFile;
+        if self.current().kind == TokenKind.LeftBracket {
+            self.advance();
+            self.expect(TokenKind.RightBracket, "`]`");
+            operator = TokenKind.LeftBracket;
+        }
+        return Node(NodeKind.Name, token.start, token.end, operator, List<Node>());
+    }
+
+    /* A type: `int`, `Node` or a generic like `List<Node>`. */
     proc typeName(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         kind: TokenKind = token.kind;
@@ -763,25 +904,14 @@ public class Parser {
         return Node(NodeKind.Type, token.start, end, kind, give children);
     }
 
+    /* Whether `kind` can start a type. */
     proc isTypeName(&self, kind: TokenKind) -> bool {
         return kind == TokenKind.Int || kind == TokenKind.Real || kind == TokenKind.Text ||
             kind == TokenKind.Bool || kind == TokenKind.Trit || kind == TokenKind.Tryte ||
             kind == TokenKind.Identifier;
     }
 
-    proc classField(&self) -> Node throws Diagnostic {
-        name: Node = self.arrayName("class field name");
-        self.expect(TokenKind.Colon, "`:`");
-        typeNode: Node = self.typeName();
-        end: int = self.current().end;
-        self.expect(TokenKind.Semicolon, "`;`");
-        start: int = name.start;
-        children: List<Node> = List<Node>();
-        children.add(give name);
-        children.add(give typeNode);
-        return Node(NodeKind.ClassField, start, end, TokenKind.EndOfFile, give children);
-    }
-
+    /* Whether a name followed by `<` is a generic (`List<Node>()`) and not a comparison (`a < b`); it looks ahead without moving. */
     proc looksGeneric(&self) -> bool {
         if self.peek(1).kind != TokenKind.Less {
             return false;
@@ -818,81 +948,5 @@ public class Parser {
             offset++;
         }
         return false;
-    }
-
-    proc throwsClause(&self) -> Node throws Diagnostic {
-        if self.current().kind == TokenKind.Throws {
-            start: int = self.current().start;
-            self.advance();
-            errors: List<Node> = List<Node>();
-            error: Node = self.name("error name");
-            end: int = error.end;
-            errors.add(give error);
-            while self.current().kind == TokenKind.Comma {
-                self.advance();
-                nextError: Node = self.name("error name");
-                end = nextError.end;
-                errors.add(give nextError);
-            }
-            return Node(NodeKind.Throws, start, end, TokenKind.Throws, give errors);
-        }
-        throw Diagnostic("expected throws clause", self.current().start, self.current().end);
-    }
-
-    proc catchClause(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.Catch {
-            throw Diagnostic("expected 'catch'", token.start, token.end);
-        }
-        self.advance();
-        children: List<Node> = List<Node>();
-        children.add(self.name("error name"));
-        self.expect(TokenKind.Colon, "`:`");
-        children.add(self.typeName());
-        body: Node = self.block();
-        end: int = body.end;
-        children.add(give body);
-        return Node(NodeKind.Catch, token.start, end, token.kind, give children);
-    }
-
-    proc matchArm(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind == TokenKind.Else {
-            self.advance();
-            self.expect(TokenKind.FatArrow, "`=>`");
-            body: Node = self.statement();
-            end: int = body.end;
-            children: List<Node> = List<Node>();
-            children.add(give body);
-            return Node(NodeKind.Else, token.start, end, token.kind, give children);
-        }
-        pattern: Node = self.binary(0);
-        children: List<Node> = List<Node>();
-        children.add(give pattern);
-        while self.current().kind == TokenKind.Pipe {
-            self.advance();
-            nextPattern: Node = self.binary(0);
-            children.add(give nextPattern);
-        }
-        self.expect(TokenKind.FatArrow, "`=>`");
-        body: Node = self.statement();
-        end: int = body.end;
-        children.add(give body);
-        return Node(NodeKind.Arm, token.start, end, token.kind, give children);
-    }
-
-    proc arrayName(&self, what: text) -> Node throws Diagnostic {
-        token: Token = self.current();
-        if token.kind != TokenKind.Identifier {
-            throw Diagnostic("expected " + what, token.start, token.end);
-        }
-        self.advance();
-        operator: TokenKind = TokenKind.EndOfFile;
-        if self.current().kind == TokenKind.LeftBracket {
-            self.advance();
-            self.expect(TokenKind.RightBracket, "`]`");
-            operator = TokenKind.LeftBracket;
-        }
-        return Node(NodeKind.Name, token.start, token.end, operator, List<Node>());
     }
 }

@@ -64,5 +64,8 @@ public enum NodeKind {
     Annotation,
     Annotated,
     Object,
-    FieldValue
+    FieldValue,
+    Walk,
+    Range,
+    Span
 }

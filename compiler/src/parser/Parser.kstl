@@ -502,6 +502,7 @@ public class Parser {
             TokenKind.Try => return self.tryStatement();
             TokenKind.Throw => return self.throwStatement();
             TokenKind.Match => return self.matchStatement();
+            TokenKind.Walk => return self.walkStatement();
             else => return self.expressionStatement();
         }
     }
@@ -666,6 +667,25 @@ public class Parser {
         children.add(give increment);
         children.add(give body);
         return Node(NodeKind.For, token.start, end, TokenKind.For, give children);
+    }
+
+    /* `walk name in range { }`. */
+    proc walkStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        start: int = token.start;
+        self.advance();
+        name: Node = self.name("walk target");
+        self.expect(TokenKind.In, "`in`");
+        self.inHead = true;
+        range: Node = self.range();
+        self.inHead = false;
+        body: Node = self.block();
+        end: int = body.end;
+        children: List<Node> = List<Node>();
+        children.add(give name);
+        children.add(give range);
+        children.add(give body);
+        return Node(NodeKind.Walk, start, end, TokenKind.Walk, give children);
     }
 
     /* `break;` or `continue;`. */
@@ -1023,6 +1043,29 @@ public class Parser {
             else => {
                 throw Diagnostic("expected an expression", token.start, token.end);
             }
+        }
+    }
+
+    /* `from..to`, or `span k` for `-k..k`. */
+    proc range(&self) -> Node throws Diagnostic {
+        if self.current().kind == TokenKind.Span {
+            token: Token = self.current();
+            self.advance();
+            target: Node = self.binary(0);
+            end: int = target.end;
+            children: List<Node> = List<Node>();
+            children.add(give target);
+            return Node(NodeKind.Span, token.start, end, TokenKind.Span, give children);
+        } else {
+            from: Node = self.binary(0);
+            self.expect(TokenKind.DotDot, "`..`");
+            to: Node = self.binary(0);
+            start: int = from.start;
+            end: int = to.end;
+            children: List<Node> = List<Node>();
+            children.add(give from);
+            children.add(give to);
+            return Node(NodeKind.Range, start, end, TokenKind.DotDot, give children);
         }
     }
 

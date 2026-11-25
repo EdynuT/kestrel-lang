@@ -282,6 +282,15 @@ proc show(node: &Node, source: text) -> text {
     if node.kind == NodeKind.For {
         return "(for " + show(node.children.get(0), source) + " " + show(node.children.get(1), source) + " " + show(node.children.get(2), source) + " " + show(node.children.get(3), source) + ")";
     }
+    if node.kind == NodeKind.Walk {
+        return showList("walk", &node, source);
+    }
+    if node.kind == NodeKind.Range {
+        return showList("range", &node, source);
+    }
+    if node.kind == NodeKind.Span {
+        return showList("span", &node, source);
+    }
     if node.kind == NodeKind.Continue {
         return "(continue)";
     }

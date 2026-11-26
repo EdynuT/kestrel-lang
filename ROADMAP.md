@@ -135,6 +135,8 @@ Como a partir da 1.0 nada pode ser removido nem mudar de sentido (veja "Versiona
 - **Valor padrão em parâmetros** (2026-11-23): `proc padLeft(value: text, width: int, padding: text = " ")` dá erro. Decidir se entra (e como convive com a sobrecarga) ou se fica de fora para sempre.
 - **Arquivos com `\r\n`** (2026-11-23): o `\r` não está na tabela de trytes (SPEC §4), então um programa em Kestrel não consegue ler um arquivo salvo no Windows; o `ksc` em Rust aceita. Afeta qualquer programa que leia texto.
 - **Enum como texto** (2026-11-23): `"kind: " + kind` não funciona com um enum; o compilador em Kestrel precisou de um `symbol()` escrito à mão. Um `toString` automático para enums seria uma adição, mas o formato do texto fica para sempre.
+- **Templates em qualquer texto** (2026-11-26): hoje `{x}` só é trocado pelo valor no `printf`; fora dele, `"{x}"` é o próprio texto. Interpolar em todo texto (`"Olá, {nome}"`) mudaria o sentido de código que já funciona, então a escolha é antes da 1.0: ou todo texto interpola (e `{` passa a ser escrito `\{`), ou fica reservado um prefixo (`$"Olá, {nome}"`, como o C#), que pode entrar depois sem quebrar nada.
+- **Palavras reservadas para o futuro** (2026-11-26): uma palavra que vira reservada depois da 1.0 quebra quem já a usou como nome. As que podem ser úteis um dia ficam reservadas antes, como o Java fez com `const` e `goto` (a lista fica na SPEC, §11).
 - **Nomes definitivos** (2026-11-23): confirmar os nomes que viram permanentes, como `throws`, `Trap`, `Error`, `claim`, `burn`, `give`, `walk`, `tri` e `sym`.
 
 ## Depois da 1.0
@@ -142,6 +144,14 @@ Como a partir da 1.0 nada pode ser removido nem mudar de sentido (veja "Versiona
 - Biblioteca padrão completa: math, logging, data e hora, números aleatórios.
 - Bloco `asm { }` para acesso direto às instruções da ksvm.
 - Descompilador completo: reconstruir `if`/`while`/`tri` a partir dos saltos do bytecode, como o FernFlower.
+- Recursos vindos do Kotlin, todos hoje erros de compilação (por isso entram sem quebrar nada):
+  - **`match` como expressão:** `label: text = match kind { TokenKind.Plus => "+", else => "?" };`.
+  - **`match` sem assunto:** `match { x < 0 => ..., x == 0 => ..., else => ... }`, no lugar de uma cadeia de `if`/`else if`.
+- **Operador ternário do Java** (escolhido no lugar do `if` como expressão do Kotlin): `condição ? seSim : seNão`, como em `Texts.toText(count) + (count == 1 ? " error" : " errors")`. Hoje é erro de compilação, então entra sem quebrar nada. Pontos a decidir quando entrar: dentro das chaves do `printf` o `:` já começa o formato (`{x:t}`), então lá o ternário vai entre parênteses (`{(x > 0 ? x : 0)}`); a precedência é a mais baixa de todas, como no Java (`a || b ? c : d` é `(a || b) ? c : d`), e ele agrupa pela direita (`a ? b : c ? d : e` é `a ? b : (c ? d : e)`); e um `+` ou `-` sozinho antes do `:` é o trit (`ok ? + : -`), o que põe o `:` na lista de delimitadores do trit.
+  - **Argumentos com nome:** `Diagnostic(description: "...", start: a, end: b)`. Cuidado: quando entrar, o nome de cada parâmetro da biblioteca padrão vira parte da promessa de compatibilidade (renomear quebra quem chama). Combina com o valor padrão em parâmetros (veja "Revisão antes da 1.0").
+  - **Funções de extensão:** `proc text.repeat(&self, count: int) -> text`, chamada como `" ".repeat(3)`. Cuidado: decidir o que acontece quando a biblioteca padrão ganha um método com o mesmo nome de uma extensão (no Kotlin o método da classe vence sem aviso, e o comportamento muda em silêncio).
+  - **`sealed interface`:** as classes que cumprem a interface são só as do mesmo arquivo, e um `match` com `is` sobre ela precisa cobrir todas, como o `match` de enum. Um nó da árvore de sintaxe viraria uma classe por tipo, com campos com nome, em vez de `kind` e uma lista de filhos. A palavra `sealed` já fica reservada.
+- Bibliotecas separadas do programa, no caminho do Java (`.jar`): o `ksvm` carrega vários `.kstb` quando o programa roda, em vez de tudo ir para um executável só. O caminho de `.so`/DLL nativo fica de fora: os genéricos geram uma cópia por tipo usado, que uma biblioteca já compilada não tem como trazer, e o executável nativo precisaria da ligação dinâmica do Linux (PLT/GOT). A forma dos objetos e das chamadas dentro de um `.kstb` passaria a ser uma promessa (ABI) entre versões.
 
 ## Versões e tags
 

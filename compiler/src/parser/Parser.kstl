@@ -64,9 +64,16 @@ public class Parser {
         }
     }
 
-    /* Reads the current token if it is `kind`; `what` names it in the error: "`)`". */
+    /*
+     * Reads the current token if it is `kind`; `what` names it in the error: "`)`".
+     * A missing `;` is shown right after the token before it, where it belongs.
+     */
     proc expect(&self, kind: TokenKind, what: text) throws Diagnostic {
         if self.current().kind != kind {
+            if kind == TokenKind.Semicolon && self.position > 0 {
+                previous: Token = self.peek(-1);
+                throw Diagnostic("expected " + what, previous.end, previous.end);
+            }
             throw Diagnostic("expected " + what, self.current().start, self.current().end);
         }
         self.advance();
@@ -212,6 +219,9 @@ public class Parser {
             return self.interfaceDeclaration();
         } else if self.current().kind == TokenKind.Const {
             return self.constDeclaration();
+        } else if self.current().kind != TokenKind.Proc {
+            token: Token = self.current();
+            throw Diagnostic("expected a declaration (`proc`, `class`, `struct`, `interface`, `enum` or `const`)", token.start, token.end);
         }
         return self.procedure(true);
     }

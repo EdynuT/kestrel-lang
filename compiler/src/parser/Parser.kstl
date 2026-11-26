@@ -510,7 +510,7 @@ public class Parser {
         }
     }
 
-    /* A variable: `x: int = 1;`, `[sym] v[]: int = other();`, or `empty: int?;`. */
+    /* A variable: `x: int = 1;`, `[sym] v[]: int = other();`, `q: int = a / b on NaT { return; };`, or `empty: int?;`. */
     proc declaration(&self) -> Node throws Diagnostic {
         start: int = self.current().start;
         name: Node = self.arrayName("variable name", false);
@@ -526,12 +526,18 @@ public class Parser {
         }
         self.expect(TokenKind.Equal, "`=`");
         value: Node = self.binary(0);
-        end: int = self.current().end;
-        self.expect(TokenKind.Semicolon, "`;`");
         children: List<Node> = List<Node>();
         children.add(give name);
         children.add(give typeNode);
         children.add(give value);
+        if self.current().kind == TokenKind.On {
+            self.advance();
+            self.expect(TokenKind.Poison, "`NaT`");
+            block: Node = self.block();
+            children.add(give block);
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
         return Node(NodeKind.Declaration, start, end, TokenKind.EndOfFile, give children);
     }
 

@@ -349,5 +349,8 @@ proc show(node: &Node, source: text) -> text {
     if node.kind == NodeKind.ArrayType {
         return showList("array-type", &node, source);
     }
+    if node.kind == NodeKind.Cast {
+        return showList("cast", &node, source);
+    }
     return Texts.sub(source, node.start, node.end);
 }

@@ -916,7 +916,7 @@ public class Parser {
         }
     }
 
-    /* A prefix before an operand: `-x`, `!x`, `&x`, `give x`, `+x`. */
+    /* Parses a unary expression, which can be a prefix before an operand: `-x`, `!x`, `&x`, `give x`, `+x`, or a cast `(Type) x`. */
     proc unary(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         match token.kind {
@@ -943,6 +943,22 @@ public class Parser {
                 children: List<Node> = List<Node>();
                 children.add(give operand);
                 return Node(NodeKind.Claim, token.start, end, token.kind, give children);
+            }
+            TokenKind.LeftParen => {
+                if !self.isCastType(self.peek(1).kind) {
+                    return self.power();
+                }
+                self.advance();
+                typeToken: Token = self.current();
+                self.advance();
+                self.expect(TokenKind.RightParen, "`)`");
+                typeNode: Node = Node(NodeKind.Type, typeToken.start, typeToken.end, typeToken.kind, List<Node>());
+                operand: Node = self.unary();
+                end: int = operand.end;
+                children: List<Node> = List<Node>();
+                children.add(give typeNode);
+                children.add(give operand);
+                return Node(NodeKind.Cast, token.start, end, TokenKind.LeftParen, give children);
             }
             TokenKind.Minus => {
                 self.advance();
@@ -1289,5 +1305,11 @@ public class Parser {
             offset++;
         }
         return false;
+    }
+
+    /* Whether a token kind represents a cast type. */
+    proc isCastType(&self, kind: TokenKind) -> bool {
+        return kind == TokenKind.Trit || kind == TokenKind.Tryte || kind == TokenKind.Int ||
+            kind == TokenKind.Real || kind == TokenKind.Bool;
     }
 }

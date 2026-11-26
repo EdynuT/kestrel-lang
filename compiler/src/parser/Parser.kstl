@@ -439,15 +439,33 @@ public class Parser {
         return Node(NodeKind.Const, start, end, TokenKind.Const, give children);
     }
 
+    /* `<T, U>`: one Name child per type parameter. */
+    proc typeParameters(&self) -> Node throws Diagnostic {
+        start: int = self.current().start;
+        self.expect(TokenKind.Less, "`<`");
+        children: List<Node> = List<Node>();
+        children.add(self.name("type parameter name"));
+        while self.current().kind == TokenKind.Comma {
+            self.advance();
+            children.add(self.name("type parameter name"));
+        }
+        end: int = self.current().end;
+        self.expect(TokenKind.Greater, "`>`");
+        return Node(NodeKind.Generics, start, end, TokenKind.Less, give children);
+    }
+
     /* `class Name { members }`. */
     proc classDeclaration(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         start: int = token.start;
         self.expect(TokenKind.Class, "`class`");
         name: Node = self.name("class name");
-        self.expect(TokenKind.LeftBrace, "`{`");
         children: List<Node> = List<Node>();
         children.add(give name);
+        if self.current().kind == TokenKind.Less {
+            children.add(self.typeParameters());
+        }
+        self.expect(TokenKind.LeftBrace, "`{`");
         while self.current().kind != TokenKind.RightBrace {
             children.add(self.member());
         }
@@ -462,9 +480,12 @@ public class Parser {
         start: int = token.start;
         self.expect(TokenKind.Struct, "`struct`");
         name: Node = self.name("struct name");
-        self.expect(TokenKind.LeftBrace, "`{`");
         children: List<Node> = List<Node>();
         children.add(give name);
+        if self.current().kind == TokenKind.Less {
+            children.add(self.typeParameters());
+        }
+        self.expect(TokenKind.LeftBrace, "`{`");
         while self.current().kind != TokenKind.RightBrace {
             field: Node = self.classField("struct field name");
             if field.children.get(0).operator == TokenKind.LeftBracket {
@@ -483,9 +504,12 @@ public class Parser {
         start: int = token.start;
         self.expect(TokenKind.Interface, "`interface`");
         name: Node = self.name("interface name");
-        self.expect(TokenKind.LeftBrace, "`{`");
         children: List<Node> = List<Node>();
         children.add(give name);
+        if self.current().kind == TokenKind.Less {
+            children.add(self.typeParameters());
+        }
+        self.expect(TokenKind.LeftBrace, "`{`");
         while self.current().kind != TokenKind.RightBrace {
             children.add(self.procedure(false));
         }
@@ -1215,13 +1239,18 @@ public class Parser {
             }
             TokenKind.Identifier => {
                 if self.looksGeneric() {
-                    return self.typeName();
-                }
-                if !self.inHead && self.peek(1).kind == TokenKind.LeftBrace {
-                    return self.objectLiteral();
+                    typeNode: Node = self.typeName();
+                    if !self.inHead && self.current().kind == TokenKind.LeftBrace {
+                        return self.objectLiteral(give typeNode);
+                    }
+                    return typeNode;
                 }
                 self.advance();
-                return Node(NodeKind.Name, token.start, token.end, TokenKind.EndOfFile, List<Node>());
+                name: Node = Node(NodeKind.Name, token.start, token.end, TokenKind.EndOfFile, List<Node>());
+                if !self.inHead && self.current().kind == TokenKind.LeftBrace {
+                    return self.objectLiteral(give name);
+                }
+                return name;
             }
             TokenKind.LeftParen => {
                 self.advance();
@@ -1376,13 +1405,12 @@ public class Parser {
         return typeNode;
     }
 
-    /* An object literal: `Name { field: value, ... }`. */
-    proc objectLiteral(&self) -> Node throws Diagnostic {
-        token: Token = self.current();
-        name: Node = self.name("object name");
+    /* An object literal: `Name { field: value, ... }` or `Name<T> { ... }`. */
+    proc objectLiteral(&self, target: Node) -> Node throws Diagnostic {
+        start: int = target.start;
         self.expect(TokenKind.LeftBrace, "`{`");
         children: List<Node> = List<Node>();
-        children.add(give name);
+        children.add(give target);
         while self.current().kind != TokenKind.RightBrace {
             field: Node = self.fieldValue();
             children.add(give field);
@@ -1394,7 +1422,7 @@ public class Parser {
         }
         end: int = self.current().end;
         self.expect(TokenKind.RightBrace, "`}`");
-        return Node(NodeKind.Object, token.start, end, TokenKind.LeftBrace, give children);
+        return Node(NodeKind.Object, start, end, TokenKind.LeftBrace, give children);
     }
 
     /* A field-value pair: `name: value`. */
@@ -1410,7 +1438,7 @@ public class Parser {
         return Node(NodeKind.FieldValue, token.start, end, TokenKind.Colon, give children);
     }
 
-    /* Whether a name followed by `<` is a generic (`List<Node>()`) and not a comparison (`a < b`); it looks ahead without moving. */
+    /* Look ahead for a generic call, field or object literal without confusing it with a comparison. */
     proc looksGeneric(&self) -> bool {
         if self.peek(1).kind != TokenKind.Less {
             return false;
@@ -1439,7 +1467,8 @@ public class Parser {
                 canOpen = false;
                 if depth == 0 {
                     next: TokenKind = self.peek(offset + 1).kind;
-                    return next == TokenKind.LeftParen || next == TokenKind.Dot;
+                    return next == TokenKind.LeftParen || next == TokenKind.Dot ||
+                        (next == TokenKind.LeftBrace && !self.inHead);
                 }
             } else {
                 return false;

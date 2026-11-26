@@ -73,5 +73,6 @@ public enum NodeKind {
     Cast,
     Final,
     Native,
-    Variadic
+    Variadic,
+    Generics
 }

@@ -328,7 +328,7 @@ public class Parser {
             return name;
         }
         self.advance();
-        typeNode: Node = self.parameterType();
+        typeNode: Node = self.borrowableType();
         end: int = typeNode.end;
         children: List<Node> = List<Node>();
         children.add(give name);
@@ -336,8 +336,8 @@ public class Parser {
         return Node(NodeKind.Parameter, start, end, TokenKind.Identifier, give children);
     }
 
-    /* The type of a parameter, which may be borrowed: `&Node`. */
-    proc parameterType(&self) -> Node throws Diagnostic {
+    /* A type that may be borrowed: `int`, `&Node`, `&List<T>?`. */
+    proc borrowableType(&self) -> Node throws Diagnostic {
         if self.current().kind == TokenKind.Ampersand {
             token: Token = self.current();
             self.advance();
@@ -636,7 +636,7 @@ public class Parser {
         start: int = self.current().start;
         name: Node = self.arrayName("variable name", false);
         self.expect(TokenKind.Colon, "`:`");
-        typeNode: Node = self.typeName();
+        typeNode: Node = self.borrowableType();
         if self.current().kind == TokenKind.Semicolon {
             end: int = self.current().end;
             self.advance();
@@ -1393,7 +1393,7 @@ public class Parser {
     /* A return type: a type (`-> int`, `-> Node?`) or an array (`-> int[]`). */
     proc returnType(&self) -> Node throws Diagnostic {
         token: Token = self.current();
-        typeNode: Node = self.typeName();
+        typeNode: Node = self.borrowableType();
         if self.current().kind == TokenKind.LeftBracket {
             self.advance();
             end: int = self.current().end;

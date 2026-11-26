@@ -87,7 +87,7 @@ public class Reporter {
             width = 1;
         }
 
-        Console.printl("error: " + error.message());
+        Console.printl("\e[31merror\e[0m: " + error.message());
         Console.printl(margin + "--> " + self.path + ":" + lineNumber + ":" + Texts.toText(column));
         Console.printl(margin + " |");
         Console.printl(lineNumber + " | " + lineText);

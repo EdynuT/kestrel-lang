@@ -94,7 +94,7 @@ public class Lexer {
 
     /*
      * Reads one character of a text or character literal, with its escape
-     * (`\n`, `\t`, `\"`, `\'`, `\\`). Returns false when it reads the
+     * (`\n`, `\t`, `\e`, `\"`, `\'`, `\\`). Returns false when it reads the
      * closing `quote`. A literal cannot cross a line break.
      */
     proc literalCharacter(&self, quote: tryte, start: int) -> bool throws Diagnostic {
@@ -111,7 +111,7 @@ public class Lexer {
         }
         if character == '\\' {
             escape: tryte = self.current();
-            if self.atEnd() || (escape != 'n' && escape != 't' && escape != '"' && escape != '\'' && escape != '\\') {
+            if self.atEnd() || (escape != 'n' && escape != 't' && escape != 'e' && escape != '"' && escape != '\'' && escape != '\\') {
                 throw Diagnostic("unknown escape", self.position - 1, self.position);
             }
             self.position++;

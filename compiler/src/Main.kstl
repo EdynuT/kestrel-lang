@@ -242,7 +242,7 @@ proc show(node: &Node, source: text) -> text {
         return result + ")";
     }
     if node.kind == NodeKind.Return{
-        return "(return " + show(node.children.get(0), source) + ")";
+        return showList("return", &node, source);
     }
     if node.kind == NodeKind.Object {
         return showList("object", &node, source);

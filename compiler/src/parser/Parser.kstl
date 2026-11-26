@@ -166,7 +166,7 @@ public class Parser {
     proc procedure(&self, hasBody: bool) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.Proc {
-            throw Diagnostic("expected 'proc'", token.start, token.end);
+            throw Diagnostic("expected `proc`", token.start, token.end);
         }
         self.advance();
         nameToken: Token = self.current();
@@ -470,7 +470,7 @@ public class Parser {
     proc block(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.LeftBrace {
-            throw Diagnostic("expected '{'", token.start, token.end);
+            throw Diagnostic("expected `{`", token.start, token.end);
         }
         self.advance();
         children: List<Node> = List<Node>();
@@ -605,22 +605,26 @@ public class Parser {
         }
     }
 
-    /* `return value;`. */
+    /* `return;` or `return value;`. */
     proc returnStatement(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.Return {
-            throw Diagnostic("expected 'return'", token.start, token.end);
+            throw Diagnostic("expected `return`", token.start, token.end);
         }
         self.advance();
-        expression: Node = self.binary(0);
         semicolon: Token = self.current();
-        if semicolon.kind != TokenKind.Semicolon {
-            throw Diagnostic("expected ';'", semicolon.start, semicolon.end);
+        if semicolon.kind == TokenKind.Semicolon {
+            end: int = semicolon.end;
+            self.advance();
+            children: List<Node> = List<Node>();
+            return Node(NodeKind.Return, token.start, end, TokenKind.Return, give children);
         }
-        self.advance();
+        expression: Node = self.binary(0);
+        end: int = self.current().end;
+        self.expect(TokenKind.Semicolon, "`;`");
         children: List<Node> = List<Node>();
         children.add(give expression);
-        return Node(NodeKind.Return, token.start, semicolon.end, TokenKind.Return, give children);
+        return Node(NodeKind.Return, token.start, end, TokenKind.Return, give children);
     }
 
     /* `if condition { } else { }`; an `else if` is an If node inside the else. */
@@ -628,7 +632,7 @@ public class Parser {
         self.inHead = true;
         token: Token = self.current();
         if token.kind != TokenKind.If {
-            throw Diagnostic("expected 'if'", token.start, token.end);
+            throw Diagnostic("expected `if`", token.start, token.end);
         }
         self.advance();
         condition: Node = self.binary(0);
@@ -657,7 +661,7 @@ public class Parser {
     proc whileStatement(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.While {
-            throw Diagnostic("expected 'while'", token.start, token.end);
+            throw Diagnostic("expected `while`", token.start, token.end);
         }
         self.advance();
         self.inHead = true;
@@ -675,7 +679,7 @@ public class Parser {
     proc forStatement(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.For {
-            throw Diagnostic("expected 'for'", token.start, token.end);
+            throw Diagnostic("expected `for`", token.start, token.end);
         }
         self.advance();
         initializer: Node = self.declaration();
@@ -717,12 +721,12 @@ public class Parser {
     proc jumpStatement(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.Continue && token.kind != TokenKind.Break {
-            throw Diagnostic("expected 'continue' or 'break'", token.start, token.end);
+            throw Diagnostic("expected `continue` or `break`", token.start, token.end);
         }
         self.advance();
         semicolon: Token = self.current();
         if semicolon.kind != TokenKind.Semicolon {
-            throw Diagnostic("expected ';'", semicolon.start, semicolon.end);
+            throw Diagnostic("expected `;`", semicolon.start, semicolon.end);
         }
         self.advance();
         end: int = semicolon.end;
@@ -737,7 +741,7 @@ public class Parser {
     proc burnStatement(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.Burn {
-            throw Diagnostic("expected 'burn'", token.start, token.end);
+            throw Diagnostic("expected `burn`", token.start, token.end);
         }
         self.advance();
         name: Node = self.name("burn target");
@@ -752,7 +756,7 @@ public class Parser {
     proc tryStatement(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.Try {
-            throw Diagnostic("expected 'try'", token.start, token.end);
+            throw Diagnostic("expected `try`", token.start, token.end);
         }
         self.advance();
         children: List<Node> = List<Node>();
@@ -773,7 +777,7 @@ public class Parser {
     proc catchClause(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.Catch {
-            throw Diagnostic("expected 'catch'", token.start, token.end);
+            throw Diagnostic("expected `catch`", token.start, token.end);
         }
         self.advance();
         children: List<Node> = List<Node>();
@@ -790,7 +794,7 @@ public class Parser {
     proc throwStatement(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.Throw {
-            throw Diagnostic("expected 'throw'", token.start, token.end);
+            throw Diagnostic("expected `throw`", token.start, token.end);
         }
         self.advance();
         children: List<Node> = List<Node>();
@@ -804,7 +808,7 @@ public class Parser {
     proc matchStatement(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         if token.kind != TokenKind.Match {
-            throw Diagnostic("expected 'match'", token.start, token.end);
+            throw Diagnostic("expected `match`", token.start, token.end);
         }
         self.advance();
         self.inHead = true;

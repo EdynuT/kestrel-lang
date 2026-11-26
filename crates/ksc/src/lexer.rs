@@ -437,12 +437,13 @@ impl Lexer<'_> {
             Some('\\') => match self.bump() {
                 Some('n') => '\n',
                 Some('t') => '\t',
+                Some('e') => '\x1b',
                 Some('"') => '"',
                 Some('\'') => '\'',
                 Some('\\') => '\\',
                 other => {
                     let shown = other.map_or(String::new(), |c| c.to_string());
-                    return Err(self.err(format!("unknown escape `\\{shown}`"), c_start).with_note("escapes are `\\n`, `\\t`, `\\\"`, `\\'` and `\\\\`"));
+                    return Err(self.err(format!("unknown escape `\\{shown}`"), c_start).with_note("escapes are `\\n`, `\\t`, `\\e`, `\\\"`, `\\'` and `\\\\`"));
                 }
             },
             Some(c) => c,
@@ -539,6 +540,8 @@ mod tests {
     fn text_and_chars() {
         assert_eq!(toks(r#"print("Hi\n");"#)[2], Tok::Str("Hi\n".into()));
         assert_eq!(toks("'A' 'a' ' ' '\\n'"), vec![Tok::Char(1), Tok::Char(-1), Tok::Char(0), Tok::Char(-27), Tok::Eof]);
+        assert_eq!(toks(r#""\e[31mred\e[0m""#)[0], Tok::Str("\x1b[31mred\x1b[0m".into()));
+        assert_eq!(toks("'\\e'"), vec![Tok::Char(-73), Tok::Eof]);
     }
 
     #[test]

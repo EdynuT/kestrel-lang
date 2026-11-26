@@ -8,8 +8,9 @@ const PUNCT: [char; 27] = [
     '*', '<', '>', '@', '#', '%', '{', '}', '"', '\'',
 ];
 
-/// More symbols, so source code of common languages can be read as text.
-const PUNCT2: [char; 7] = ['|', '&', '\\', '~', '^', '`', '$'];
+/// More symbols, so source code of common languages can be read as text,
+/// and ESC (`\e`), which starts the terminal's color sequences.
+const PUNCT2: [char; 8] = ['|', '&', '\\', '~', '^', '`', '$', '\x1b'];
 
 /// Accented letters: upper case at +54.., lower case at -54.., so negation
 /// still swaps the case.
@@ -26,7 +27,7 @@ pub fn tryte_to_char(v: i64) -> Option<char> {
         -53..=-27 => Some(PUNCT[(-v - 27) as usize]),
         54..=65 => Some(ACCENT_UPPER[(v - 54) as usize]),
         -65..=-54 => Some(ACCENT_LOWER[(-v - 54) as usize]),
-        -72..=-66 => Some(PUNCT2[(-v - 66) as usize]),
+        -73..=-66 => Some(PUNCT2[(-v - 66) as usize]),
         _ => None,
     }
 }
@@ -98,7 +99,8 @@ mod tests {
         assert_eq!(char_to_tryte('ñ'), None);
         assert_eq!(tryte_to_char(37), None);
         assert_eq!(tryte_to_char(-54), Some('á'));
-        assert_eq!(tryte_to_char(-73), None);
+        assert_eq!(char_to_tryte('\x1b'), Some(-73));
+        assert_eq!(tryte_to_char(-74), None);
     }
 
     #[test]
@@ -118,6 +120,6 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 1 + 26 + 26 + 10 + 27 + 12 + 12 + 7);
+        assert_eq!(count, 1 + 26 + 26 + 10 + 27 + 12 + 12 + 8);
     }
 }

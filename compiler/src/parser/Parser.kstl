@@ -27,6 +27,7 @@ use parser.Node;
 use parser.NodeKind;
 
 public class Parser {
+    public errors: List<Diagnostic>;
     source: text;
     lexer: Lexer;
     position: int;
@@ -38,7 +39,7 @@ public class Parser {
     public proc Parser(source: text) -> Parser throws Diagnostic {
         lexer: Lexer = Lexer(source);
         lexer.run();
-        return Parser { source: source, lexer: give lexer, position: 0, inHead: false};
+        return Parser { source: source, lexer: give lexer, position: 0, inHead: false, errors: List<Diagnostic>()};
     }
 
     /* The token the parser is looking at. */
@@ -71,6 +72,57 @@ public class Parser {
         self.advance();
     }
 
+    /* Skip invalid input, stopping at a boundary appropriate to the current scope. */
+    proc synchronize(&self, before: int, inBlock: bool) {
+        self.inHead = false;
+        if self.position == before {
+            self.advance();
+        }
+        while self.current().kind != TokenKind.EndOfFile {
+            // Newlines are between tokens, so check the source gap.
+            if self.position > 0 {
+                gap: int = self.lexer.tokens.get(self.position - 1).end;
+                while gap < self.current().start {
+                    if self.source[gap] == '\n' {
+                        return;
+                    }
+                    gap++;
+                }
+            }
+            if self.current().kind == TokenKind.Semicolon {
+                self.advance();
+                return;
+            }
+            if inBlock && (self.current().kind == TokenKind.RightBrace || self.startsStatement(self.current().kind)) {
+                return;
+            }
+            if !inBlock && self.startsTopLevel(self.current().kind) {
+                return;
+            }
+            self.advance();
+        }
+    }
+
+    /* Words that always start a new statement. */
+    proc startsStatement(&self, kind: TokenKind) -> bool {
+        match kind {
+            TokenKind.Sym | TokenKind.Return |
+            TokenKind.If | TokenKind.While | TokenKind.For | TokenKind.Continue | TokenKind.Break |
+            TokenKind.Burn | TokenKind.Try | TokenKind.Throw | TokenKind.Match | TokenKind.Walk |
+            TokenKind.Tri | TokenKind.Final => return true;
+            else => return false;
+        }
+    }
+
+    /* Tokens that can begin a file-level declaration. */
+    proc startsTopLevel(&self, kind: TokenKind) -> bool {
+        match kind {
+            TokenKind.Use | TokenKind.At | TokenKind.Public | TokenKind.Enum | TokenKind.Class |
+            TokenKind.Struct | TokenKind.Interface | TokenKind.Const | TokenKind.Proc => return true;
+            else => return false;
+        }
+    }
+
     // ---------- File: `use` lines and the declarations around them ----------
 
     /* Reads the whole file: `use` lines, then declarations, until the end. */
@@ -78,11 +130,17 @@ public class Parser {
         start: int = self.current().start;
         children: List<Node> = List<Node>();
         while self.current().kind != TokenKind.EndOfFile {
-            if self.current().kind == TokenKind.Use {
-                children.add(self.useDeclaration());
-                continue;
+            before: int = self.position;
+            try {
+                if self.current().kind == TokenKind.Use {
+                    children.add(self.useDeclaration());
+                    continue;
+                }
+                children.add(self.topLevel());
+            } catch error: Diagnostic {
+                self.errors.add(give error);
+                self.synchronize(before, false);
             }
-            children.add(self.topLevel());
         }
         end: int = self.current().end;
         return Node(NodeKind.Program, start, end, TokenKind.EndOfFile, give children);
@@ -474,11 +532,17 @@ public class Parser {
         }
         self.advance();
         children: List<Node> = List<Node>();
-        while self.current().kind != TokenKind.RightBrace {
-            children.add(self.statement());
+        while self.current().kind != TokenKind.RightBrace && self.current().kind != TokenKind.EndOfFile {
+            before: int = self.position;
+            try {
+                children.add(self.statement());
+            } catch error: Diagnostic {
+                self.errors.add(give error);
+                self.synchronize(before, true);
+            }
         }
         end: int = self.current().end;
-        self.advance();
+        self.expect(TokenKind.RightBrace, "`}`");
         return Node(NodeKind.Block, token.start, end, TokenKind.LeftBrace, give children);
     }
 

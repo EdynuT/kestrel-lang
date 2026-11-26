@@ -25,6 +25,7 @@ use lexer.Lexer;
 use diag.Diagnostic;
 use parser.Node;
 use parser.NodeKind;
+use parser.SyncScope;
 
 public class Parser {
     public errors: List<Diagnostic>;
@@ -80,12 +81,28 @@ public class Parser {
     }
 
     /* Skip invalid input, stopping at a boundary appropriate to the current scope. */
-    proc synchronize(&self, before: int, inBlock: bool) {
+    proc synchronize(&self, before: int, scope: SyncScope) {
         self.inHead = false;
-        if self.position == before {
+        if self.position == before && !(scope == SyncScope.Member && self.current().kind == TokenKind.LeftBrace) {
             self.advance();
         }
         while self.current().kind != TokenKind.EndOfFile {
+            if scope == SyncScope.Member && self.current().kind == TokenKind.LeftBrace {
+                depth: int = 0;
+                while self.current().kind != TokenKind.EndOfFile {
+                    if self.current().kind == TokenKind.LeftBrace {
+                        depth++;
+                    } else if self.current().kind == TokenKind.RightBrace {
+                        depth--;
+                        if depth == 0 {
+                            self.advance();
+                            return;
+                        }
+                    }
+                    self.advance();
+                }
+                return;
+            }
             // Newlines are between tokens, so check the source gap.
             if self.position > 0 {
                 gap: int = self.lexer.tokens.get(self.position - 1).end;
@@ -100,13 +117,32 @@ public class Parser {
                 self.advance();
                 return;
             }
-            if inBlock && (self.current().kind == TokenKind.RightBrace || self.startsStatement(self.current().kind)) {
-                return;
-            }
-            if !inBlock && self.startsTopLevel(self.current().kind) {
-                return;
+            match scope {
+                SyncScope.File => {
+                    if self.startsTopLevel(self.current().kind) {
+                        return;
+                    }
+                }
+                SyncScope.Member => {
+                    if self.current().kind == TokenKind.RightBrace || self.startsMember(self.current().kind) {
+                        return;
+                    }
+                }
+                SyncScope.Statement => {
+                    if self.current().kind == TokenKind.RightBrace || self.startsStatement(self.current().kind) {
+                        return;
+                    }
+                }
             }
             self.advance();
+        }
+    }
+
+    /* Words that can begin a class member. */
+    proc startsMember(&self, kind: TokenKind) -> bool {
+        match kind {
+            TokenKind.Public | TokenKind.Private | TokenKind.Proc | TokenKind.At | TokenKind.Sym => return true;
+            else => return false;
         }
     }
 
@@ -146,7 +182,7 @@ public class Parser {
                 children.add(self.topLevel());
             } catch error: Diagnostic {
                 self.errors.add(give error);
-                self.synchronize(before, false);
+                self.synchronize(before, SyncScope.File);
             }
         }
         end: int = self.current().end;
@@ -466,8 +502,14 @@ public class Parser {
             children.add(self.typeParameters());
         }
         self.expect(TokenKind.LeftBrace, "`{`");
-        while self.current().kind != TokenKind.RightBrace {
-            children.add(self.member());
+        while self.current().kind != TokenKind.RightBrace && self.current().kind != TokenKind.EndOfFile {
+            before: int = self.position;
+            try {
+                children.add(self.member());
+            } catch error: Diagnostic {
+                self.errors.add(give error);
+                self.synchronize(before, SyncScope.Member);
+            }
         }
         end: int = self.current().end;
         self.expect(TokenKind.RightBrace, "`}`");
@@ -486,12 +528,18 @@ public class Parser {
             children.add(self.typeParameters());
         }
         self.expect(TokenKind.LeftBrace, "`{`");
-        while self.current().kind != TokenKind.RightBrace {
-            field: Node = self.classField("struct field name");
-            if field.children.get(0).operator == TokenKind.LeftBracket {
-                throw Diagnostic("a struct cannot hold an array", field.start, field.end);
+        while self.current().kind != TokenKind.RightBrace && self.current().kind != TokenKind.EndOfFile {
+            before: int = self.position;
+            try {
+                field: Node = self.classField("struct field name");
+                if field.children.get(0).operator == TokenKind.LeftBracket {
+                    throw Diagnostic("a struct cannot hold an array", field.start, field.end);
+                }
+                children.add(give field);
+            } catch error: Diagnostic {
+                self.errors.add(give error);
+                self.synchronize(before, SyncScope.Member);
             }
-            children.add(give field);
         }
         end: int = self.current().end;
         self.expect(TokenKind.RightBrace, "`}`");
@@ -510,8 +558,14 @@ public class Parser {
             children.add(self.typeParameters());
         }
         self.expect(TokenKind.LeftBrace, "`{`");
-        while self.current().kind != TokenKind.RightBrace {
-            children.add(self.procedure(false));
+        while self.current().kind != TokenKind.RightBrace && self.current().kind != TokenKind.EndOfFile {
+            before: int = self.position;
+            try {
+                children.add(self.procedure(false));
+            } catch error: Diagnostic {
+                self.errors.add(give error);
+                self.synchronize(before, SyncScope.Member);
+            }
         }
         end: int = self.current().end;
         self.expect(TokenKind.RightBrace, "`}`");
@@ -594,7 +648,7 @@ public class Parser {
                 children.add(self.statement());
             } catch error: Diagnostic {
                 self.errors.add(give error);
-                self.synchronize(before, true);
+                self.synchronize(before, SyncScope.Statement);
             }
         }
         end: int = self.current().end;

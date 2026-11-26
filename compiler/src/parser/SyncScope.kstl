@@ -1,0 +1,26 @@
+// Copyright (c) 2026 Edynu
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+/*
+ * Where the parser was when it found an error, which tells
+ * `Parser.synchronize` where reading can safely start again:
+ *
+ * - `File`: between declarations of the file, so the next `proc`,
+ *   `class`, `use` or other declaration;
+ * - `Member`: inside a class, struct or interface, so the next
+ *   `public`, `proc`, `@` or the `}` that closes it;
+ * - `Statement`: inside a block, so the next statement or the `}`
+ *   that closes the block.
+ *
+ * In every scope a `;` or the start of a new line is also a safe place,
+ * except while skipping the body of a malformed member.
+ *
+ * @since 0.8
+ * @author Edynu
+ */
+
+public enum SyncScope {
+    File,
+    Member,
+    Statement
+}

@@ -505,6 +505,7 @@ public class Parser {
             TokenKind.Throw => return self.throwStatement();
             TokenKind.Match => return self.matchStatement();
             TokenKind.Walk => return self.walkStatement();
+            TokenKind.Tri => return self.triStatement();
             else => return self.expressionStatement();
         }
     }
@@ -823,6 +824,43 @@ public class Parser {
         end: int = body.end;
         children.add(give body);
         return Node(NodeKind.Arm, token.start, end, token.kind, give children);
+    }
+
+    /* `tri value { arms }`. */
+    proc triStatement(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        start: int = token.start;
+        self.advance();
+        self.inHead = true;
+        subject: Node = self.binary(0);
+        self.inHead = false;
+        self.expect(TokenKind.LeftBrace, "`{`");
+        children: List<Node> = List<Node>();
+        children.add(give subject);
+        children.add(self.triArm());
+        children.add(self.triArm());
+        children.add(self.triArm());
+        end: int = self.current().end;
+        self.expect(TokenKind.RightBrace, "`}`");
+        return Node(NodeKind.Tri, start, end, token.kind, give children);
+    }
+
+    /* One arm of a `tri`: `-`, `0` or `+`, then `=>` and a statement. */
+    proc triArm(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        if token.kind != TokenKind.Minus && token.kind != TokenKind.Plus {
+            isZero: bool = token.kind == TokenKind.Number && Texts.sub(self.source, token.start, token.end) == "0";
+            if !isZero {
+                throw Diagnostic("expected `-`, `0`, or `+`", token.start, token.end);
+            }
+        }
+        self.advance();
+        self.expect(TokenKind.FatArrow, "`=>`");
+        body: Node = self.statement();
+        end: int = body.end;
+        children: List<Node> = List<Node>();
+        children.add(give body);
+        return Node(NodeKind.TriArm, token.start, end, token.kind, give children);
     }
 
     // ---------- Expressions: from the lowest precedence to the highest ----------

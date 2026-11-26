@@ -257,6 +257,12 @@ proc show(node: &Node, source: text) -> text {
         }
         return result + ")";
     }
+    if node.kind == NodeKind.Tri {
+        return showList("tri", &node, source);
+    }
+    if node.kind == NodeKind.TriArm {
+        return "(" + Texts.sub(source, node.start, node.start + 1) + " " + show(node.children.get(0), source) + ")";
+    }
     if node.kind == NodeKind.Else {
         return showList("else", &node, source);
     }

@@ -70,5 +70,6 @@ public enum NodeKind {
     Span,
     Tri,
     TriArm,
-    Cast
+    Cast,
+    Final
 }

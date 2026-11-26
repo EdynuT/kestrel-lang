@@ -506,6 +506,7 @@ public class Parser {
             TokenKind.Match => return self.matchStatement();
             TokenKind.Walk => return self.walkStatement();
             TokenKind.Tri => return self.triStatement();
+            TokenKind.Final => return self.finalDeclaration();
             else => return self.expressionStatement();
         }
     }
@@ -539,6 +540,21 @@ public class Parser {
         end: int = self.current().end;
         self.expect(TokenKind.Semicolon, "`;`");
         return Node(NodeKind.Declaration, start, end, TokenKind.EndOfFile, give children);
+    }
+
+    /* A final variable declaration: `final x: int = 1;`. */
+    proc finalDeclaration(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        start: int = token.start;
+        self.advance();
+        declaration: Node = self.declaration();
+        if declaration.children.len() < 3 {
+            throw Diagnostic("a `final` variable needs a value", declaration.start, declaration.end);
+        }
+        end: int = declaration.end;
+        children: List<Node> = List<Node>();
+        children.add(give declaration);
+        return Node(NodeKind.Final, start, end, TokenKind.EndOfFile, give children);
     }
 
     /* An expression or assignment followed by `;`: `x = 1;`, `print(x);`. */

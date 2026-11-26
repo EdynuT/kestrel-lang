@@ -164,6 +164,7 @@ proc symbol(kind: TokenKind) -> text {
         TokenKind.Elvis => return "?:";
         TokenKind.Bang => return "!";
         TokenKind.Dot => return ".";
+        TokenKind.QuestionDot => return "?.";
         TokenKind.Ampersand => return "&";
         TokenKind.ShiftLeft => return "<<";
         TokenKind.ShiftRight => return ">>";
@@ -352,13 +353,19 @@ proc show(node: &Node, source: text) -> text {
     }
     if node.kind == NodeKind.Type && node.children.len() > 0 {
         end: int = node.start;
-        while end < node.end && (Chars.isLetter(source[end]) || Chars.isDigit(source[end]) || source[end] == '_') {
+        while end < node.end && (Chars.isLetter(source[end]) || Chars.isDigit(source[end]) || source[end] == '_' || source[end] == '.') {
             end++;
         }
         return showList(Texts.sub(source, node.start, end), &node, source);
     }
     if node.kind == NodeKind.Index {
         return showList("index", &node, source);
+    }
+    if node.kind == NodeKind.Extends {
+        return showList("extends", &node, source);
+    }
+    if node.kind == NodeKind.Is {
+        return showList("is", &node, source);
     }
     if node.kind == NodeKind.Name && node.operator == TokenKind.LeftBracket {
         return Texts.sub(source, node.start, node.end) + "[]";

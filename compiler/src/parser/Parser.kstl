@@ -936,7 +936,13 @@ public class Parser {
         }
     }
 
-    /* Parses a unary expression, which can be a prefix before an operand: `-x`, `!x`, `&x`, `give x`, `+x`, or a cast `(Type) x`. */
+    /* Whether `kind` ends an operand: `;`, `,`, `)`, `]`, `}` or `{`. */
+    proc isDelimiter(&self, kind: TokenKind) -> bool {
+        return kind == TokenKind.Semicolon || kind == TokenKind.Comma || kind == TokenKind.RightParen || kind == TokenKind.LeftParen
+            || kind == TokenKind.RightBracket || kind == TokenKind.LeftBracket || kind == TokenKind.RightBrace || kind == TokenKind.LeftBrace;
+    }
+
+    /* A prefix before an operand: `-x`, `!x`, `&x`, `give x`, `+x` or a cast `(int) x`; `+` or `-` alone is a trit: `while + { }`. */
     proc unary(&self) -> Node throws Diagnostic {
         token: Token = self.current();
         match token.kind {
@@ -980,7 +986,15 @@ public class Parser {
                 children.add(give operand);
                 return Node(NodeKind.Cast, token.start, end, TokenKind.LeftParen, give children);
             }
-            TokenKind.Minus => {
+            TokenKind.Minus | TokenKind.Plus => {
+                if self.isDelimiter(self.peek(1).kind) {
+                    self.advance();
+                    return Node(NodeKind.Literal, token.start, token.end, token.kind, List<Node>());
+                }
+                if token.kind == TokenKind.Plus {
+                    self.advance();
+                    return self.unary();
+                }
                 self.advance();
                 operand: Node = self.unary();
                 end: int = operand.end;
@@ -995,10 +1009,6 @@ public class Parser {
                 children: List<Node> = List<Node>();
                 children.add(give operand);
                 return Node(NodeKind.Unary, token.start, end, token.kind, give children);
-            }
-            TokenKind.Plus => {
-                self.advance();
-                return self.unary();
             }
             else => return self.power();
         }

@@ -42,7 +42,11 @@ public class Lexer {
                 while !self.atEnd() && self.isNamePart(self.current()) {
                     self.position++;
                 }
-                kind = self.keyword(Texts.sub(self.source, start, self.position));
+                word: text = Texts.sub(self.source, start, self.position);
+                if self.isReserved(word) {
+                    throw Diagnostic("`" + word + "` is reserved for future use", start, self.position);
+                }
+                kind = self.keyword(word);
             } else if Chars.isDigit(char) {
                 kind = self.number();
             } else if char == '"' {
@@ -244,6 +248,16 @@ public class Lexer {
             return self.source[self.position + 1];
         }
         return 0;
+    }
+
+    /*
+     * Whether `word` is kept for a feature that may come one day (see the SPEC grammar):
+     * it cannot be a name now, so adding the feature later breaks no program.
+     */
+    proc isReserved(&self, word: text) -> bool {
+        return word == "sealed" || word == "as" || word == "where" || word == "alias" ||
+            word == "defer" || word == "yield" || word == "async" || word == "await" ||
+            word == "spawn" || word == "asm" || word == "unsafe";
     }
 
     /* Returns the `TokenKind` corresponding to a keyword, or `Identifier` if it's not a keyword. */

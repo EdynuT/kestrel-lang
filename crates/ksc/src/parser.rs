@@ -1031,9 +1031,6 @@ impl Parser {
     /// Parses one statement, including its `;` when it needs one.
     fn stmt_kind(&mut self) -> PResult<StmtKind> {
         let end = |p: &mut Parser| p.expect(Tok::Semi).map(|_| ());
-        if self.peek() == &Tok::Ident("yield".into()) {
-            return Err(Diagnostic::new("`yield` is now `return`", self.span()).with_note("write `return x;`"));
-        }
         if self.peek() == &Tok::Ident("assert".into()) && self.peek_at(1) == &Tok::LParen {
             return self.assert_stmt();
         }

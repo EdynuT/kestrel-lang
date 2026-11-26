@@ -183,6 +183,10 @@ const KEYWORDS: &[(&str, Tok)] = &[
     ("text", Tok::Text),
 ];
 
+/// Words kept for features that may come one day (SPEC §11): they cannot
+/// be names now, so adding the feature later breaks no program.
+pub const RESERVED: &[&str] = &["sealed", "as", "where", "alias", "defer", "yield", "async", "await", "spawn", "asm", "unsafe"];
+
 /// Operators, longest first so that `<=>` wins over `<<`.
 const OPERATORS: &[(&str, Tok)] = &[
     ("<=>", Tok::Spaceship),
@@ -346,6 +350,10 @@ impl Lexer<'_> {
                 '0'..='9' => self.number()?,
                 'A'..='Z' | 'a'..='z' | '_' => {
                     let word = self.take_while(|c| c.is_ascii_alphanumeric() || c == '_');
+                    if RESERVED.contains(&word.as_str()) {
+                        let d = self.err(format!("`{word}` is reserved for future use"), start);
+                        return Err(if word == "yield" { d.with_note("to give back a value, write `return x;`") } else { d.with_note("choose another name") });
+                    }
                     let tok = KEYWORDS
                         .iter()
                         .find(|(k, _)| *k == word.as_str())
@@ -558,6 +566,8 @@ mod tests {
         assert!(err(r#""open"#).contains("unterminated string"));
         assert!(err("'ab'").contains("exactly one character"));
         assert!(err(r#""\q""#).contains("unknown escape"));
+        assert!(err("sealed: int = 1;").contains("`sealed` is reserved for future use"));
+        assert_eq!(toks(r#""as where""#)[0], Tok::Str("as where".into()));
         let d = lex("~x").unwrap_err();
         assert_eq!(d.message, "unexpected character `~`");
         assert!(d.note.unwrap().contains("`!x`"));

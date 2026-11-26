@@ -573,7 +573,8 @@ fn print_several_values() {
 fn yield_became_return() {
     assert_eq!(out("proc dobro(x: int) -> int { return x * 2; } proc main() { Console.print(dobro(21)); }"), "42");
     let e = compile("proc f() -> int { yield 1; } proc main() {}").unwrap_err();
-    assert!(e.message.contains("`yield` is now `return`"), "{}", e.message);
+    assert!(e.message.contains("`yield` is reserved for future use"), "{}", e.message);
+    assert!(e.note.as_deref().unwrap_or("").contains("return x;"));
 }
 
 #[test]

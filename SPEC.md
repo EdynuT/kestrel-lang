@@ -1181,6 +1181,8 @@ A gramática diz o que pode ser escrito. Algumas regras ficam no texto das seç�
 - **`&`, `give` e `claim`** são escritos como prefixos, mas só valem onde as regras de posse deixam (§6.2): `&` em argumentos e valores emprestados, `give` antes de uma variável.
 - **`...`** só aparece como o último parâmetro de um `native`.
 
+**Palavras reservadas para o futuro:** `sealed`, `as`, `where`, `alias`, `defer`, `yield`, `async`, `await`, `spawn`, `asm` e `unsafe`. Ainda não fazem nada, mas não podem ser usadas como nomes (`` `sealed` is reserved for future use ``), para que um recurso novo com uma delas entre sem quebrar nenhum programa. Dentro de textos e comentários, valem normalmente.
+
 ```ebnf
 program    = { use_decl } { item } ;
 use_decl   = "use" path_part { "." path_part } ";" ;

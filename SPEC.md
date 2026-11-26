@@ -1173,70 +1173,87 @@ Os saltos usam um **offset absoluto em bytes** (`u32`) dentro do código da pró
 Em caminhos de `use`, `KEYWORD` representa qualquer palavra-chave da linguagem
 (por exemplo, `text` em `std.text.Texts`).
 
+A gramática diz o que pode ser escrito. Algumas regras ficam no texto das seções, e não nela:
+
+- **O trit sozinho:** um `-` ou `+` em `literal` só vale antes de `;` `,` `)` `]` `}` ou `{` (`while + { }`, `x: trit = -;`). Em outro lugar, é o operador.
+- **`<` depois de um nome** é a lista de tipos de um genérico (`List<int>()`, `Box<T> { ... }`) só quando o que vem depois do `>` é `(`, `.` ou `{`. Senão, é uma comparação (`a < b`). Em `List<List<int>>`, o `>>` fecha as duas listas.
+- **`Nome {` na condição** de `if`, `while`, `for`, `match`, `tri` e `walk` é o começo do bloco, e não um literal de objeto. Para usar um ali, coloque entre parênteses.
+- **`&`, `give` e `claim`** são escritos como prefixos, mas só valem onde as regras de posse deixam (§6.2): `&` em argumentos e valores emprestados, `give` antes de uma variável.
+- **`...`** só aparece como o último parâmetro de um `native`.
+
 ```ebnf
-program    = { use_decl } { { annotation } [ "public" ] ( const_decl | proc_decl | enum_decl | struct_decl | class_decl | iface_decl ) } ;
+program    = { use_decl } { item } ;
 use_decl   = "use" path_part { "." path_part } ";" ;
 path_part  = IDENT | KEYWORD ;
-iface_decl = "interface" IDENT "{" { "proc" IDENT "(" [ "&" ] "self" { "," param } ")" [ "->" ret_type ] ";" } "}" ;
-class_decl = { annotation } "class" IDENT "{" { member } "}" ;
-member     = [ "public" | "private" ] ( field | proc_decl ) ;
+item       = { annotation } [ "public" ]
+             ( const_decl | proc_decl | native_decl | enum_decl | struct_decl | class_decl | iface_decl ) ;
+annotation = "@" IDENT [ "(" [ ann_arg { "," ann_arg } ] ")" ] ;
+ann_arg    = name | STRING ;
+name       = IDENT { "." IDENT } ;
+
+type_params = "<" type_param { "," type_param } ">" ;
+type_param = IDENT [ "extends" name ] ;
+type_args  = "<" type { "," type } ">" ;
+class_decl = "class" IDENT [ type_params ] "{" { member } "}" ;
+member     = { annotation } [ "public" | "private" ] ( field | proc_decl ) ;
 field      = [ "sym" ] IDENT [ "[" "]" ] ":" type ";" ;
-annotation = "@" IDENT [ "(" IDENT { "," IDENT } ")" ] ;
 struct_decl = "struct" IDENT "{" { IDENT ":" type ";" } "}" ;
+iface_decl = "interface" IDENT "{" { "proc" IDENT "(" [ "&" ] "self" { "," param } ")" [ "->" ret_type ] ";" } "}" ;
 enum_decl  = "enum" IDENT "{" [ IDENT [ "=" expr ] { "," IDENT [ "=" expr ] } ] "}" ;
 const_decl = "const" IDENT ":" scalar "=" expr ";" ;
-proc_decl  = "proc" IDENT "(" [ param { "," param } ] ")" [ "->" ret_type ] [ "throws" name { "," name } ] block ;
-name       = IDENT { "." IDENT } ;
-param      = IDENT ":" [ "&" ] type | [ "sym" ] [ "&" ] IDENT "[" "]" ":" elem | [ "&" ] "self" ;
-ret_type   = type | [ "sym" ] elem "[" "]" ;
-type       = scalar | "bool" | "text" | IDENT ;
+proc_decl  = "proc" IDENT [ type_params ] "(" [ param { "," param } ] ")" [ "->" ret_type ]
+             [ "throws" name { "," name } ] block ;
+native_decl = "native" "proc" IDENT "(" [ { param "," } ( param | IDENT ":" "..." ) ] ")" [ "->" ret_type ] ";" ;
+param      = IDENT ":" type | [ "sym" ] [ "&" ] IDENT "[" "]" ":" elem | [ "&" ] "self" ;
+ret_type   = type | [ "&" ] [ "sym" ] elem "[" "]" ;
+type       = [ "&" ] elem [ "?" ] ;
+elem       = scalar | "bool" | "text" | name [ type_args ] ;
 scalar     = "trit" | "tryte" | "int" | "real" ;
-elem       = "tryte" | "int" ;
 
 block      = "{" { stmt } "}" ;
 stmt       = [ "final" ] IDENT ":" type "=" expr [ on_nat ] ";"
            | [ "final" ] [ "sym" ] IDENT "[" "]" ":" elem "=" expr ";"
            | IDENT ":" type ";"
            | [ "sym" ] IDENT "[" "]" ":" elem ";"
-           | place ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr ";"
-           | place ( "++" | "--" ) ";"
+           | step ";"
            | "burn" IDENT ";"
            | "return" [ expr ] ";"
            | "throw" expr ";"
            | "try" block "catch" IDENT ":" name block { "catch" IDENT ":" name block }
+           | "assert" "(" expr [ "," STRING ] ")" ";"
            | "break" ";" | "continue" ";"
-           | "tri" tri_head "{" arm arm arm "}"
+           | "tri" expr "{" tri_arm tri_arm tri_arm "}"
            | "if" expr block [ "else" ( block | if_stmt ) ]
            | "walk" IDENT "in" range block
            | "while" expr block
-           | "for" IDENT ":" type "=" expr ";" expr ";" assign block
+           | "for" IDENT ":" type "=" expr ";" expr ";" step block
            | "match" expr "{" { match_arm } "}"
-           | io ";"
+           | block
            | expr ";" ;
+step       = place ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr | place ( "++" | "--" ) ;
+place      = IDENT { "[" expr "]" | "." IDENT } ;
 on_nat     = "on" "NaT" block ;
-place      = IDENT [ "[" expr "]" ] { "." IDENT } ;
-tri_head   = expr ;
-arm        = ( "-" | "0" | "+" ) "=>" ( block | stmt ) ;
+tri_arm    = ( "-" | "0" | "+" ) "=>" ( block | stmt ) ;
+match_arm  = ( expr { "|" expr } | "else" ) "=>" ( block | stmt ) ;
 range      = expr ".." expr | "span" expr ;
-io         = "print" "(" expr ")" | "printl" "(" [ expr ] ")" | "emit" "(" expr ")"
-           | "printf" "(" STRING { "," expr } ")" | "dump" "(" STRING ")" ;
 
 expr       = or_expr ;
 or_expr    = and_expr { "||" and_expr } ;
 and_expr   = cmp_expr { "&&" cmp_expr } ;
-cmp_expr   = add_expr [ ( "<=>" | "==" | "!=" | "<" | ">" | "<=" | ">=" ) add_expr ] ;
+cmp_expr   = elvis_expr [ ( "<=>" | "==" | "!=" | "<" | ">" | "<=" | ">=" ) elvis_expr | "is" name ] ;
+elvis_expr = add_expr [ "?:" elvis_expr ] ;
 add_expr   = mul_expr { ( "+" | "-" ) mul_expr } ;
 mul_expr   = sh_expr  { ( "*" | "/" | "%" ) sh_expr } ;
 sh_expr    = unary { ( "<<" | ">>" ) unary } ;
-unary      = ( "!" | "-" | "(" ( scalar | "bool" ) ")" ) unary | power ;
+unary      = ( "!" | "-" | "+" | "&" | "give" | "claim" | "(" ( scalar | "bool" ) ")" ) unary | power ;
 power      = postfix [ "**" unary ] ;
-postfix    = primary { "[" expr "]" | "." IDENT } ;
-match_arm  = ( expr { "|" expr } | "else" ) "=>" ( block | stmt ) ;
-primary    = literal | IDENT | IDENT "(" [ arg { "," arg } ] ")"
-           | "claim" expr | "{" [ expr { "," expr } [ "," ] ] "}"
-           | IDENT "{" IDENT ":" expr { "," IDENT ":" expr } [ "," ] "}"
-           | "input" "(" ")" | "len" "(" expr ")" | "(" expr ")" ;
-arg        = [ "give" | "&" ] expr ;
+postfix    = primary { "(" [ arg { "," arg } ] ")" | "[" expr "]" | ( "." | "?." ) IDENT [ type_args ] } ;
+arg        = expr [ ".." expr ] ;
+primary    = literal | IDENT [ type_args ]
+           | name [ type_args ] "{" [ IDENT ":" expr { "," IDENT ":" expr } [ "," ] ] "}"
+           | "{" [ expr { "," expr } [ "," ] ] "}"
+           | "(" expr ")" ;
+literal    = NUMBER | REAL | STRING | CHAR | "true" | "false" | "null" | "NaT" | "-" | "+" ;
 ```
 
 

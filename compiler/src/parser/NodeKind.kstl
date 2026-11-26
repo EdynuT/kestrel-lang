@@ -71,5 +71,7 @@ public enum NodeKind {
     Tri,
     TriArm,
     Cast,
-    Final
+    Final,
+    Native,
+    Variadic
 }

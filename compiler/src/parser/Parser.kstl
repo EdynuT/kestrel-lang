@@ -219,9 +219,11 @@ public class Parser {
             return self.interfaceDeclaration();
         } else if self.current().kind == TokenKind.Const {
             return self.constDeclaration();
+        } else if self.current().kind == TokenKind.Native {
+            return self.nativeDeclaration();
         } else if self.current().kind != TokenKind.Proc {
             token: Token = self.current();
-            throw Diagnostic("expected a declaration (`proc`, `class`, `struct`, `interface`, `enum` or `const`)", token.start, token.end);
+            throw Diagnostic("expected a declaration (`native`, `proc`, `class`, `struct`, `interface`, `enum` or `const`)", token.start, token.end);
         }
         return self.procedure(true);
     }
@@ -344,6 +346,14 @@ public class Parser {
             children: List<Node> = List<Node>();
             children.add(give typeNode);
             return Node(NodeKind.Borrow, token.start, end, TokenKind.Ampersand, give children);
+        }
+        if self.current().kind == TokenKind.DotDot && self.peek(1).kind == TokenKind.Dot {
+            start: int = self.current().start;
+            self.advance();
+            end: int = self.current().end;
+            self.advance();
+            children: List<Node> = List<Node>();
+            return Node(NodeKind.Variadic, start, end, TokenKind.DotDot, give children);
         }
         return self.typeName();
     }
@@ -482,6 +492,18 @@ public class Parser {
         end: int = self.current().end;
         self.expect(TokenKind.RightBrace, "`}`");
         return Node(NodeKind.Interface, start, end, TokenKind.Interface, give children);
+    }
+
+    /* `native proc name(...);`: a signature of something the runtime does. */
+    proc nativeDeclaration(&self) -> Node throws Diagnostic {
+        token: Token = self.current();
+        start: int = token.start;
+        self.expect(TokenKind.Native, "`native`");
+        signature: Node = self.procedure(false);
+        end: int = signature.end;
+        children: List<Node> = List<Node>();
+        children.add(give signature);
+        return Node(NodeKind.Native, start, end, TokenKind.Native, give children);
     }
 
     /* One member of a class, wrapped in an Annotated node after `@...` and in a Public node after `public`. */
